@@ -1,0 +1,601 @@
+const state = {
+  user: null,
+  permissions: {},
+  users: [],
+  members: [],
+  rules: [],
+  machines: [],
+  topics: [],
+  shifts: [],
+  currentPage: "members",
+  shiftMonth: new Date(),
+  selectedShiftDate: new Date().toISOString().slice(0, 10),
+};
+
+const pages = [
+  ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队对话都在这里。"],
+  ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
+  ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
+  ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
+  ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
+  ["thanks", "♥", "Thank You", "每周感谢帮助过自己的团队成员。"],
+  ["links", "↗", "常用链接", "归档团队常用系统、文档和工具入口。"],
+  ["users", "⚙", "用户管理", "管理员维护账号和权限。"],
+];
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+function escapeHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[char]);
+}
+
+function iso(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function mondayOf(value) {
+  const d = new Date(value);
+  const day = d.getDay() || 7;
+  d.setDate(d.getDate() - day + 1);
+  return iso(d);
+}
+
+function monthStart(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function monthEnd(date) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
+}
+
+function setDefaultDates() {
+  const today = iso(new Date());
+  $("#fromDate").value = $("#fromDate").value || mondayOf(today);
+  $("#toDate").value = $("#toDate").value || today;
+  $$('input[type="date"]').forEach((input) => {
+    if (!input.value && input.name !== "effective_to") input.value = today;
+  });
+  const shiftDate = $('input[name="shift_date"]');
+  if (shiftDate) shiftDate.value = state.selectedShiftDate;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function formData(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  Object.keys(data).forEach((key) => {
+    if (data[key] === "" || data[key] instanceof File) delete data[key];
+  });
+  return data;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.size) return resolve("");
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function toast(message) {
+  const el = $("#toast");
+  el.textContent = message;
+  el.classList.remove("hidden");
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer = setTimeout(() => el.classList.add("hidden"), 2200);
+}
+
+function periodQuery() {
+  return `from=${encodeURIComponent($("#fromDate").value)}&to=${encodeURIComponent($("#toDate").value)}`;
+}
+
+function shiftPeriodQuery() {
+  const start = monthStart(state.shiftMonth);
+  const end = monthEnd(state.shiftMonth);
+  return `from=${iso(start)}&to=${iso(end)}`;
+}
+
+function applyAuthView() {
+  $("#loginView").classList.toggle("hidden", Boolean(state.user));
+  $("#appView").classList.toggle("hidden", !state.user);
+  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${state.user.role === "admin" ? "管理员" : "普通用户"}` : "未登录";
+  $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !state.permissions.isAdmin));
+  renderNav();
+}
+
+function renderNav() {
+  $("#nav").innerHTML = pages
+    .filter(([id]) => id !== "users" || state.permissions.isAdmin)
+    .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
+    .join("");
+}
+
+function switchPage(id) {
+  state.currentPage = id;
+  $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
+  const meta = pages.find((page) => page[0] === id);
+  $("#pageTitle").textContent = meta?.[2] || "团队成员";
+  $("#pageDesc").textContent = meta?.[3] || "";
+  renderNav();
+}
+
+async function loadReferenceData() {
+  const [members, rules, machines, topics] = await Promise.all([
+    api("/api/members"),
+    api("/api/rules"),
+    api("/api/machines"),
+    api("/api/meeting-topics"),
+  ]);
+  state.members = members.members;
+  state.rules = rules.rules;
+  state.machines = machines.machines;
+  state.topics = topics.types;
+  if (state.permissions.isAdmin) {
+    state.users = (await api("/api/users")).users;
+  } else {
+    state.users = state.members
+      .filter((member) => member.user_id)
+      .map((member) => ({ id: member.user_id, display_name: member.linked_user || member.name, active: 1, role: "user" }));
+  }
+  populateSelects();
+}
+
+function populateSelects() {
+  const activeUsers = state.users.filter((user) => user.active !== 0);
+  const userOptions = activeUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
+  const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
+  const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
+  const thankOptions = activeUsers.filter((user) => user.id !== state.user?.id).map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
+
+  $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
+  $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
+  $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
+  $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
+  $$("[data-thank-users]").forEach((select) => { select.innerHTML = thankOptions; });
+  $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
+}
+
+function table(headers, rows) {
+  if (!rows.length) return "<p>暂无数据</p>";
+  return `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+function renderRank(items, field, unit) {
+  if (!items.length) return `<p>暂无数据</p>`;
+  return items.map((item, index) => {
+    const name = item.display_name || item.machine_name || "未命名";
+    return `<div class="rank-row"><span class="rank-no">${index + 1}</span><strong>${escapeHtml(name)}</strong><span>${Number(item[field] || 0)} ${unit}</span></div>`;
+  }).join("");
+}
+
+async function loadDashboard() {
+  const [scores, thanks, shifts, meetings] = await Promise.all([
+    api(`/api/dashboards/red-black?${periodQuery()}`),
+    api(`/api/dashboards/thank-you?${periodQuery()}`),
+    api(`/api/dashboards/shifts?${periodQuery()}`),
+    api(`/api/meetings?${periodQuery()}`),
+  ]);
+  $("#metricScore").textContent = scores.totals.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  $("#metricThanks").textContent = thanks.stars.reduce((sum, item) => sum + Number(item.thanks || 0), 0);
+  $("#metricHours").textContent = shifts.by_user.reduce((sum, item) => sum + Number(item.hours || 0), 0);
+  $("#metricMeetings").textContent = meetings.meetings.filter((meeting) => meeting.status === "open").length;
+  $("#scoreRank").innerHTML = renderRank(scores.totals, "total", "分");
+  $("#thanksRank").innerHTML = renderRank(thanks.stars, "thanks", "次");
+}
+
+async function loadUsers() {
+  if (!state.permissions.isAdmin) return;
+  const data = await api("/api/users");
+  state.users = data.users;
+  $("#userList").innerHTML = table(["账号", "姓名", "角色", "状态"], data.users.map((user) => [
+    user.username,
+    user.display_name,
+    user.role === "admin" ? "管理员" : "普通用户",
+    user.active ? "启用" : "停用",
+  ]));
+  populateSelects();
+}
+
+async function loadRulesAndScores() {
+  state.rules = (await api("/api/rules")).rules;
+  const scores = (await api(`/api/scores?${periodQuery()}`)).scores;
+  $("#ruleList").innerHTML = state.rules.length ? state.rules.map((rule) => `
+    <div class="item">
+      <span class="pill ${rule.kind === "red" ? "red" : "black"}">${rule.kind === "red" ? "红榜" : "黑榜"}</span>
+      <h3>${escapeHtml(rule.title)}</h3>
+      <p>${escapeHtml(rule.content)}</p>
+      <p>${rule.effective_from || "不限"} 至 ${rule.effective_to || "不限"}</p>
+    </div>`).join("") : "<p>暂无规则</p>";
+  $("#scoreList").innerHTML = table(["日期", "成员", "类型", "积分", "规则", "依据"], scores.map((score) => [
+    score.score_date,
+    score.display_name,
+    score.kind === "red" ? "红榜" : "黑榜",
+    score.points,
+    score.rule_title || "-",
+    score.reason,
+  ]));
+  populateSelects();
+}
+
+async function loadMembers() {
+  state.members = (await api("/api/members")).members;
+  $("#memberList").innerHTML = state.members.map((member) => {
+    const posts = [...(member.posts || [])].reverse();
+    const canEdit = state.permissions.isAdmin || member.user_id === state.user?.id;
+    return `
+      <article class="member-card">
+        <section class="member-profile">
+          <div class="member-head">
+            ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
+            <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
+          </div>
+          <div class="tags">${(member.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+          <p><strong>职责：</strong>${escapeHtml(member.responsibilities || "未填写")}</p>
+          <p>${escapeHtml(member.comment || "")}</p>
+          ${canEdit ? `<form class="avatar-tools avatar-form" data-member-id="${member.id}"><input name="avatar_url" placeholder="头像 URL"><input name="avatar_file" type="file" accept="image/*"><button>更换头像</button></form>` : ""}
+        </section>
+        <section class="chat-panel">
+          <div class="chat-title"><strong>成员对话</strong><span>评论 / 吐槽广场</span></div>
+          <div class="chat-list" data-chat-list>
+            ${posts.length ? posts.map((post) => `<div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}"><span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span><p>${escapeHtml(post.content)}</p><small>${escapeHtml(post.display_name)} · ${post.created_at}</small></div>`).join("") : "<p>还没有对话，来开个头。</p>"}
+          </div>
+          <form class="chat-form post-form" data-member-id="${member.id}">
+            <select name="kind"><option value="comment">评论</option><option value="roast">吐槽</option></select>
+            <input name="content" placeholder="输入后发布，消息会出现在下方聊天流" required />
+            <button>发送</button>
+          </form>
+        </section>
+      </article>`;
+  }).join("");
+  $$("[data-chat-list]").forEach((el) => { el.scrollTop = el.scrollHeight; });
+}
+
+function renderTopicSelectors(meetingId) {
+  const firstTopic = state.topics[0];
+  const options = firstTopic?.options || [];
+  return `
+    <form class="form-grid compact topic-item-form" data-meeting-id="${meetingId}">
+      <select name="type_id" data-meeting-topic-select required>${state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("")}</select>
+      <select name="option_id" data-meeting-option-select><option value="">自定义议题</option>${options.map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}</select>
+      <input name="title" placeholder="自定义标题，选择预设时可留空" />
+      <select name="owner_id"><option value="">负责人</option>${state.users.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("")}</select>
+      <input name="due_date" type="date" />
+      <textarea name="detail" placeholder="议题说明、背景、结论或行动要求"></textarea>
+      <button>添加到本次例会</button>
+    </form>`;
+}
+
+function renderTopicBoard(meeting) {
+  return `<div class="topic-board">${state.topics.map((topic) => {
+    const items = meeting.items.filter((item) => Number(item.type_id) === Number(topic.id) || item.section === topic.name);
+    return `<section class="topic-column">
+      <h4><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</h4>
+      ${items.length ? items.map((item) => `<div class="topic-item"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.detail || "")}</p><small>${escapeHtml(item.owner_name || "未分配")} · ${item.due_date || "无截止"}</small></div>`).join("") : "<p>暂无议题</p>"}
+    </section>`;
+  }).join("")}</div>`;
+}
+
+function renderAttendance(meeting) {
+  const map = new Map((meeting.attendance || []).map((item) => [Number(item.user_id), item]));
+  if (!state.users.length) return "<p>暂无成员账号</p>";
+  return `<div class="attendance-grid">${state.users.filter((user) => user.active !== 0).map((user) => {
+    const record = map.get(Number(user.id)) || {};
+    const status = record.status || "present";
+    return `<form class="attendance-row" data-meeting-id="${meeting.id}">
+      <strong>${escapeHtml(user.display_name)}</strong>
+      <input type="hidden" name="user_id" value="${user.id}">
+      <select name="status">
+        <option value="present" ${status === "present" ? "selected" : ""}>出席</option>
+        <option value="leave" ${status === "leave" ? "selected" : ""}>请假</option>
+        <option value="absent" ${status === "absent" ? "selected" : ""}>缺席</option>
+        <option value="late" ${status === "late" ? "selected" : ""}>迟到</option>
+      </select>
+      <label><input type="checkbox" name="donation_required" ${record.donation_required ? "checked" : ""}>乐捐</label>
+      <label><input type="checkbox" name="donation_done" ${record.donation_done ? "checked" : ""}>完成</label>
+      <input name="note" value="${escapeHtml(record.note || "")}" placeholder="备注">
+      <button class="admin-only">保存</button>
+    </form>`;
+  }).join("")}</div>`;
+}
+
+async function loadMeetings() {
+  const data = await api(`/api/meetings?${periodQuery()}`);
+  $("#topicTypeList").innerHTML = state.topics.map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)} · ${topic.options.length} 项</span>`).join("");
+  $("#meetingList").innerHTML = data.meetings.length ? data.meetings.map((meeting) => `
+    <article class="meeting-card">
+      <div class="meeting-meta">
+        <div><h3>${escapeHtml(meeting.title)}</h3><p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "")}</p></div>
+        <span class="pill">${escapeHtml(meeting.creator || "")}</span>
+      </div>
+      ${renderTopicBoard(meeting)}
+      <div class="meeting-actions">
+        <section class="panel admin-only">
+          <h2>添加议题</h2>
+          ${renderTopicSelectors(meeting.id)}
+        </section>
+        <section class="panel">
+          <h2>参会签到</h2>
+          ${state.permissions.isAdmin ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
+        </section>
+      </div>
+    </article>`).join("") : "<section class='panel'><p>暂无会议</p></section>";
+  populateSelects();
+}
+
+function renderAttendanceReadonly(meeting) {
+  if (!meeting.attendance || !meeting.attendance.length) return "<p>管理员尚未签到</p>";
+  const statusMap = { present: "出席", leave: "请假", absent: "缺席", late: "迟到" };
+  return `<div class="item-list">${meeting.attendance.map((item) => `<div class="item"><strong>${escapeHtml(item.display_name)}</strong><p>${statusMap[item.status] || item.status} ${item.donation_required ? " · 需乐捐" : ""} ${item.donation_done ? " · 已完成" : ""}</p></div>`).join("")}</div>`;
+}
+
+async function loadLinks() {
+  const data = await api("/api/links");
+  $("#linkList").innerHTML = data.links.length ? data.links.map((link) => `
+    <article class="link-card">
+      <span class="pill">${escapeHtml(link.category)}</span>
+      <h3>${escapeHtml(link.title)}</h3>
+      <a href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>
+      <p>${escapeHtml(link.description || "")}</p>
+    </article>`).join("") : "<p>暂无链接</p>";
+}
+
+function renderCalendar() {
+  const month = state.shiftMonth;
+  const start = monthStart(month);
+  const end = monthEnd(month);
+  const gridStart = new Date(start);
+  gridStart.setDate(start.getDate() - (start.getDay() || 7) + 1);
+  const byDate = {};
+  state.shifts.forEach((shift) => {
+    byDate[shift.shift_date] ||= [];
+    byDate[shift.shift_date].push(shift);
+  });
+  const title = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
+  $("#shiftMonthTitle").textContent = title;
+  $("#shiftMonthTitle2").textContent = title;
+  $("#selectedShiftDateTitle").textContent = `编辑排班 · ${state.selectedShiftDate}`;
+  $('input[name="shift_date"]').value = state.selectedShiftDate;
+
+  const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
+  const cells = [];
+  for (let i = 0; i < 42; i += 1) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    const date = iso(d);
+    const shifts = byDate[date] || [];
+    cells.push(`<div class="day-cell ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""}" data-date="${date}">
+      <div class="day-no">${d.getDate()}</div>
+      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""}">${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</div>`).join("")}
+    </div>`);
+  }
+  $("#shiftCalendar").innerHTML = weekdays + cells.join("");
+}
+
+async function loadShifts() {
+  const [list, dashboard] = await Promise.all([
+    api(`/api/shifts?${shiftPeriodQuery()}`),
+    api(`/api/dashboards/shifts?${shiftPeriodQuery()}`),
+  ]);
+  state.shifts = list.shifts;
+  $("#shiftStats").innerHTML = renderRank(dashboard.by_user, "hours", "小时");
+  renderCalendar();
+}
+
+async function loadThanks() {
+  const [votes, dashboard] = await Promise.all([
+    api(`/api/thank-you?${periodQuery()}`),
+    api(`/api/dashboards/thank-you?${periodQuery()}`),
+  ]);
+  $("#thankStars").innerHTML = renderRank(dashboard.stars, "thanks", "次");
+  $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
+    <div class="item">
+      <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
+      <p>${escapeHtml(vote.evidence)}</p>
+      <p>${vote.week_start} · ${vote.created_at}</p>
+    </div>`).join("") : "<p>暂无感谢记录</p>";
+}
+
+async function refreshAll() {
+  if (!state.user) return;
+  await loadReferenceData();
+  await Promise.all([
+    loadDashboard(),
+    loadUsers(),
+    loadRulesAndScores(),
+    loadMembers(),
+    loadMeetings(),
+    loadLinks(),
+    loadShifts(),
+    loadThanks(),
+  ]);
+  applyAuthView();
+}
+
+function bindForm(id, handler) {
+  const form = $(id);
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await handler(formData(form), form);
+      form.reset();
+      setDefaultDates();
+      await refreshAll();
+      toast("已保存");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+}
+
+async function submitMemberForm(form) {
+  const data = formData(form);
+  const file = form.elements.avatar_file?.files?.[0];
+  const avatar = await fileToDataUrl(file);
+  if (avatar) data.avatar_url = avatar;
+  await api("/api/members", { method: "POST", body: JSON.stringify(data) });
+}
+
+async function submitAvatarForm(form) {
+  const data = formData(form);
+  const file = form.elements.avatar_file?.files?.[0];
+  const avatar = await fileToDataUrl(file);
+  if (avatar) data.avatar_url = avatar;
+  if (!data.avatar_url) throw new Error("请选择图片或输入头像 URL");
+  await api(`/api/members/${form.dataset.memberId}`, { method: "PATCH", body: JSON.stringify({ avatar_url: data.avatar_url }) });
+}
+
+function updateOptionSelect(typeSelect) {
+  const form = typeSelect.closest("form");
+  const optionSelect = form?.querySelector("[data-meeting-option-select]");
+  if (!optionSelect) return;
+  const topic = state.topics.find((item) => Number(item.id) === Number(typeSelect.value));
+  optionSelect.innerHTML = `<option value="">自定义议题</option>${(topic?.options || []).map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}`;
+}
+
+function moveMonth(delta) {
+  state.shiftMonth = new Date(state.shiftMonth.getFullYear(), state.shiftMonth.getMonth() + delta, 1);
+  loadShifts().catch((error) => toast(error.message));
+}
+
+function bindEvents() {
+  $("#loginForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api("/api/login", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+      state.user = data.user;
+      state.permissions = data.permissions;
+      applyAuthView();
+      await refreshAll();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  $("#logoutBtn").addEventListener("click", async () => {
+    await api("/api/logout", { method: "POST", body: "{}" });
+    state.user = null;
+    state.permissions = {};
+    applyAuthView();
+  });
+
+  $("#nav").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-page]");
+    if (button) switchPage(button.dataset.page);
+  });
+
+  $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#prevMonthBtn").addEventListener("click", () => moveMonth(-1));
+  $("#nextMonthBtn").addEventListener("click", () => moveMonth(1));
+  $("#prevMonthBtn2").addEventListener("click", () => moveMonth(-1));
+  $("#nextMonthBtn2").addEventListener("click", () => moveMonth(1));
+
+  bindForm("#userForm", (data) => api("/api/users", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#ruleForm", (data) => api("/api/rules", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#scoreForm", (data) => api("/api/scores", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#meetingForm", (data) => api("/api/meetings", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#topicOptionForm", (data) => api("/api/meeting-topic-options", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#machineForm", (data) => api("/api/machines", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#thankForm", (data) => api("/api/thank-you", { method: "POST", body: JSON.stringify(data) }));
+
+  $("#memberForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await submitMemberForm(event.currentTarget);
+      event.currentTarget.reset();
+      await refreshAll();
+      toast("成员已保存");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  document.body.addEventListener("click", (event) => {
+    const cell = event.target.closest(".day-cell");
+    if (cell) {
+      state.selectedShiftDate = cell.dataset.date;
+      renderCalendar();
+    }
+  });
+
+  document.body.addEventListener("change", (event) => {
+    if (event.target.matches("[data-meeting-topic-select]")) updateOptionSelect(event.target);
+    if (event.target.matches('select[name="status"]')) {
+      const form = event.target.closest(".attendance-row");
+      const required = form?.elements.donation_required;
+      if (required) required.checked = event.target.value === "late";
+    }
+  });
+
+  document.body.addEventListener("submit", async (event) => {
+    const postForm = event.target.closest(".post-form");
+    const avatarForm = event.target.closest(".avatar-form");
+    const topicForm = event.target.closest(".topic-item-form");
+    const attendanceForm = event.target.closest(".attendance-row");
+    if (!postForm && !avatarForm && !topicForm && !attendanceForm) return;
+    event.preventDefault();
+    try {
+      if (postForm) {
+        await api(`/api/members/${postForm.dataset.memberId}/posts`, { method: "POST", body: JSON.stringify(formData(postForm)) });
+      }
+      if (avatarForm) {
+        await submitAvatarForm(avatarForm);
+      }
+      if (topicForm) {
+        await api(`/api/meetings/${topicForm.dataset.meetingId}/items`, { method: "POST", body: JSON.stringify(formData(topicForm)) });
+      }
+      if (attendanceForm) {
+        const data = formData(attendanceForm);
+        data.donation_required = attendanceForm.elements.donation_required.checked;
+        data.donation_done = attendanceForm.elements.donation_done.checked;
+        await api(`/api/meetings/${attendanceForm.dataset.meetingId}/attendance`, { method: "POST", body: JSON.stringify(data) });
+      }
+      event.target.reset();
+      setDefaultDates();
+      await refreshAll();
+      toast("已更新");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+}
+
+async function boot() {
+  setDefaultDates();
+  bindEvents();
+  try {
+    const data = await api("/api/me");
+    state.user = data.user;
+    state.permissions = data.permissions;
+    applyAuthView();
+    switchPage("members");
+    if (state.user) await refreshAll();
+  } catch {
+    applyAuthView();
+  }
+}
+
+boot();

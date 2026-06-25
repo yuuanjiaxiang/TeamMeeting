@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>技术项目团队周例会</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">T</div>
+          <div>
+            <strong>Team Loop</strong>
+            <span>技术项目团队</span>
+          </div>
+        </div>
+        <nav id="nav"></nav>
+        <div class="user-box">
+          <div id="currentUser">未登录</div>
+          <button id="logoutBtn" class="ghost">退出登录</button>
+        </div>
+      </aside>
+
+      <main>
+        <section id="loginView" class="login-view">
+          <div class="login-panel">
+            <div class="login-logo">T</div>
+            <h1>团队协同周例会</h1>
+            <p>成员、会议、排班、积分和感谢，都收在一个清爽的工作台里。</p>
+            <form id="loginForm" class="form-grid">
+              <label>账号<input name="username" value="admin" autocomplete="username" /></label>
+              <label>密码<input name="password" value="admin123" type="password" autocomplete="current-password" /></label>
+              <button type="submit">登录</button>
+            </form>
+            <small>默认账号：admin/admin123，user/user123</small>
+          </div>
+        </section>
+
+        <section id="appView" class="content hidden">
+          <header class="topbar">
+            <div>
+              <h1 id="pageTitle">团队成员</h1>
+              <p id="pageDesc">先看人，再看事。成员档案、职责和团队对话都在这里。</p>
+            </div>
+            <div class="toolbar">
+              <input id="fromDate" type="date" />
+              <input id="toDate" type="date" />
+              <button id="refreshBtn" class="secondary">刷新</button>
+            </div>
+          </header>
+
+          <div id="toast" class="toast hidden"></div>
+
+          <section id="members" class="page active">
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>成员档案</h2>
+                  <p>管理员维护成员资料；头像支持图片 URL，也支持本地图片转为自定义头像。</p>
+                </div>
+              </div>
+              <form id="memberForm" class="form-grid compact">
+                <select name="user_id" data-users-optional></select>
+                <input name="name" placeholder="姓名" required />
+                <input name="avatar_url" placeholder="头像 URL，可留空" />
+                <input name="avatar_file" type="file" accept="image/*" />
+                <input name="title" placeholder="岗位/角色" />
+                <input name="tags" placeholder="标签，用逗号分隔" />
+                <textarea name="responsibilities" placeholder="职责范围"></textarea>
+                <textarea name="comment" placeholder="成员介绍"></textarea>
+                <button>保存档案</button>
+              </form>
+            </section>
+            <section class="member-layout" id="memberList"></section>
+          </section>
+
+          <section id="dashboard" class="page">
+            <div class="metrics">
+              <div><span>红黑榜净积分</span><strong id="metricScore">0</strong></div>
+              <div><span>Thank You 次数</span><strong id="metricThanks">0</strong></div>
+              <div><span>已排工时</span><strong id="metricHours">0</strong></div>
+              <div><span>开放例会</span><strong id="metricMeetings">0</strong></div>
+            </div>
+            <div class="split">
+              <section class="panel">
+                <h2>红黑榜排行</h2>
+                <div id="scoreRank" class="rank-list"></div>
+              </section>
+              <section class="panel">
+                <h2>Thank You 之星</h2>
+                <div id="thanksRank" class="rank-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="meetings" class="page">
+            <section class="panel">
+              <div class="panel-title">
+                <div>
+                  <h2>例会议题沙盘</h2>
+                  <p>每次会议按议题类型添加事项，支持预设选项、负责人和截止日期。</p>
+                </div>
+              </div>
+              <form id="meetingForm" class="form-row">
+                <input name="meeting_date" type="date" />
+                <input name="title" placeholder="会议标题" required />
+                <input name="summary" placeholder="会议摘要" />
+                <button>创建会议</button>
+              </form>
+            </section>
+
+            <div class="split admin-only">
+              <section class="panel">
+                <h2>议题类型</h2>
+                <form id="topicTypeForm" class="form-row slim">
+                  <input name="name" placeholder="例如：质量风险" required />
+                  <input name="color" type="color" value="#3370ff" />
+                  <button>新增类型</button>
+                </form>
+                <div id="topicTypeList" class="chip-list"></div>
+              </section>
+              <section class="panel">
+                <h2>议题选项</h2>
+                <form id="topicOptionForm" class="form-grid compact">
+                  <select name="type_id" data-topic-types required></select>
+                  <input name="title" placeholder="例如：本周阻塞问题" required />
+                  <textarea name="default_detail" placeholder="默认说明，可留空"></textarea>
+                  <button>新增选项</button>
+                </form>
+              </section>
+            </div>
+
+            <section id="meetingList" class="meeting-board"></section>
+          </section>
+
+          <section id="shifts" class="page">
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>月度排班</h2>
+                  <p>管理员在月历上选择日期，直接添加白班/夜班人员。</p>
+                </div>
+                <div class="month-switch">
+                  <button id="prevMonthBtn" class="secondary" type="button">上月</button>
+                  <strong id="shiftMonthTitle"></strong>
+                  <button id="nextMonthBtn" class="secondary" type="button">下月</button>
+                </div>
+              </div>
+              <form id="machineForm" class="form-row slim">
+                <input name="name" placeholder="机台名称" required />
+                <input name="description" placeholder="说明" />
+                <button>新增机台</button>
+              </form>
+            </section>
+
+            <section class="shift-layout">
+              <div class="panel calendar-panel">
+                <div class="calendar-head">
+                  <button id="prevMonthBtn2" class="secondary" type="button">上月</button>
+                  <h2 id="shiftMonthTitle2"></h2>
+                  <button id="nextMonthBtn2" class="secondary" type="button">下月</button>
+                </div>
+                <div id="shiftCalendar" class="calendar"></div>
+              </div>
+
+              <aside class="panel schedule-editor">
+                <h2 id="selectedShiftDateTitle">选择日期</h2>
+                <form id="shiftForm" class="form-grid">
+                  <select name="machine_id" data-machines required></select>
+                  <select name="user_id" data-users required></select>
+                  <select name="shift_type"><option value="day">白班</option><option value="night">夜班</option></select>
+                  <input name="shift_date" type="date" required />
+                  <input name="hours" type="number" step="0.5" value="12" />
+                  <input name="note" placeholder="备注" />
+                  <button class="admin-only">添加排班</button>
+                </form>
+                <h3>工时统计</h3>
+                <div id="shiftStats" class="rank-list"></div>
+              </aside>
+            </section>
+          </section>
+
+          <section id="rules" class="page">
+            <section class="panel admin-only">
+              <h2>发布红黑榜规则</h2>
+              <form id="ruleForm" class="form-grid compact">
+                <input name="title" placeholder="规则标题" required />
+                <select name="kind"><option value="red">红榜</option><option value="black">黑榜</option></select>
+                <input name="effective_from" type="date" />
+                <input name="effective_to" type="date" />
+                <textarea name="content" placeholder="规则说明、适用场景、加减分口径" required></textarea>
+                <button>发布规则</button>
+              </form>
+            </section>
+            <div class="split">
+              <section class="panel">
+                <h2>规则列表</h2>
+                <div id="ruleList" class="item-list"></div>
+              </section>
+              <section class="panel admin-only">
+                <h2>记录个人积分</h2>
+                <form id="scoreForm" class="form-grid compact">
+                  <select name="user_id" data-users required></select>
+                  <select name="rule_id" data-rules></select>
+                  <select name="kind"><option value="red">红榜加分</option><option value="black">黑榜扣分</option></select>
+                  <input name="points" type="number" min="1" placeholder="分值" required />
+                  <input name="score_date" type="date" />
+                  <textarea name="reason" placeholder="事实依据" required></textarea>
+                  <button>保存积分</button>
+                </form>
+              </section>
+            </div>
+            <section class="panel">
+              <h2>积分明细</h2>
+              <div id="scoreList" class="table"></div>
+            </section>
+          </section>
+
+          <section id="thanks" class="page">
+            <section class="panel">
+              <h2>Thank You</h2>
+              <form id="thankForm" class="form-grid compact">
+                <select name="receiver_id" data-thank-users required></select>
+                <input name="week_start" type="date" />
+                <textarea name="evidence" placeholder="写下对方帮助你的具体事实。本周最多感谢 3 人。" required></textarea>
+                <button>送出 Thank You</button>
+              </form>
+            </section>
+            <div class="split">
+              <section class="panel">
+                <h2>Thank You 之星</h2>
+                <div id="thankStars" class="rank-list"></div>
+              </section>
+              <section class="panel">
+                <h2>感谢墙</h2>
+                <div id="thankList" class="item-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="links" class="page">
+            <section class="panel admin-only">
+              <h2>归档常用链接</h2>
+              <form id="linkForm" class="form-row">
+                <input name="title" placeholder="名称" required />
+                <input name="url" placeholder="https://..." required />
+                <input name="category" placeholder="分类" />
+                <input name="description" placeholder="说明" />
+                <button>保存链接</button>
+              </form>
+            </section>
+            <section class="panel">
+              <h2>链接库</h2>
+              <div id="linkList" class="link-grid"></div>
+            </section>
+          </section>
+
+          <section id="users" class="page">
+            <section class="panel admin-only">
+              <h2>用户管理</h2>
+              <form id="userForm" class="form-row">
+                <input name="username" placeholder="账号" required />
+                <input name="display_name" placeholder="姓名" required />
+                <select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+                <input name="password" placeholder="初始密码，默认 123456" />
+                <button>新增用户</button>
+              </form>
+              <div id="userList" class="table"></div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

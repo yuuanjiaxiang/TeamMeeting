@@ -1,0 +1,1076 @@
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+import argparse
+import datetime as dt
+import hashlib
+import hmac
+import json
+import mimetypes
+import os
+import secrets
+import sqlite3
+import uuid
+
+
+ROOT = Path(__file__).resolve().parent
+STATIC_DIR = ROOT / "static"
+DATA_DIR = ROOT / "data"
+DB_PATH = DATA_DIR / "weekly_team.db"
+SESSIONS = {}
+
+
+def now_iso():
+    return dt.datetime.now().replace(microsecond=0).isoformat()
+
+
+def today_iso():
+    return dt.date.today().isoformat()
+
+
+def week_start(value=None):
+    if value:
+        date = dt.date.fromisoformat(value)
+    else:
+        date = dt.date.today()
+    return (date - dt.timedelta(days=date.weekday())).isoformat()
+
+
+def connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def make_hash(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000)
+    return salt, hashed.hex()
+
+
+def verify_password(password, salt, password_hash):
+    _, hashed = make_hash(password, salt)
+    return hmac.compare_digest(hashed, password_hash)
+
+
+def row_to_dict(row):
+    return dict(row) if row else None
+
+
+def rows_to_list(rows):
+    return [dict(row) for row in rows]
+
+
+def read_json(handler):
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length == 0:
+        return {}
+    raw = handler.rfile.read(length).decode("utf-8")
+    return json.loads(raw or "{}")
+
+
+def parse_cookies(header):
+    cookies = {}
+    if not header:
+        return cookies
+    for part in header.split(";"):
+        if "=" in part:
+            key, value = part.strip().split("=", 1)
+            cookies[key] = value
+    return cookies
+
+
+def ensure_column(conn, table, column, definition):
+    columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def seed_meeting_topics(conn):
+    count = conn.execute("SELECT COUNT(*) FROM meeting_topic_types").fetchone()[0]
+    if count:
+        return
+    defaults = [
+        ("进度同步", "#3370ff", ["本周完成", "下周计划", "里程碑风险"]),
+        ("问题风险", "#f54a45", ["现场阻塞", "资源协调", "质量风险"]),
+        ("技术复盘", "#00b578", ["故障案例", "经验沉淀", "标准优化"]),
+        ("行动项", "#ff8f1f", ["待办分配", "截止确认", "关闭验收"]),
+    ]
+    for index, (name, color, options) in enumerate(defaults, start=1):
+        cursor = conn.execute(
+            "INSERT INTO meeting_topic_types(name, color, sort_order, active) VALUES(?,?,?,1)",
+            (name, color, index),
+        )
+        type_id = cursor.lastrowid
+        for option_index, title in enumerate(options, start=1):
+            conn.execute(
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, sort_order, active) VALUES(?,?,?,?,1)",
+                (type_id, title, "", option_index),
+            )
+
+
+def init_db():
+    DATA_DIR.mkdir(exist_ok=True)
+    with connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                name TEXT NOT NULL,
+                avatar_url TEXT,
+                title TEXT,
+                responsibilities TEXT,
+                tags TEXT NOT NULL DEFAULT '[]',
+                comment TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS member_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                kind TEXT NOT NULL CHECK(kind IN ('comment', 'roast')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS red_black_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('red', 'black')),
+                content TEXT NOT NULL,
+                effective_from TEXT,
+                effective_to TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS red_black_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                rule_id INTEGER REFERENCES red_black_rules(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('red', 'black')),
+                points INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                score_date TEXT NOT NULL,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS meetings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_date TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                section TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT,
+                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'todo',
+                due_date TEXT,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_topic_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color TEXT NOT NULL DEFAULT '#3370ff',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_topic_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type_id INTEGER NOT NULL REFERENCES meeting_topic_types(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                default_detail TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                status TEXT NOT NULL CHECK(status IN ('present', 'leave', 'absent', 'late')),
+                donation_required INTEGER NOT NULL DEFAULT 0,
+                donation_done INTEGER NOT NULL DEFAULT 0,
+                note TEXT,
+                updated_by INTEGER NOT NULL REFERENCES users(id),
+                updated_at TEXT NOT NULL,
+                UNIQUE(meeting_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '通用',
+                description TEXT,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS machines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS shifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                machine_id INTEGER NOT NULL REFERENCES machines(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                shift_type TEXT NOT NULL CHECK(shift_type IN ('day', 'night')),
+                shift_date TEXT NOT NULL,
+                hours REAL NOT NULL DEFAULT 12,
+                note TEXT,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS thank_you_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voter_id INTEGER NOT NULL REFERENCES users(id),
+                receiver_id INTEGER NOT NULL REFERENCES users(id),
+                week_start TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(voter_id, receiver_id, week_start)
+            );
+            """
+        )
+        ensure_column(conn, "meeting_items", "type_id", "INTEGER")
+        ensure_column(conn, "meeting_items", "option_id", "INTEGER")
+        seed_meeting_topics(conn)
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count == 0:
+            admin_salt, admin_hash = make_hash("admin123")
+            user_salt, user_hash = make_hash("user123")
+            conn.execute(
+                "INSERT INTO users(username, salt, password_hash, display_name, role, created_at) VALUES(?,?,?,?,?,?)",
+                ("admin", admin_salt, admin_hash, "管理员", "admin", now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO users(username, salt, password_hash, display_name, role, created_at) VALUES(?,?,?,?,?,?)",
+                ("user", user_salt, user_hash, "普通成员", "user", now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO machines(name, description) VALUES(?, ?)",
+                ("机台 A", "默认示例机台，可在管理员视图中维护"),
+            )
+            conn.execute(
+                "INSERT INTO machines(name, description) VALUES(?, ?)",
+                ("机台 B", "默认示例机台，可在管理员视图中维护"),
+            )
+            conn.execute(
+                "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (1, "管理员", "", "项目负责人", "周例会组织、规则维护、资源协调", json.dumps(["统筹", "规则"], ensure_ascii=False), "负责让团队信息流动起来。", now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (2, "普通成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
+            )
+
+
+class AppError(Exception):
+    def __init__(self, status, message):
+        self.status = status
+        self.message = message
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "WeeklyTeam/1.0"
+
+    def do_GET(self):
+        self.handle_request("GET")
+
+    def do_POST(self):
+        self.handle_request("POST")
+
+    def do_PATCH(self):
+        self.handle_request("PATCH")
+
+    def do_DELETE(self):
+        self.handle_request("DELETE")
+
+    def log_message(self, fmt, *args):
+        print("%s - %s" % (self.address_string(), fmt % args))
+
+    def handle_request(self, method):
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/api/"):
+                result = self.route_api(method, parsed.path, parse_qs(parsed.query))
+                self.send_json(result)
+            else:
+                self.serve_static(parsed.path)
+        except AppError as exc:
+            self.send_json({"error": exc.message}, exc.status)
+        except json.JSONDecodeError:
+            self.send_json({"error": "请求体不是合法 JSON"}, 400)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+
+    def send_json(self, data, status=200, headers=None):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def serve_static(self, path):
+        if path in ("", "/"):
+            file_path = STATIC_DIR / "index.html"
+        else:
+            safe = Path(path.lstrip("/"))
+            file_path = (STATIC_DIR / safe).resolve()
+            if STATIC_DIR.resolve() not in file_path.parents and file_path != STATIC_DIR.resolve():
+                raise AppError(403, "禁止访问该路径")
+        if not file_path.exists() or not file_path.is_file():
+            raise AppError(404, "文件不存在")
+        mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        content = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def current_user(self, required=True):
+        cookies = parse_cookies(self.headers.get("Cookie"))
+        token = cookies.get("weekly_session")
+        user_id = SESSIONS.get(token)
+        if not user_id:
+            if required:
+                raise AppError(401, "请先登录")
+            return None
+        with connect() as conn:
+            user = conn.execute("SELECT id, username, display_name, role, active, created_at FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+        if not user:
+            if token in SESSIONS:
+                del SESSIONS[token]
+            if required:
+                raise AppError(401, "登录状态已失效")
+            return None
+        return dict(user)
+
+    def require_admin(self):
+        user = self.current_user()
+        if user["role"] != "admin":
+            raise AppError(403, "仅管理员可操作")
+        return user
+
+    def route_api(self, method, path, query):
+        if path == "/api/login" and method == "POST":
+            return self.login()
+        if path == "/api/logout" and method == "POST":
+            return self.logout()
+        if path == "/api/me" and method == "GET":
+            user = self.current_user(required=False)
+            return {"user": user, "permissions": permissions_for(user)}
+
+        user = self.current_user()
+        parts = path.strip("/").split("/")
+
+        if path == "/api/users":
+            if method == "GET":
+                return {"users": self.list_users()}
+            if method == "POST":
+                return self.create_user()
+        if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "PATCH":
+            return self.update_user(int(parts[2]))
+
+        if path == "/api/members":
+            if method == "GET":
+                return {"members": self.list_members()}
+            if method == "POST":
+                return self.create_member()
+        if len(parts) == 3 and parts[:2] == ["api", "members"] and method == "PATCH":
+            return self.update_member(int(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "members"] and parts[3] == "posts" and method == "POST":
+            return self.create_member_post(int(parts[2]), user)
+
+        if path == "/api/rules":
+            if method == "GET":
+                return {"rules": self.list_rules(query)}
+            if method == "POST":
+                return self.create_rule()
+
+        if path == "/api/scores":
+            if method == "GET":
+                return {"scores": self.list_scores(query)}
+            if method == "POST":
+                return self.create_score()
+
+        if path == "/api/dashboards/red-black" and method == "GET":
+            return self.red_black_dashboard(query)
+
+        if path == "/api/meetings":
+            if method == "GET":
+                return {"meetings": self.list_meetings(query)}
+            if method == "POST":
+                return self.create_meeting(user)
+        if path == "/api/meeting-topics":
+            if method == "GET":
+                return self.list_meeting_topics()
+        if path == "/api/meeting-topic-types" and method == "POST":
+            return self.create_meeting_topic_type()
+        if path == "/api/meeting-topic-options" and method == "POST":
+            return self.create_meeting_topic_option()
+        if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "items" and method == "POST":
+            return self.create_meeting_item(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "attendance" and method == "POST":
+            return self.upsert_attendance(int(parts[2]))
+
+        if path == "/api/links":
+            if method == "GET":
+                return {"links": self.list_links()}
+            if method == "POST":
+                return self.create_link()
+
+        if path == "/api/machines":
+            if method == "GET":
+                return {"machines": self.list_machines()}
+            if method == "POST":
+                return self.create_machine()
+
+        if path == "/api/shifts":
+            if method == "GET":
+                return {"shifts": self.list_shifts(query)}
+            if method == "POST":
+                return self.create_shift()
+        if path == "/api/dashboards/shifts" and method == "GET":
+            return self.shift_dashboard(query)
+
+        if path == "/api/thank-you":
+            if method == "GET":
+                return {"votes": self.list_thank_you(query)}
+            if method == "POST":
+                return self.create_thank_you(user)
+        if path == "/api/dashboards/thank-you" and method == "GET":
+            return self.thank_you_dashboard(query)
+
+        raise AppError(404, "接口不存在")
+
+    def login(self):
+        data = read_json(self)
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+        with connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
+        if not user or not verify_password(password, user["salt"], user["password_hash"]):
+            raise AppError(401, "账号或密码错误")
+        token = secrets.token_urlsafe(32)
+        SESSIONS[token] = user["id"]
+        safe_user = {key: user[key] for key in ("id", "username", "display_name", "role", "active", "created_at")}
+        return {
+            "user": safe_user,
+            "permissions": permissions_for(safe_user),
+            "message": "登录成功",
+            "_headers": {"Set-Cookie": f"weekly_session={token}; Path=/; HttpOnly; SameSite=Lax"},
+        }
+
+    def logout(self):
+        cookies = parse_cookies(self.headers.get("Cookie"))
+        token = cookies.get("weekly_session")
+        if token in SESSIONS:
+            del SESSIONS[token]
+        return {
+            "message": "已退出",
+            "_headers": {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"},
+        }
+
+    def send_json(self, data, status=200, headers=None):
+        headers = headers or {}
+        extra = data.pop("_headers", {}) if isinstance(data, dict) else {}
+        headers.update(extra)
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def list_users(self):
+        self.require_admin()
+        with connect() as conn:
+            return rows_to_list(conn.execute("SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id").fetchall())
+
+    def create_user(self):
+        self.require_admin()
+        data = read_json(self)
+        salt, password_hash = make_hash(data.get("password") or "123456")
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO users(username, salt, password_hash, display_name, role, active, created_at) VALUES(?,?,?,?,?,?,?)",
+                ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", 1, now_iso()),
+            )
+        return {"message": "用户已创建", "users": self.list_users()}
+
+    def update_user(self, user_id):
+        self.require_admin()
+        data = read_json(self)
+        fields = []
+        values = []
+        for key in ("display_name", "role", "active"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append(data[key])
+        if data.get("password"):
+            salt, password_hash = make_hash(data["password"])
+            fields.extend(["salt=?", "password_hash=?"])
+            values.extend([salt, password_hash])
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        values.append(user_id)
+        with connect() as conn:
+            conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
+        return {"message": "用户已更新", "users": self.list_users()}
+
+    def list_members(self):
+        with connect() as conn:
+            members = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT m.*, u.display_name AS linked_user
+                    FROM members m
+                    LEFT JOIN users u ON u.id = m.user_id
+                    ORDER BY m.id
+                    """
+                ).fetchall()
+            )
+            posts = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT p.*, u.display_name
+                    FROM member_posts p
+                    JOIN users u ON u.id = p.user_id
+                    ORDER BY p.created_at DESC
+                    """
+                ).fetchall()
+            )
+        post_map = {}
+        for post in posts:
+            post_map.setdefault(post["member_id"], []).append(post)
+        for member in members:
+            member["tags"] = json.loads(member["tags"] or "[]")
+            member["posts"] = post_map.get(member["id"], [])
+        return members
+
+    def create_member(self):
+        self.require_admin()
+        data = read_json(self)
+        tags = data.get("tags") or []
+        if isinstance(tags, str):
+            tags = [item.strip() for item in tags.split(",") if item.strip()]
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (data.get("user_id") or None, data.get("name"), data.get("avatar_url") or "", data.get("title") or "", data.get("responsibilities") or "", json.dumps(tags, ensure_ascii=False), data.get("comment") or "", now_iso()),
+            )
+        return {"message": "成员档案已创建", "members": self.list_members()}
+
+    def update_member(self, member_id):
+        user = self.current_user()
+        data = read_json(self)
+        with connect() as conn:
+            member = conn.execute("SELECT * FROM members WHERE id=?", (member_id,)).fetchone()
+            if not member:
+                raise AppError(404, "成员不存在")
+            if user["role"] != "admin" and member["user_id"] != user["id"]:
+                raise AppError(403, "无权修改该成员档案")
+            fields = []
+            values = []
+            allowed = ("name", "avatar_url", "title", "responsibilities", "comment", "user_id")
+            for key in allowed:
+                if key in data:
+                    fields.append(f"{key}=?")
+                    values.append(data[key] or None if key == "user_id" else data[key])
+            if "tags" in data:
+                tags = data.get("tags") or []
+                if isinstance(tags, str):
+                    tags = [item.strip() for item in tags.split(",") if item.strip()]
+                fields.append("tags=?")
+                values.append(json.dumps(tags, ensure_ascii=False))
+            if not fields:
+                raise AppError(400, "没有可更新字段")
+            values.append(member_id)
+            conn.execute(f"UPDATE members SET {', '.join(fields)} WHERE id=?", values)
+        return {"message": "成员档案已更新", "members": self.list_members()}
+
+    def create_member_post(self, member_id, user):
+        data = read_json(self)
+        kind = data.get("kind") if data.get("kind") in ("comment", "roast") else "comment"
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise AppError(400, "内容不能为空")
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO member_posts(member_id, user_id, kind, content, created_at) VALUES(?,?,?,?,?)",
+                (member_id, user["id"], kind, content, now_iso()),
+            )
+        return {"message": "已发布", "members": self.list_members()}
+
+    def list_rules(self, query):
+        clauses = ["1=1"]
+        params = []
+        if query.get("kind"):
+            clauses.append("kind=?")
+            params.append(query["kind"][0])
+        with connect() as conn:
+            return rows_to_list(conn.execute(f"SELECT * FROM red_black_rules WHERE {' AND '.join(clauses)} ORDER BY created_at DESC", params).fetchall())
+
+    def create_rule(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO red_black_rules(title, kind, content, effective_from, effective_to, active, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (data.get("title"), data.get("kind"), data.get("content"), data.get("effective_from") or None, data.get("effective_to") or None, 1, admin["id"], now_iso()),
+            )
+        return {"message": "规则已发布", "rules": self.list_rules({})}
+
+    def list_scores(self, query):
+        where, params = date_filter(query, "s.score_date")
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT s.*, u.display_name, r.title AS rule_title
+                    FROM red_black_scores s
+                    JOIN users u ON u.id = s.user_id
+                    LEFT JOIN red_black_rules r ON r.id = s.rule_id
+                    WHERE {where}
+                    ORDER BY s.score_date DESC, s.created_at DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+
+    def create_score(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        points = abs(int(data.get("points") or 0))
+        if data.get("kind") == "black":
+            points = -points
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO red_black_scores(user_id, rule_id, kind, points, reason, score_date, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (data.get("user_id"), data.get("rule_id") or None, data.get("kind"), points, data.get("reason") or "", data.get("score_date") or today_iso(), admin["id"], now_iso()),
+            )
+        return {"message": "积分已记录", "scores": self.list_scores({})}
+
+    def red_black_dashboard(self, query):
+        where, params = date_filter(query, "s.score_date")
+        with connect() as conn:
+            totals = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.id, u.display_name, COALESCE(SUM(s.points), 0) AS total,
+                           SUM(CASE WHEN s.kind='red' THEN s.points ELSE 0 END) AS red_points,
+                           SUM(CASE WHEN s.kind='black' THEN s.points ELSE 0 END) AS black_points
+                    FROM users u
+                    LEFT JOIN red_black_scores s ON s.user_id = u.id AND {where}
+                    WHERE u.active=1
+                    GROUP BY u.id
+                    ORDER BY total DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+            timeline = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT s.score_date, SUM(s.points) AS total
+                    FROM red_black_scores s
+                    WHERE {where}
+                    GROUP BY s.score_date
+                    ORDER BY s.score_date
+                    """,
+                    params,
+                ).fetchall()
+            )
+        return {"totals": totals, "timeline": timeline}
+
+    def list_meetings(self, query):
+        where, params = date_filter(query, "m.meeting_date")
+        with connect() as conn:
+            meetings = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT m.*, u.display_name AS creator
+                    FROM meetings m
+                    JOIN users u ON u.id = m.created_by
+                    WHERE {where}
+                    ORDER BY m.meeting_date DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+            items = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT i.*, u.display_name AS owner_name,
+                           t.name AS type_name, t.color AS type_color,
+                           o.title AS option_title
+                    FROM meeting_items i
+                    LEFT JOIN users u ON u.id = i.owner_id
+                    LEFT JOIN meeting_topic_types t ON t.id = i.type_id
+                    LEFT JOIN meeting_topic_options o ON o.id = i.option_id
+                    ORDER BY i.created_at
+                    """
+                ).fetchall()
+            )
+            attendance = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT a.*, u.display_name
+                    FROM meeting_attendance a
+                    JOIN users u ON u.id = a.user_id
+                    ORDER BY u.display_name
+                    """
+                ).fetchall()
+            )
+        item_map = {}
+        for item in items:
+            item_map.setdefault(item["meeting_id"], []).append(item)
+        attendance_map = {}
+        for record in attendance:
+            attendance_map.setdefault(record["meeting_id"], []).append(record)
+        for meeting in meetings:
+            meeting["items"] = item_map.get(meeting["id"], [])
+            meeting["attendance"] = attendance_map.get(meeting["id"], [])
+        return meetings
+
+    def create_meeting(self, user):
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
+                (data.get("meeting_date") or today_iso(), data.get("title") or "周例会", data.get("summary") or "", "open", user["id"], now_iso()),
+            )
+        return {"message": "会议已创建", "meetings": self.list_meetings({})}
+
+    def list_meeting_topics(self):
+        with connect() as conn:
+            types = rows_to_list(
+                conn.execute(
+                    "SELECT * FROM meeting_topic_types WHERE active=1 ORDER BY sort_order, id"
+                ).fetchall()
+            )
+            options = rows_to_list(
+                conn.execute(
+                    "SELECT * FROM meeting_topic_options WHERE active=1 ORDER BY sort_order, id"
+                ).fetchall()
+            )
+        option_map = {}
+        for option in options:
+            option_map.setdefault(option["type_id"], []).append(option)
+        for topic_type in types:
+            topic_type["options"] = option_map.get(topic_type["id"], [])
+        return {"types": types}
+
+    def create_meeting_topic_type(self):
+        self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO meeting_topic_types(name, color, sort_order, active) VALUES(?,?,?,1)",
+                (data.get("name"), data.get("color") or "#3370ff", int(data.get("sort_order") or 0)),
+            )
+        return {"message": "议题类型已创建", **self.list_meeting_topics()}
+
+    def create_meeting_topic_option(self):
+        self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, sort_order, active) VALUES(?,?,?,?,1)",
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", int(data.get("sort_order") or 0)),
+            )
+        return {"message": "议题选项已创建", **self.list_meeting_topics()}
+
+    def create_meeting_item(self, meeting_id, user):
+        data = read_json(self)
+        type_id = data.get("type_id") or None
+        option_id = data.get("option_id") or None
+        section = data.get("section") or "议题"
+        title = data.get("title")
+        detail = data.get("detail") or ""
+        with connect() as conn:
+            if option_id:
+                option = conn.execute(
+                    """
+                    SELECT o.*, t.name AS type_name
+                    FROM meeting_topic_options o
+                    JOIN meeting_topic_types t ON t.id = o.type_id
+                    WHERE o.id=?
+                    """,
+                    (option_id,),
+                ).fetchone()
+                if option:
+                    type_id = option["type_id"]
+                    section = option["type_name"]
+                    title = title or option["title"]
+                    detail = detail or option["default_detail"] or ""
+            elif type_id:
+                topic_type = conn.execute("SELECT name FROM meeting_topic_types WHERE id=?", (type_id,)).fetchone()
+                if topic_type:
+                    section = topic_type["name"]
+            if not title:
+                raise AppError(400, "议题标题不能为空")
+            conn.execute(
+                "INSERT INTO meeting_items(meeting_id, section, title, detail, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (meeting_id, section, title, detail, data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
+            )
+        return {"message": "议题已添加", "meetings": self.list_meetings({})}
+
+    def upsert_attendance(self, meeting_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        status = data.get("status") or "present"
+        donation_required = 1 if status == "late" or data.get("donation_required") else 0
+        donation_done = 1 if data.get("donation_done") else 0
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_done, note, updated_by, updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(meeting_id, user_id) DO UPDATE SET
+                    status=excluded.status,
+                    donation_required=excluded.donation_required,
+                    donation_done=excluded.donation_done,
+                    note=excluded.note,
+                    updated_by=excluded.updated_by,
+                    updated_at=excluded.updated_at
+                """,
+                (meeting_id, data.get("user_id"), status, donation_required, donation_done, data.get("note") or "", admin["id"], now_iso()),
+            )
+        return {"message": "参会状态已更新", "meetings": self.list_meetings({})}
+
+    def list_links(self):
+        with connect() as conn:
+            return rows_to_list(conn.execute("SELECT * FROM links ORDER BY category, title").fetchall())
+
+    def create_link(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO links(title, url, category, description, created_by, created_at) VALUES(?,?,?,?,?,?)",
+                (data.get("title"), data.get("url"), data.get("category") or "通用", data.get("description") or "", admin["id"], now_iso()),
+            )
+        return {"message": "链接已归档", "links": self.list_links()}
+
+    def list_machines(self):
+        with connect() as conn:
+            return rows_to_list(conn.execute("SELECT * FROM machines ORDER BY name").fetchall())
+
+    def create_machine(self):
+        self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute("INSERT INTO machines(name, description) VALUES(?,?)", (data.get("name"), data.get("description") or ""))
+        return {"message": "机台已创建", "machines": self.list_machines()}
+
+    def list_shifts(self, query):
+        where, params = date_filter(query, "s.shift_date")
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT s.*, u.display_name, m.name AS machine_name
+                    FROM shifts s
+                    JOIN users u ON u.id = s.user_id
+                    JOIN machines m ON m.id = s.machine_id
+                    WHERE {where}
+                    ORDER BY s.shift_date DESC, m.name, s.shift_type
+                    """,
+                    params,
+                ).fetchall()
+            )
+
+    def create_shift(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO shifts(machine_id, user_id, shift_type, shift_date, hours, note, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), data.get("shift_date") or today_iso(), float(data.get("hours") or 12), data.get("note") or "", admin["id"], now_iso()),
+            )
+        return {"message": "排班已保存", "shifts": self.list_shifts({})}
+
+    def shift_dashboard(self, query):
+        where, params = date_filter(query, "s.shift_date")
+        with connect() as conn:
+            by_user = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.display_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
+                    FROM shifts s
+                    JOIN users u ON u.id = s.user_id
+                    WHERE {where}
+                    GROUP BY u.id
+                    ORDER BY hours DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+            by_machine = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT m.name AS machine_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
+                    FROM shifts s
+                    JOIN machines m ON m.id = s.machine_id
+                    WHERE {where}
+                    GROUP BY m.id
+                    ORDER BY m.name
+                    """,
+                    params,
+                ).fetchall()
+            )
+        return {"by_user": by_user, "by_machine": by_machine}
+
+    def list_thank_you(self, query):
+        where, params = date_filter(query, "v.week_start")
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name
+                    FROM thank_you_votes v
+                    JOIN users giver ON giver.id = v.voter_id
+                    JOIN users receiver ON receiver.id = v.receiver_id
+                    WHERE {where}
+                    ORDER BY v.week_start DESC, v.created_at DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+
+    def create_thank_you(self, user):
+        data = read_json(self)
+        receiver_id = int(data.get("receiver_id"))
+        if receiver_id == user["id"]:
+            raise AppError(400, "不能给自己点赞")
+        start = week_start(data.get("week_start") or today_iso())
+        evidence = (data.get("evidence") or "").strip()
+        if len(evidence) < 5:
+            raise AppError(400, "请写下具体事实依据")
+        with connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
+            if count >= 3:
+                raise AppError(400, "本周最多点赞 3 人")
+            conn.execute(
+                "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
+                (user["id"], receiver_id, start, evidence, now_iso()),
+            )
+        return {"message": "Thank You 已送达", "votes": self.list_thank_you({"from": [start], "to": [start]})}
+
+    def thank_you_dashboard(self, query):
+        where, params = date_filter(query, "v.week_start")
+        with connect() as conn:
+            stars = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT receiver.display_name, COUNT(*) AS thanks
+                    FROM thank_you_votes v
+                    JOIN users receiver ON receiver.id = v.receiver_id
+                    WHERE {where}
+                    GROUP BY receiver.id
+                    ORDER BY thanks DESC, receiver.display_name
+                    """,
+                    params,
+                ).fetchall()
+            )
+            weekly = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT v.week_start, COUNT(*) AS thanks
+                    FROM thank_you_votes v
+                    WHERE {where}
+                    GROUP BY v.week_start
+                    ORDER BY v.week_start
+                    """,
+                    params,
+                ).fetchall()
+            )
+        return {"stars": stars, "weekly": weekly}
+
+
+def permissions_for(user):
+    is_admin = bool(user and user.get("role") == "admin")
+    return {
+        "isAdmin": is_admin,
+        "canManageUsers": is_admin,
+        "canPublishRules": is_admin,
+        "canRecordScores": is_admin,
+        "canManageLinks": is_admin,
+        "canManageSchedule": is_admin,
+        "canManageMembers": is_admin,
+        "canManageMeetingTopics": is_admin,
+        "canManageAttendance": is_admin,
+        "canCreateMeeting": bool(user),
+        "canPostThankYou": bool(user),
+    }
+
+
+def date_filter(query, column):
+    clauses = ["1=1"]
+    params = []
+    if query.get("from") and query["from"][0]:
+        clauses.append(f"{column} >= ?")
+        params.append(query["from"][0])
+    if query.get("to") and query["to"][0]:
+        clauses.append(f"{column} <= ?")
+        params.append(query["to"][0])
+    return " AND ".join(clauses), params
+
+
+def main():
+    parser = argparse.ArgumentParser(description="周例会团队协作 Web 项目")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，局域网访问可用 0.0.0.0")
+    parser.add_argument("--port", default=8000, type=int, help="监听端口")
+    args = parser.parse_args()
+    init_db()
+    os.chdir(ROOT)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"周例会 Web 已启动: http://{args.host}:{args.port}")
+    print("默认账号：admin/admin123，user/user123")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止")
+
+
+if __name__ == "__main__":
+    main()
