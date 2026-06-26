@@ -44,7 +44,7 @@
               <h1 id="pageTitle">团队成员</h1>
               <p id="pageDesc">先看人，再看事。成员档案、职责和团队对话都在这里。</p>
             </div>
-            <div class="toolbar">
+            <div class="toolbar" id="pageToolbar">
               <input id="fromDate" type="date" />
               <input id="toDate" type="date" />
               <button id="refreshBtn" class="secondary">刷新</button>
@@ -54,26 +54,22 @@
           <div id="toast" class="toast hidden"></div>
 
           <section id="members" class="page active">
-            <section class="panel admin-only">
-              <div class="panel-title">
+            <section class="member-layout" id="memberList"></section>
+            <section class="panel team-chat-panel">
+              <div class="chat-title">
                 <div>
-                  <h2>成员档案</h2>
-                  <p>管理员维护成员资料；头像支持图片 URL，也支持本地图片转为自定义头像。</p>
+                  <strong>团队对话</strong>
+                  <p>评论和吐槽集中在这里，所有成员按时间向下滚动查看。</p>
                 </div>
+                <span>评论 / 吐槽广场</span>
               </div>
-              <form id="memberForm" class="form-grid compact">
-                <select name="user_id" data-users-optional></select>
-                <input name="name" placeholder="姓名" required />
-                <input name="avatar_url" placeholder="头像 URL，可留空" />
-                <input name="avatar_file" type="file" accept="image/*" />
-                <input name="title" placeholder="岗位/角色" />
-                <input name="tags" placeholder="标签，用逗号分隔" />
-                <textarea name="responsibilities" placeholder="职责范围"></textarea>
-                <textarea name="comment" placeholder="成员介绍"></textarea>
-                <button>保存档案</button>
+              <div id="teamChatList" class="chat-list team-chat-list"></div>
+              <form id="teamChatForm" class="chat-form">
+                <select name="kind"><option value="comment">评论</option><option value="roast">吐槽</option></select>
+                <input name="content" placeholder="输入后发送到团队对话" required />
+                <button>发送</button>
               </form>
             </section>
-            <section class="member-layout" id="memberList"></section>
           </section>
 
           <section id="dashboard" class="page">
@@ -100,14 +96,36 @@
               <div class="panel-title">
                 <div>
                   <h2>例会议题沙盘</h2>
-                  <p>每次会议按议题类型添加事项，支持预设选项、负责人和截止日期。</p>
+                  <p>管理员维护预设议题并按周生成，成员在当周会议中补充自定义议题和会议纪要。</p>
+                </div>
+                <div class="month-switch">
+                  <button id="prevMeetingMonthBtn" class="secondary" type="button">上月</button>
+                  <strong id="meetingMonthTitle"></strong>
+                  <button id="nextMeetingMonthBtn" class="secondary" type="button">下月</button>
                 </div>
               </div>
+              <div id="meetingCalendar" class="calendar meeting-calendar"></div>
+            </section>
+
+            <section class="panel admin-only">
+              <h2>生成周例会</h2>
               <form id="meetingForm" class="form-row">
                 <input name="meeting_date" type="date" />
-                <input name="title" placeholder="会议标题" required />
+                <input name="title" placeholder="会议标题，默认周例会" />
                 <input name="summary" placeholder="会议摘要" />
-                <button>创建会议</button>
+                <button>创建单场会议</button>
+              </form>
+              <form id="meetingGenerateForm" class="form-row meeting-generate-form">
+                <input name="start_date" type="date" />
+                <select name="weeks">
+                  <option value="4">生成未来 4 周</option>
+                  <option value="8">生成未来 8 周</option>
+                  <option value="12">生成未来 12 周</option>
+                  <option value="26">生成未来 26 周</option>
+                </select>
+                <input name="title" placeholder="批量会议标题，默认周例会" />
+                <input name="summary" placeholder="批量会议摘要" />
+                <button>按预设批量生成</button>
               </form>
             </section>
 
@@ -122,15 +140,31 @@
                 <div id="topicTypeList" class="chip-list"></div>
               </section>
               <section class="panel">
-                <h2>议题选项</h2>
+                <h2>预设议题</h2>
                 <form id="topicOptionForm" class="form-grid compact">
                   <select name="type_id" data-topic-types required></select>
                   <input name="title" placeholder="例如：本周阻塞问题" required />
+                  <select name="recurrence_weeks">
+                    <option value="1">每 1 周</option>
+                    <option value="2">每 2 周</option>
+                    <option value="3">每 3 周</option>
+                    <option value="4">每 4 周</option>
+                  </select>
                   <textarea name="default_detail" placeholder="默认说明，可留空"></textarea>
                   <button>新增选项</button>
                 </form>
               </section>
             </div>
+
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>预设议题清单</h2>
+                  <p>修改周期后，后续批量生成会按新的周期执行。</p>
+                </div>
+              </div>
+              <div id="topicPresetList" class="table"></div>
+            </section>
 
             <section id="meetingList" class="meeting-board"></section>
           </section>
@@ -167,7 +201,7 @@
 
               <aside class="panel schedule-editor">
                 <h2 id="selectedShiftDateTitle">选择日期</h2>
-                <form id="shiftForm" class="form-grid">
+                <form id="shiftForm" class="form-grid admin-only">
                   <select name="machine_id" data-machines required></select>
                   <select name="user_id" data-users required></select>
                   <select name="shift_type"><option value="day">白班</option><option value="night">夜班</option></select>
@@ -186,10 +220,7 @@
             <section class="panel admin-only">
               <h2>发布红黑榜规则</h2>
               <form id="ruleForm" class="form-grid compact">
-                <input name="title" placeholder="规则标题" required />
                 <select name="kind"><option value="red">红榜</option><option value="black">黑榜</option></select>
-                <input name="effective_from" type="date" />
-                <input name="effective_to" type="date" />
                 <textarea name="content" placeholder="规则说明、适用场景、加减分口径" required></textarea>
                 <button>发布规则</button>
               </form>
@@ -241,19 +272,36 @@
           </section>
 
           <section id="links" class="page">
-            <section class="panel admin-only">
+            <section class="panel">
               <h2>归档常用链接</h2>
               <form id="linkForm" class="form-row">
                 <input name="title" placeholder="名称" required />
                 <input name="url" placeholder="https://..." required />
-                <input name="category" placeholder="分类" />
+                <select name="category" data-link-categories required></select>
                 <input name="description" placeholder="说明" />
                 <button>保存链接</button>
               </form>
             </section>
+            <section class="panel admin-only">
+              <h2>维护链接分类</h2>
+              <form id="linkCategoryForm" class="form-row slim">
+                <input name="name" placeholder="分类名称" required />
+                <input name="sort_order" type="number" placeholder="排序" />
+                <button>保存分类</button>
+              </form>
+              <div id="linkCategoryList" class="chip-list"></div>
+            </section>
             <section class="panel">
-              <h2>链接库</h2>
-              <div id="linkList" class="link-grid"></div>
+              <div class="panel-title">
+                <div>
+                  <h2>链接库</h2>
+                </div>
+                <div class="link-toolbar">
+                  <select id="linkCategoryFilter"></select>
+                  <input id="linkKeywordSearch" placeholder="搜索名称、地址、说明" />
+                </div>
+              </div>
+              <div id="linkList" class="table"></div>
             </section>
           </section>
 

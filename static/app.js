@@ -6,10 +6,15 @@ const state = {
   rules: [],
   machines: [],
   topics: [],
+  linkCategories: [],
+  links: [],
+  meetings: [],
   shifts: [],
   currentPage: "members",
   shiftMonth: new Date(),
   selectedShiftDate: new Date().toISOString().slice(0, 10),
+  meetingMonth: new Date(),
+  selectedMeetingDate: new Date().toISOString().slice(0, 10),
 };
 
 const pages = [
@@ -25,6 +30,7 @@ const pages = [
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const dateFilterPages = new Set(["dashboard", "rules", "thanks"]);
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -60,10 +66,14 @@ function setDefaultDates() {
   $("#fromDate").value = $("#fromDate").value || mondayOf(today);
   $("#toDate").value = $("#toDate").value || today;
   $$('input[type="date"]').forEach((input) => {
-    if (!input.value && input.name !== "effective_to") input.value = today;
+    if (!input.value) input.value = today;
   });
   const shiftDate = $('input[name="shift_date"]');
   if (shiftDate) shiftDate.value = state.selectedShiftDate;
+  const meetingDate = $('input[name="meeting_date"]');
+  if (meetingDate) meetingDate.value = state.selectedMeetingDate;
+  const generateStart = $('input[name="start_date"]');
+  if (generateStart) generateStart.value = mondayOf(state.selectedMeetingDate);
 }
 
 async function api(path, options = {}) {
@@ -85,13 +95,32 @@ function formData(form) {
   return data;
 }
 
+function fullFormData(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     if (!file || !file.size) return resolve("");
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    if (!file.type.startsWith("image/")) return resolve("");
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      const maxSize = 320;
+      const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", 0.82));
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("头像图片读取失败"));
+    };
+    image.src = url;
   });
 }
 
@@ -113,11 +142,24 @@ function shiftPeriodQuery() {
   return `from=${iso(start)}&to=${iso(end)}`;
 }
 
+function meetingPeriodQuery() {
+  const start = monthStart(state.meetingMonth);
+  const end = monthEnd(state.meetingMonth);
+  return `from=${iso(start)}&to=${iso(end)}`;
+}
+
+function renderPageToolbar(id = state.currentPage) {
+  const toolbar = $("#pageToolbar");
+  if (!toolbar) return;
+  toolbar.classList.toggle("hidden", !dateFilterPages.has(id));
+}
+
 function applyAuthView() {
   $("#loginView").classList.toggle("hidden", Boolean(state.user));
   $("#appView").classList.toggle("hidden", !state.user);
   $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${state.user.role === "admin" ? "管理员" : "普通用户"}` : "未登录";
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !state.permissions.isAdmin));
+  renderPageToolbar();
   renderNav();
 }
 
@@ -134,20 +176,23 @@ function switchPage(id) {
   const meta = pages.find((page) => page[0] === id);
   $("#pageTitle").textContent = meta?.[2] || "团队成员";
   $("#pageDesc").textContent = meta?.[3] || "";
+  renderPageToolbar(id);
   renderNav();
 }
 
 async function loadReferenceData() {
-  const [members, rules, machines, topics] = await Promise.all([
+  const [members, rules, machines, topics, linkCategories] = await Promise.all([
     api("/api/members"),
     api("/api/rules"),
     api("/api/machines"),
     api("/api/meeting-topics"),
+    api("/api/link-categories"),
   ]);
   state.members = members.members;
   state.rules = rules.rules;
   state.machines = machines.machines;
   state.topics = topics.types;
+  state.linkCategories = linkCategories.categories;
   if (state.permissions.isAdmin) {
     state.users = (await api("/api/users")).users;
   } else {
@@ -166,6 +211,7 @@ function populateSelects() {
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
   const thankOptions = activeUsers.filter((user) => user.id !== state.user?.id).map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
+  const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
 
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
   $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
@@ -173,6 +219,19 @@ function populateSelects() {
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
   $$("[data-thank-users]").forEach((select) => { select.innerHTML = thankOptions; });
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
+  $$("[data-link-categories]").forEach((select) => { select.innerHTML = linkCategoryOptions || '<option value="通用">通用</option>'; });
+  const linkFilter = $("#linkCategoryFilter");
+  if (linkFilter) {
+    const current = linkFilter.value;
+    linkFilter.innerHTML = `<option value="">全部分类</option>${linkCategoryOptions}`;
+    linkFilter.value = state.linkCategories.some((category) => category.name === current) ? current : "";
+  }
+  const categoryList = $("#linkCategoryList");
+  if (categoryList) {
+    categoryList.innerHTML = state.linkCategories.length
+      ? state.linkCategories.map((category) => `<span class="chip">${escapeHtml(category.name)}</span>`).join("")
+      : "<p>暂无分类</p>";
+  }
 }
 
 function table(headers, rows) {
@@ -207,13 +266,20 @@ async function loadUsers() {
   if (!state.permissions.isAdmin) return;
   const data = await api("/api/users");
   state.users = data.users;
-  $("#userList").innerHTML = table(["账号", "姓名", "角色", "状态"], data.users.map((user) => [
-    user.username,
-    user.display_name,
-    user.role === "admin" ? "管理员" : "普通用户",
-    user.active ? "启用" : "停用",
-  ]));
+  $("#userList").innerHTML = renderUserTable(data.users);
   populateSelects();
+}
+
+function renderUserTable(users) {
+  if (!users.length) return "<p>暂无数据</p>";
+  return `<table><thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+    <tr>
+      <td>${escapeHtml(user.username)}</td>
+      <td>${escapeHtml(user.display_name)}</td>
+      <td>${user.role === "admin" ? "管理员" : "普通用户"}</td>
+      <td>${user.active ? "启用" : "已删除"}</td>
+      <td>${user.active && user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : "-"}</td>
+    </tr>`).join("")}</tbody></table>`;
 }
 
 async function loadRulesAndScores() {
@@ -222,9 +288,7 @@ async function loadRulesAndScores() {
   $("#ruleList").innerHTML = state.rules.length ? state.rules.map((rule) => `
     <div class="item">
       <span class="pill ${rule.kind === "red" ? "red" : "black"}">${rule.kind === "red" ? "红榜" : "黑榜"}</span>
-      <h3>${escapeHtml(rule.title)}</h3>
       <p>${escapeHtml(rule.content)}</p>
-      <p>${rule.effective_from || "不限"} 至 ${rule.effective_to || "不限"}</p>
     </div>`).join("") : "<p>暂无规则</p>";
   $("#scoreList").innerHTML = table(["日期", "成员", "类型", "积分", "规则", "依据"], scores.map((score) => [
     score.score_date,
@@ -270,7 +334,33 @@ async function loadMembers() {
   $$("[data-chat-list]").forEach((el) => { el.scrollTop = el.scrollHeight; });
 }
 
-function renderTopicSelectors(meetingId) {
+function recurrenceOptions(selected = 1) {
+  return [1, 2, 3, 4].map((value) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>每 ${value} 周</option>`).join("");
+}
+
+function renderPresetTypeOptions(selectedId) {
+  return state.topics.map((topic) => `<option value="${topic.id}" ${Number(selectedId) === Number(topic.id) ? "selected" : ""}>${escapeHtml(topic.name)}</option>`).join("");
+}
+
+function renderTopicPresetList() {
+  const rows = state.topics.flatMap((topic) => (topic.options || []).map((option) => ({ ...option, typeName: topic.name })));
+  const list = $("#topicPresetList");
+  if (!list) return;
+  list.innerHTML = rows.length ? `
+    <div class="preset-list">
+      ${rows.map((option) => `
+        <form class="preset-row preset-form" data-option-id="${option.id}">
+          <select name="type_id">${renderPresetTypeOptions(option.type_id)}</select>
+          <input name="title" value="${escapeHtml(option.title)}" placeholder="议题名称" required>
+          <select name="recurrence_weeks">${recurrenceOptions(option.recurrence_weeks || 1)}</select>
+          <input name="default_detail" value="${escapeHtml(option.default_detail || "")}" placeholder="默认说明">
+          <button>保存</button>
+          <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
+        </form>`).join("")}
+    </div>` : "<p>暂无预设议题</p>";
+}
+
+function renderPresetTopicForm(meetingId) {
   const firstTopic = state.topics[0];
   const options = firstTopic?.options || [];
   return `
@@ -285,14 +375,51 @@ function renderTopicSelectors(meetingId) {
     </form>`;
 }
 
+function renderCustomTopicForm(meetingId) {
+  return `
+    <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meetingId}">
+      <select name="type_id" required>${state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("")}</select>
+      <input name="title" placeholder="自定义议题标题" required />
+      <textarea name="detail" placeholder="补充议题背景、希望讨论的问题或建议结论"></textarea>
+      <button>提交自定义议题</button>
+    </form>`;
+}
+
+function renderMeetingItem(item) {
+  const meta = [
+    item.owner_name || "",
+    item.created_by_name ? `提交：${item.created_by_name}` : "",
+    item.due_date ? `截止：${item.due_date}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<div class="topic-item">
+    <strong>${escapeHtml(item.title)}</strong>
+    ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
+    ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+    <form class="minute-form" data-item-id="${item.id}">
+      <textarea name="minutes" placeholder="输入本议题会议纪要">${escapeHtml(item.minutes || "")}</textarea>
+      <button>保存纪要</button>
+    </form>
+  </div>`;
+}
+
 function renderTopicBoard(meeting) {
-  return `<div class="topic-board">${state.topics.map((topic) => {
+  const typed = new Set();
+  const columns = state.topics.map((topic) => {
     const items = meeting.items.filter((item) => Number(item.type_id) === Number(topic.id) || item.section === topic.name);
+    items.forEach((item) => typed.add(item.id));
     return `<section class="topic-column">
       <h4><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</h4>
-      ${items.length ? items.map((item) => `<div class="topic-item"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.detail || "")}</p><small>${escapeHtml(item.owner_name || "未分配")} · ${item.due_date || "无截止"}</small></div>`).join("") : "<p>暂无议题</p>"}
+      ${items.length ? items.map(renderMeetingItem).join("") : "<p>暂无议题</p>"}
     </section>`;
-  }).join("")}</div>`;
+  });
+  const others = meeting.items.filter((item) => !typed.has(item.id));
+  if (others.length) {
+    columns.push(`<section class="topic-column">
+      <h4><span class="topic-dot"></span>其他议题</h4>
+      ${others.map(renderMeetingItem).join("")}
+    </section>`);
+  }
+  return `<div class="topic-board">${columns.join("")}</div>`;
 }
 
 function renderAttendance(meeting) {
@@ -318,27 +445,106 @@ function renderAttendance(meeting) {
   }).join("")}</div>`;
 }
 
+function buildMeetingEmailHref(meeting) {
+  const statusMap = { present: "出席", leave: "请假", absent: "缺席", late: "迟到" };
+  const lines = [
+    "各位好，",
+    "",
+    `以下是 ${meeting.meeting_date} ${meeting.title} 的会议纪要，请查收。`,
+    "",
+    "一、会议概览",
+    `会议摘要：${meeting.summary || "无"}`,
+    `发起人：${meeting.creator || "未记录"}`,
+    "",
+    "二、议题与纪要",
+  ];
+  if (meeting.items.length) {
+    meeting.items.forEach((item, index) => {
+      lines.push(`${index + 1}. 【${item.type_name || item.section || "议题"}】${item.title}`);
+      if (item.detail) lines.push(`背景：${item.detail}`);
+      lines.push(`纪要：${item.minutes || "待补充"}`);
+      if (item.owner_name || item.due_date) {
+        lines.push(`负责人/截止：${[item.owner_name, item.due_date].filter(Boolean).join(" / ") || "无"}`);
+      }
+      lines.push("");
+    });
+  } else {
+    lines.push("暂无议题。", "");
+  }
+  lines.push("三、参会情况");
+  if (meeting.attendance?.length) {
+    meeting.attendance.forEach((item) => {
+      lines.push(`${item.display_name}：${statusMap[item.status] || item.status}${item.donation_required ? "，需乐捐" : ""}${item.donation_done ? "，已完成" : ""}`);
+    });
+  } else {
+    lines.push("暂无签到记录。");
+  }
+  const subject = `【周例会纪要】${meeting.meeting_date} ${meeting.title}`;
+  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join("\r\n"))}`;
+}
+
+function renderMeetingCalendar(meetings) {
+  const month = state.meetingMonth;
+  const start = monthStart(month);
+  const gridStart = new Date(start);
+  gridStart.setDate(start.getDate() - (start.getDay() || 7) + 1);
+  const byDate = {};
+  meetings.forEach((meeting) => {
+    byDate[meeting.meeting_date] ||= [];
+    byDate[meeting.meeting_date].push(meeting);
+  });
+  $("#meetingMonthTitle").textContent = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
+  const meetingDate = $('input[name="meeting_date"]');
+  if (meetingDate) meetingDate.value = state.selectedMeetingDate;
+  const generateStart = $('input[name="start_date"]');
+  if (generateStart && !generateStart.value) generateStart.value = mondayOf(state.selectedMeetingDate);
+
+  const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
+  const cells = [];
+  for (let i = 0; i < 42; i += 1) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    const date = iso(d);
+    const dayMeetings = byDate[date] || [];
+    cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
+      <div class="day-no">${d.getDate()}</div>
+      ${dayMeetings.map((meeting) => `<div class="meeting-line">${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</div>`).join("")}
+    </div>`);
+  }
+  $("#meetingCalendar").innerHTML = weekdays + cells.join("");
+}
+
 async function loadMeetings() {
-  const data = await api(`/api/meetings?${periodQuery()}`);
+  const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
+  state.meetings = data.meetings;
+  renderMeetingCalendar(state.meetings);
+  renderTopicPresetList();
   $("#topicTypeList").innerHTML = state.topics.map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)} · ${topic.options.length} 项</span>`).join("");
   $("#meetingList").innerHTML = data.meetings.length ? data.meetings.map((meeting) => `
     <article class="meeting-card">
       <div class="meeting-meta">
         <div><h3>${escapeHtml(meeting.title)}</h3><p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "")}</p></div>
-        <span class="pill">${escapeHtml(meeting.creator || "")}</span>
+        <div class="meeting-meta-actions">
+          <span class="pill">${escapeHtml(meeting.creator || "")}</span>
+          <a class="button-link" href="${escapeHtml(buildMeetingEmailHref(meeting))}">生成会议邮件</a>
+        </div>
       </div>
       ${renderTopicBoard(meeting)}
       <div class="meeting-actions">
+        <section class="panel">
+          <h2>自定义议题</h2>
+          ${renderCustomTopicForm(meeting.id)}
+        </section>
         <section class="panel admin-only">
-          <h2>添加议题</h2>
-          ${renderTopicSelectors(meeting.id)}
+          <h2>添加预设议题</h2>
+          ${renderPresetTopicForm(meeting.id)}
         </section>
         <section class="panel">
           <h2>参会签到</h2>
           ${state.permissions.isAdmin ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
         </section>
       </div>
-    </article>`).join("") : "<section class='panel'><p>暂无会议</p></section>";
+    </article>`).join("") : "<section class='panel'><p>本月暂无会议，管理员可先生成周例会。</p></section>";
   populateSelects();
 }
 
@@ -350,13 +556,32 @@ function renderAttendanceReadonly(meeting) {
 
 async function loadLinks() {
   const data = await api("/api/links");
-  $("#linkList").innerHTML = data.links.length ? data.links.map((link) => `
-    <article class="link-card">
-      <span class="pill">${escapeHtml(link.category)}</span>
-      <h3>${escapeHtml(link.title)}</h3>
-      <a href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>
-      <p>${escapeHtml(link.description || "")}</p>
-    </article>`).join("") : "<p>暂无链接</p>";
+  state.links = data.links;
+  renderLinks();
+}
+
+function renderLinks() {
+  const category = $("#linkCategoryFilter")?.value || "";
+  const keyword = ($("#linkKeywordSearch")?.value || "").trim().toLowerCase();
+  const filtered = state.links.filter((link) => {
+    const hitCategory = !category || link.category === category;
+    const text = [link.title, link.url, link.description, link.category, link.creator].filter(Boolean).join(" ").toLowerCase();
+    return hitCategory && (!keyword || text.includes(keyword));
+  });
+  $("#linkList").innerHTML = filtered.length ? `
+    <table>
+      <thead><tr><th>名称</th><th>分类</th><th>地址</th><th>说明</th><th>归档人</th></tr></thead>
+      <tbody>
+        ${filtered.map((link) => `
+          <tr>
+            <td><strong>${escapeHtml(link.title)}</strong></td>
+            <td><span class="pill">${escapeHtml(link.category)}</span></td>
+            <td><a class="link-url" href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a></td>
+            <td>${escapeHtml(link.description || "")}</td>
+            <td>${escapeHtml(link.creator || "-")}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>` : "<p>没有匹配的链接</p>";
 }
 
 function renderCalendar() {
@@ -373,8 +598,9 @@ function renderCalendar() {
   const title = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
   $("#shiftMonthTitle").textContent = title;
   $("#shiftMonthTitle2").textContent = title;
-  $("#selectedShiftDateTitle").textContent = `编辑排班 · ${state.selectedShiftDate}`;
-  $('input[name="shift_date"]').value = state.selectedShiftDate;
+  $("#selectedShiftDateTitle").textContent = state.permissions.isAdmin ? `编辑排班 · ${state.selectedShiftDate}` : "我的本月排班";
+  const shiftDateInput = $('input[name="shift_date"]');
+  if (shiftDateInput) shiftDateInput.value = state.selectedShiftDate;
 
   const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
   const cells = [];
@@ -383,9 +609,10 @@ function renderCalendar() {
     d.setDate(gridStart.getDate() + i);
     const date = iso(d);
     const shifts = byDate[date] || [];
-    cells.push(`<div class="day-cell ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""}" data-date="${date}">
+    const hasMine = shifts.some((shift) => Number(shift.user_id) === Number(state.user?.id));
+    cells.push(`<div class="day-cell shift-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""} ${hasMine ? "has-mine" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""}">${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</div>`).join("")}
+      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""} ${Number(shift.user_id) === Number(state.user?.id) ? "mine" : ""}">${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</div>`).join("")}
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
@@ -465,6 +692,68 @@ async function submitAvatarForm(form) {
   await api(`/api/members/${form.dataset.memberId}`, { method: "PATCH", body: JSON.stringify({ avatar_url: data.avatar_url }) });
 }
 
+async function submitProfileForm(form) {
+  const data = formData(form);
+  await api(`/api/members/${form.dataset.memberId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      tags: data.tags || "",
+      responsibilities: data.responsibilities || "",
+    }),
+  });
+}
+
+function renderTeamChat(posts) {
+  const list = $("#teamChatList");
+  if (!list) return;
+  list.innerHTML = posts.length ? posts.map((post) => `
+    <div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}">
+      <span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span>
+      <p>${escapeHtml(post.content)}</p>
+      <small>${escapeHtml(post.display_name)} · ${post.created_at}</small>
+    </div>`).join("") : "<p>还没有团队对话，来开个头。</p>";
+  list.scrollTop = list.scrollHeight;
+}
+
+async function loadMembers() {
+  const [membersData, postsData] = await Promise.all([
+    api("/api/members"),
+    api("/api/team-posts"),
+  ]);
+  state.members = membersData.members;
+  renderTeamChat(postsData.posts);
+  $("#memberList").innerHTML = state.members.map((member) => {
+    const canEdit = state.permissions.isAdmin || member.user_id === state.user?.id;
+    const profileEditTitle = state.permissions.isAdmin ? "管理员编辑标签与职责" : "编辑我的标签与职责";
+    const tagPlaceholder = state.permissions.isAdmin ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
+    const responsibilityPlaceholder = state.permissions.isAdmin ? "成员职责范围" : "我的职责范围";
+    return `
+      <article class="member-card profile-only">
+        <section class="member-profile">
+          <div class="member-head">
+            ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
+            <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
+          </div>
+          <div class="tags">${(member.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+          <p><strong>职责：</strong>${escapeHtml(member.responsibilities || "未填写")}</p>
+          <p>${escapeHtml(member.comment || "")}</p>
+          ${canEdit ? `
+            <form class="profile-edit-form" data-member-id="${member.id}">
+              <strong>${profileEditTitle}</strong>
+              <input name="tags" value="${escapeHtml((member.tags || []).join(", "))}" placeholder="${tagPlaceholder}">
+              <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
+              <button>保存标签和职责</button>
+            </form>
+            <form class="avatar-tools avatar-form" data-member-id="${member.id}">
+              <input name="avatar_url" placeholder="头像 URL">
+              <input name="avatar_file" type="file" accept="image/*">
+              <button>更换头像</button>
+            </form>` : ""}
+        </section>
+      </article>`;
+  }).join("");
+}
+
 function updateOptionSelect(typeSelect) {
   const form = typeSelect.closest("form");
   const optionSelect = form?.querySelector("[data-meeting-option-select]");
@@ -476,6 +765,12 @@ function updateOptionSelect(typeSelect) {
 function moveMonth(delta) {
   state.shiftMonth = new Date(state.shiftMonth.getFullYear(), state.shiftMonth.getMonth() + delta, 1);
   loadShifts().catch((error) => toast(error.message));
+}
+
+function moveMeetingMonth(delta) {
+  state.meetingMonth = new Date(state.meetingMonth.getFullYear(), state.meetingMonth.getMonth() + delta, 1);
+  state.selectedMeetingDate = iso(new Date(state.meetingMonth.getFullYear(), state.meetingMonth.getMonth(), 1));
+  loadMeetings().catch((error) => toast(error.message));
 }
 
 function bindEvents() {
@@ -505,6 +800,8 @@ function bindEvents() {
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#prevMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(-1));
+  $("#nextMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(1));
   $("#prevMonthBtn").addEventListener("click", () => moveMonth(-1));
   $("#nextMonthBtn").addEventListener("click", () => moveMonth(1));
   $("#prevMonthBtn2").addEventListener("click", () => moveMonth(-1));
@@ -514,29 +811,65 @@ function bindEvents() {
   bindForm("#ruleForm", (data) => api("/api/rules", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#scoreForm", (data) => api("/api/scores", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#meetingForm", (data) => api("/api/meetings", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#meetingGenerateForm", (data) => api("/api/meetings/bulk-generate", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicOptionForm", (data) => api("/api/meeting-topic-options", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#linkCategoryForm", (data) => api("/api/link-categories", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#machineForm", (data) => api("/api/machines", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#thankForm", (data) => api("/api/thank-you", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
 
-  $("#memberForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      await submitMemberForm(event.currentTarget);
-      event.currentTarget.reset();
-      await refreshAll();
-      toast("成员已保存");
-    } catch (error) {
-      toast(error.message);
-    }
-  });
+  $("#linkCategoryFilter").addEventListener("change", renderLinks);
+  $("#linkKeywordSearch").addEventListener("input", renderLinks);
+
+  const memberForm = $("#memberForm");
+  if (memberForm) {
+    memberForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await submitMemberForm(event.currentTarget);
+        event.currentTarget.reset();
+        await refreshAll();
+        toast("成员已保存");
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  }
 
   document.body.addEventListener("click", (event) => {
-    const cell = event.target.closest(".day-cell");
-    if (cell) {
-      state.selectedShiftDate = cell.dataset.date;
+    const deleteButton = event.target.closest(".user-delete-btn");
+    if (deleteButton) {
+      const name = deleteButton.dataset.userName || "该用户";
+      if (!window.confirm(`确定删除 ${name} 吗？历史记录会保留，但该账号将无法登录。`)) return;
+      api(`/api/users/${deleteButton.dataset.userId}`, { method: "DELETE" })
+        .then(refreshAll)
+        .then(() => toast("用户已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const presetDelete = event.target.closest(".preset-delete-btn");
+    if (presetDelete) {
+      if (!window.confirm("确定删除这个预设议题吗？已生成到会议里的历史议题会保留。")) return;
+      api(`/api/meeting-topic-options/${presetDelete.dataset.optionId}`, { method: "DELETE" })
+        .then(refreshAll)
+        .then(() => toast("预设议题已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const meetingCell = event.target.closest(".meeting-day");
+    if (meetingCell) {
+      state.selectedMeetingDate = meetingCell.dataset.date;
+      const input = $('input[name="meeting_date"]');
+      if (input) input.value = state.selectedMeetingDate;
+      renderMeetingCalendar(state.meetings);
+      return;
+    }
+    const shiftCell = event.target.closest(".shift-day");
+    if (shiftCell) {
+      state.selectedShiftDate = shiftCell.dataset.date;
       renderCalendar();
     }
   });
@@ -553,9 +886,12 @@ function bindEvents() {
   document.body.addEventListener("submit", async (event) => {
     const postForm = event.target.closest(".post-form");
     const avatarForm = event.target.closest(".avatar-form");
+    const profileForm = event.target.closest(".profile-edit-form");
     const topicForm = event.target.closest(".topic-item-form");
     const attendanceForm = event.target.closest(".attendance-row");
-    if (!postForm && !avatarForm && !topicForm && !attendanceForm) return;
+    const minuteForm = event.target.closest(".minute-form");
+    const presetForm = event.target.closest(".preset-form");
+    if (!postForm && !avatarForm && !profileForm && !topicForm && !attendanceForm && !minuteForm && !presetForm) return;
     event.preventDefault();
     try {
       if (postForm) {
@@ -563,6 +899,9 @@ function bindEvents() {
       }
       if (avatarForm) {
         await submitAvatarForm(avatarForm);
+      }
+      if (profileForm) {
+        await submitProfileForm(profileForm);
       }
       if (topicForm) {
         await api(`/api/meetings/${topicForm.dataset.meetingId}/items`, { method: "POST", body: JSON.stringify(formData(topicForm)) });
@@ -572,6 +911,12 @@ function bindEvents() {
         data.donation_required = attendanceForm.elements.donation_required.checked;
         data.donation_done = attendanceForm.elements.donation_done.checked;
         await api(`/api/meetings/${attendanceForm.dataset.meetingId}/attendance`, { method: "POST", body: JSON.stringify(data) });
+      }
+      if (minuteForm) {
+        await api(`/api/meeting-items/${minuteForm.dataset.itemId}`, { method: "PATCH", body: JSON.stringify(fullFormData(minuteForm)) });
+      }
+      if (presetForm) {
+        await api(`/api/meeting-topic-options/${presetForm.dataset.optionId}`, { method: "PATCH", body: JSON.stringify(fullFormData(presetForm)) });
       }
       event.target.reset();
       setDefaultDates();

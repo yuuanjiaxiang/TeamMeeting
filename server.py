@@ -110,6 +110,52 @@ def seed_meeting_topics(conn):
             )
 
 
+def seed_link_categories(conn):
+    count = conn.execute("SELECT COUNT(*) FROM link_categories").fetchone()[0]
+    if count:
+        return
+    for index, name in enumerate(["通用", "文档", "系统", "工具", "流程"], start=1):
+        conn.execute(
+            "INSERT INTO link_categories(name, sort_order, active, created_at) VALUES(?,?,1,?)",
+            (name, index, now_iso()),
+        )
+
+
+def default_member_title(role):
+    return "管理员" if role == "admin" else "团队成员"
+
+
+def sync_member_for_user(conn, user_id):
+    user = conn.execute(
+        "SELECT id, display_name, role, active FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if not user:
+        return
+    members = conn.execute("SELECT id, title FROM members WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+    if members:
+        member = members[0]
+        duplicate_ids = [row["id"] for row in members[1:]]
+        if duplicate_ids:
+            placeholders = ",".join("?" for _ in duplicate_ids)
+            conn.execute(f"UPDATE members SET active=0 WHERE id IN ({placeholders})", duplicate_ids)
+        title = member["title"] or default_member_title(user["role"])
+        conn.execute(
+            "UPDATE members SET name=?, title=?, active=? WHERE id=?",
+            (user["display_name"], title, user["active"], member["id"]),
+        )
+        return
+    conn.execute(
+        "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at, active) VALUES(?,?,?,?,?,?,?,?,?)",
+        (user["id"], user["display_name"], "", default_member_title(user["role"]), "", "[]", "", now_iso(), user["active"]),
+    )
+
+
+def sync_members_with_users(conn):
+    for user in conn.execute("SELECT id FROM users").fetchall():
+        sync_member_for_user(conn, user["id"])
+
+
 def init_db():
     DATA_DIR.mkdir(exist_ok=True)
     with connect() as conn:
@@ -141,6 +187,14 @@ def init_db():
             CREATE TABLE IF NOT EXISTS member_posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                kind TEXT NOT NULL CHECK(kind IN ('comment', 'roast')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 kind TEXT NOT NULL CHECK(kind IN ('comment', 'roast')),
                 content TEXT NOT NULL,
@@ -187,6 +241,7 @@ def init_db():
                 section TEXT NOT NULL,
                 title TEXT NOT NULL,
                 detail TEXT,
+                minutes TEXT,
                 owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 status TEXT NOT NULL DEFAULT 'todo',
                 due_date TEXT,
@@ -207,6 +262,7 @@ def init_db():
                 type_id INTEGER NOT NULL REFERENCES meeting_topic_types(id) ON DELETE CASCADE,
                 title TEXT NOT NULL,
                 default_detail TEXT,
+                recurrence_weeks INTEGER NOT NULL DEFAULT 1,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1
             );
@@ -231,6 +287,14 @@ def init_db():
                 category TEXT NOT NULL DEFAULT '通用',
                 description TEXT,
                 created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS link_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
 
@@ -263,9 +327,13 @@ def init_db():
             );
             """
         )
+        ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "meeting_items", "type_id", "INTEGER")
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
+        ensure_column(conn, "meeting_items", "minutes", "TEXT")
+        ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
         seed_meeting_topics(conn)
+        seed_link_categories(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
@@ -294,6 +362,7 @@ def init_db():
                 "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (2, "普通成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
             )
+        sync_members_with_users(conn)
 
 
 class AppError(Exception):
@@ -360,8 +429,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(content)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         self.wfile.write(content)
+        self.wfile.flush()
 
     def current_user(self, required=True):
         cookies = parse_cookies(self.headers.get("Cookie"))
@@ -406,6 +478,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_user()
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "PATCH":
             return self.update_user(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "DELETE":
+            return self.delete_user(int(parts[2]), user)
 
         if path == "/api/members":
             if method == "GET":
@@ -416,6 +490,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.update_member(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "members"] and parts[3] == "posts" and method == "POST":
             return self.create_member_post(int(parts[2]), user)
+        if path == "/api/team-posts":
+            if method == "GET":
+                return {"posts": self.list_team_posts()}
+            if method == "POST":
+                return self.create_team_post(user)
 
         if path == "/api/rules":
             if method == "GET":
@@ -437,6 +516,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"meetings": self.list_meetings(query)}
             if method == "POST":
                 return self.create_meeting(user)
+        if path == "/api/meetings/bulk-generate" and method == "POST":
+            return self.bulk_generate_meetings()
         if path == "/api/meeting-topics":
             if method == "GET":
                 return self.list_meeting_topics()
@@ -444,16 +525,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_meeting_topic_type()
         if path == "/api/meeting-topic-options" and method == "POST":
             return self.create_meeting_topic_option()
+        if len(parts) == 3 and parts[:2] == ["api", "meeting-topic-options"] and method == "PATCH":
+            return self.update_meeting_topic_option(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "meeting-topic-options"] and method == "DELETE":
+            return self.delete_meeting_topic_option(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "items" and method == "POST":
             return self.create_meeting_item(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "attendance" and method == "POST":
             return self.upsert_attendance(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "meeting-items"] and method == "PATCH":
+            return self.update_meeting_item(int(parts[2]))
 
         if path == "/api/links":
             if method == "GET":
                 return {"links": self.list_links()}
             if method == "POST":
                 return self.create_link()
+        if path == "/api/link-categories":
+            if method == "GET":
+                return {"categories": self.list_link_categories()}
+            if method == "POST":
+                return self.create_link_category()
 
         if path == "/api/machines":
             if method == "GET":
@@ -515,10 +607,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
         for key, value in headers.items():
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
+        self.wfile.flush()
 
     def list_users(self):
         self.require_admin()
@@ -530,10 +625,11 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         salt, password_hash = make_hash(data.get("password") or "123456")
         with connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO users(username, salt, password_hash, display_name, role, active, created_at) VALUES(?,?,?,?,?,?,?)",
                 ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", 1, now_iso()),
             )
+            sync_member_for_user(conn, cursor.lastrowid)
         return {"message": "用户已创建", "users": self.list_users()}
 
     def update_user(self, user_id):
@@ -554,7 +650,25 @@ class Handler(BaseHTTPRequestHandler):
         values.append(user_id)
         with connect() as conn:
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
+            sync_member_for_user(conn, user_id)
         return {"message": "用户已更新", "users": self.list_users()}
+
+    def delete_user(self, user_id, current_user):
+        self.require_admin()
+        if user_id == current_user["id"]:
+            raise AppError(400, "不能删除当前登录账号")
+        with connect() as conn:
+            user = conn.execute("SELECT id, active FROM users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                raise AppError(404, "用户不存在")
+            if user["active"] == 0:
+                return {"message": "用户已删除", "users": self.list_users()}
+            conn.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
+            conn.execute("UPDATE members SET active=0 WHERE user_id=?", (user_id,))
+        for token, session_user_id in list(SESSIONS.items()):
+            if session_user_id == user_id:
+                del SESSIONS[token]
+        return {"message": "用户已删除", "users": self.list_users()}
 
     def list_members(self):
         with connect() as conn:
@@ -563,7 +677,8 @@ class Handler(BaseHTTPRequestHandler):
                     """
                     SELECT m.*, u.display_name AS linked_user
                     FROM members m
-                    LEFT JOIN users u ON u.id = m.user_id
+                    JOIN users u ON u.id = m.user_id
+                    WHERE m.active=1 AND u.active=1
                     ORDER BY m.id
                     """
                 ).fetchall()
@@ -625,6 +740,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "没有可更新字段")
             values.append(member_id)
             conn.execute(f"UPDATE members SET {', '.join(fields)} WHERE id=?", values)
+            if member["user_id"] and "name" in data:
+                conn.execute("UPDATE users SET display_name=? WHERE id=?", (data["name"], member["user_id"]))
         return {"message": "成员档案已更新", "members": self.list_members()}
 
     def create_member_post(self, member_id, user):
@@ -640,6 +757,32 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"message": "已发布", "members": self.list_members()}
 
+    def list_team_posts(self):
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    """
+                    SELECT p.*, u.display_name
+                    FROM team_posts p
+                    JOIN users u ON u.id = p.user_id
+                    ORDER BY p.created_at ASC, p.id ASC
+                    """
+                ).fetchall()
+            )
+
+    def create_team_post(self, user):
+        data = read_json(self)
+        kind = data.get("kind") if data.get("kind") in ("comment", "roast") else "comment"
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise AppError(400, "内容不能为空")
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO team_posts(user_id, kind, content, created_at) VALUES(?,?,?,?)",
+                (user["id"], kind, content, now_iso()),
+            )
+        return {"message": "已发布", "posts": self.list_team_posts()}
+
     def list_rules(self, query):
         clauses = ["1=1"]
         params = []
@@ -652,10 +795,15 @@ class Handler(BaseHTTPRequestHandler):
     def create_rule(self):
         admin = self.require_admin()
         data = read_json(self)
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise AppError(400, "规则内容不能为空")
+        title = (data.get("title") or content[:24] or "红黑榜规则").strip()
+        kind = data.get("kind") if data.get("kind") in ("red", "black") else "red"
         with connect() as conn:
             conn.execute(
                 "INSERT INTO red_black_rules(title, kind, content, effective_from, effective_to, active, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (data.get("title"), data.get("kind"), data.get("content"), data.get("effective_from") or None, data.get("effective_to") or None, 1, admin["id"], now_iso()),
+                (title, kind, content, None, None, 1, admin["id"], now_iso()),
             )
         return {"message": "规则已发布", "rules": self.list_rules({})}
 
@@ -740,10 +888,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute(
                     """
                     SELECT i.*, u.display_name AS owner_name,
+                           c.display_name AS created_by_name,
                            t.name AS type_name, t.color AS type_color,
                            o.title AS option_title
                     FROM meeting_items i
                     LEFT JOIN users u ON u.id = i.owner_id
+                    LEFT JOIN users c ON c.id = i.created_by
                     LEFT JOIN meeting_topic_types t ON t.id = i.type_id
                     LEFT JOIN meeting_topic_options o ON o.id = i.option_id
                     ORDER BY i.created_at
@@ -772,6 +922,7 @@ class Handler(BaseHTTPRequestHandler):
         return meetings
 
     def create_meeting(self, user):
+        self.require_admin()
         data = read_json(self)
         with connect() as conn:
             conn.execute(
@@ -779,6 +930,83 @@ class Handler(BaseHTTPRequestHandler):
                 (data.get("meeting_date") or today_iso(), data.get("title") or "周例会", data.get("summary") or "", "open", user["id"], now_iso()),
             )
         return {"message": "会议已创建", "meetings": self.list_meetings({})}
+
+    def bulk_generate_meetings(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        start = week_start(data.get("start_date") or today_iso())
+        weeks = max(1, min(26, int(data.get("weeks") or 4)))
+        title = (data.get("title") or "周例会").strip()
+        summary = (data.get("summary") or "按预设议题自动生成").strip()
+        start_date = dt.date.fromisoformat(start)
+        created_meetings = 0
+        created_items = 0
+        with connect() as conn:
+            options = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT o.*, t.name AS type_name
+                    FROM meeting_topic_options o
+                    JOIN meeting_topic_types t ON t.id = o.type_id
+                    WHERE o.active=1 AND t.active=1
+                    ORDER BY o.sort_order, o.id
+                    """
+                ).fetchall()
+            )
+            if not options:
+                raise AppError(400, "请先维护预设议题")
+            for offset in range(weeks):
+                meeting_date = (start_date + dt.timedelta(weeks=offset)).isoformat()
+                meeting = conn.execute(
+                    "SELECT id FROM meetings WHERE meeting_date=? ORDER BY id LIMIT 1",
+                    (meeting_date,),
+                ).fetchone()
+                if meeting:
+                    meeting_id = meeting["id"]
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
+                        (meeting_date, title, summary, "open", admin["id"], now_iso()),
+                    )
+                    meeting_id = cursor.lastrowid
+                    created_meetings += 1
+                for option in options:
+                    recurrence = max(1, min(4, int(option.get("recurrence_weeks") or 1)))
+                    if offset % recurrence != 0:
+                        continue
+                    exists = conn.execute(
+                        "SELECT id FROM meeting_items WHERE meeting_id=? AND option_id=?",
+                        (meeting_id, option["id"]),
+                    ).fetchone()
+                    if exists:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO meeting_items(
+                            meeting_id, section, title, detail, minutes, owner_id, status,
+                            due_date, created_by, created_at, type_id, option_id
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            meeting_id,
+                            option["type_name"],
+                            option["title"],
+                            option["default_detail"] or "",
+                            "",
+                            None,
+                            "todo",
+                            None,
+                            admin["id"],
+                            now_iso(),
+                            option["type_id"],
+                            option["id"],
+                        ),
+                    )
+                    created_items += 1
+        return {
+            "message": f"已生成 {created_meetings} 场会议、{created_items} 个议题",
+            "meetings": self.list_meetings({}),
+        }
 
     def list_meeting_topics(self):
         with connect() as conn:
@@ -812,12 +1040,38 @@ class Handler(BaseHTTPRequestHandler):
     def create_meeting_topic_option(self):
         self.require_admin()
         data = read_json(self)
+        recurrence = max(1, min(4, int(data.get("recurrence_weeks") or 1)))
         with connect() as conn:
             conn.execute(
-                "INSERT INTO meeting_topic_options(type_id, title, default_detail, sort_order, active) VALUES(?,?,?,?,1)",
-                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", int(data.get("sort_order") or 0)),
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, recurrence_weeks, sort_order, active) VALUES(?,?,?,?,?,1)",
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", recurrence, int(data.get("sort_order") or 0)),
             )
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
+
+    def update_meeting_topic_option(self, option_id):
+        self.require_admin()
+        data = read_json(self)
+        fields = []
+        values = []
+        for key in ("type_id", "title", "default_detail", "sort_order", "active"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append(data[key])
+        if "recurrence_weeks" in data:
+            fields.append("recurrence_weeks=?")
+            values.append(max(1, min(4, int(data.get("recurrence_weeks") or 1))))
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        values.append(option_id)
+        with connect() as conn:
+            conn.execute(f"UPDATE meeting_topic_options SET {', '.join(fields)} WHERE id=?", values)
+        return {"message": "预设议题已更新", **self.list_meeting_topics()}
+
+    def delete_meeting_topic_option(self, option_id):
+        self.require_admin()
+        with connect() as conn:
+            conn.execute("UPDATE meeting_topic_options SET active=0 WHERE id=?", (option_id,))
+        return {"message": "预设议题已删除", **self.list_meeting_topics()}
 
     def create_meeting_item(self, meeting_id, user):
         data = read_json(self)
@@ -826,6 +1080,8 @@ class Handler(BaseHTTPRequestHandler):
         section = data.get("section") or "议题"
         title = data.get("title")
         detail = data.get("detail") or ""
+        if option_id and user["role"] != "admin":
+            raise AppError(403, "普通成员只能添加自定义议题")
         with connect() as conn:
             if option_id:
                 option = conn.execute(
@@ -849,10 +1105,28 @@ class Handler(BaseHTTPRequestHandler):
             if not title:
                 raise AppError(400, "议题标题不能为空")
             conn.execute(
-                "INSERT INTO meeting_items(meeting_id, section, title, detail, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (meeting_id, section, title, detail, data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
+                "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
             )
         return {"message": "议题已添加", "meetings": self.list_meetings({})}
+
+    def update_meeting_item(self, item_id):
+        data = read_json(self)
+        fields = []
+        values = []
+        for key in ("minutes", "detail", "status", "owner_id", "due_date"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append(data[key] or None if key in ("owner_id", "due_date") else data[key])
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        values.append(item_id)
+        with connect() as conn:
+            item = conn.execute("SELECT id FROM meeting_items WHERE id=?", (item_id,)).fetchone()
+            if not item:
+                raise AppError(404, "议题不存在")
+            conn.execute(f"UPDATE meeting_items SET {', '.join(fields)} WHERE id=?", values)
+        return {"message": "会议纪要已保存", "meetings": self.list_meetings({})}
 
     def upsert_attendance(self, meeting_id):
         admin = self.require_admin()
@@ -879,17 +1153,56 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_links(self):
         with connect() as conn:
-            return rows_to_list(conn.execute("SELECT * FROM links ORDER BY category, title").fetchall())
+            return rows_to_list(
+                conn.execute(
+                    """
+                    SELECT l.*, u.display_name AS creator
+                    FROM links l
+                    LEFT JOIN users u ON u.id = l.created_by
+                    ORDER BY l.category, l.title
+                    """
+                ).fetchall()
+            )
 
     def create_link(self):
-        admin = self.require_admin()
+        user = self.current_user()
         data = read_json(self)
+        title = (data.get("title") or "").strip()
+        url = (data.get("url") or "").strip()
+        if not title or not url:
+            raise AppError(400, "链接名称和地址不能为空")
         with connect() as conn:
+            category = data.get("category")
+            if not category:
+                first = conn.execute("SELECT name FROM link_categories WHERE active=1 ORDER BY sort_order, id LIMIT 1").fetchone()
+                category = first["name"] if first else "通用"
             conn.execute(
                 "INSERT INTO links(title, url, category, description, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                (data.get("title"), data.get("url"), data.get("category") or "通用", data.get("description") or "", admin["id"], now_iso()),
+                (title, url, category, data.get("description") or "", user["id"], now_iso()),
             )
         return {"message": "链接已归档", "links": self.list_links()}
+
+    def list_link_categories(self):
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    "SELECT * FROM link_categories WHERE active=1 ORDER BY sort_order, id"
+                ).fetchall()
+            )
+
+    def create_link_category(self):
+        self.require_admin()
+        data = read_json(self)
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise AppError(400, "分类名称不能为空")
+        with connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO link_categories(name, sort_order, active, created_at) VALUES(?,?,1,?)",
+                (name, int(data.get("sort_order") or 0), now_iso()),
+            )
+            conn.execute("UPDATE link_categories SET active=1 WHERE name=?", (name,))
+        return {"message": "链接分类已保存", "categories": self.list_link_categories()}
 
     def list_machines(self):
         with connect() as conn:
