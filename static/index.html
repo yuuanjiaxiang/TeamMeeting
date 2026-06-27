@@ -279,6 +279,8 @@
                 <input name="url" placeholder="https://..." required />
                 <select name="category" data-link-categories required></select>
                 <input name="description" placeholder="说明" />
+                <input name="machine_scope" placeholder="适用机台，逗号分隔" />
+                <input name="process_tags" placeholder="流程/标签，逗号分隔" />
                 <button>保存链接</button>
               </form>
             </section>
@@ -298,7 +300,13 @@
                 </div>
                 <div class="link-toolbar">
                   <select id="linkCategoryFilter"></select>
-                  <input id="linkKeywordSearch" placeholder="搜索名称、地址、说明" />
+                  <select id="linkStatusFilter">
+                    <option value="">全部状态</option>
+                    <option value="valid">可用链接</option>
+                    <option value="pinned">置顶链接</option>
+                    <option value="invalid">失效链接</option>
+                  </select>
+                  <input id="linkKeywordSearch" placeholder="搜索名称、地址、说明、机台、流程" />
                 </div>
               </div>
               <div id="linkList" class="table"></div>

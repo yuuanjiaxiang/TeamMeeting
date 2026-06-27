@@ -424,6 +424,13 @@ def init_db():
                 url TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT '通用',
                 description TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                invalid INTEGER NOT NULL DEFAULT 0,
+                click_count INTEGER NOT NULL DEFAULT 0,
+                last_clicked_at TEXT,
+                quality_note TEXT,
+                machine_scope TEXT NOT NULL DEFAULT '[]',
+                process_tags TEXT NOT NULL DEFAULT '[]',
                 created_by INTEGER NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL
             );
@@ -502,6 +509,13 @@ def init_db():
         ensure_column(conn, "members", "expertise", "TEXT")
         ensure_column(conn, "members", "backup_owner", "TEXT")
         ensure_column(conn, "members", "contact", "TEXT")
+        ensure_column(conn, "links", "pinned", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "links", "invalid", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "links", "click_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "links", "last_clicked_at", "TEXT")
+        ensure_column(conn, "links", "quality_note", "TEXT")
+        ensure_column(conn, "links", "machine_scope", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "links", "process_tags", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "meeting_items", "type_id", "INTEGER")
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
         ensure_column(conn, "meeting_items", "minutes", "TEXT")
@@ -572,6 +586,10 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/backups/download" and method == "GET":
                 self.send_backup_file(parse_qs(parsed.query))
                 return
+            link_open = parsed.path.strip("/").split("/")
+            if len(link_open) == 4 and link_open[:2] == ["api", "links"] and link_open[3] == "open" and method == "GET":
+                self.send_link_redirect(int(link_open[2]))
+                return
             if parsed.path.startswith("/api/"):
                 result = self.route_api(method, parsed.path, parse_qs(parsed.query))
                 self.send_json(result)
@@ -614,6 +632,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
         self.wfile.flush()
+
+    def send_link_redirect(self, link_id):
+        self.current_user()
+        with connect() as conn:
+            link = conn.execute("SELECT id, title, url, invalid FROM links WHERE id=?", (link_id,)).fetchone()
+            if not link:
+                raise AppError(404, "链接不存在")
+            if link["invalid"]:
+                raise AppError(410, "链接已标记失效，已阻止打开")
+            conn.execute(
+                "UPDATE links SET click_count=COALESCE(click_count, 0)+1, last_clicked_at=? WHERE id=?",
+                (now_iso(), link_id),
+            )
+        self.send_response(302)
+        self.send_header("Location", link["url"])
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
 
     def send_backup_file(self, query):
         self.require_admin()
@@ -740,6 +777,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"links": self.list_links()}
             if method == "POST":
                 return self.create_link()
+        if len(parts) == 3 and parts[:2] == ["api", "links"] and method == "PATCH":
+            return self.update_link_quality(int(parts[2]))
         if path == "/api/link-categories":
             if method == "GET":
                 return {"categories": self.list_link_categories()}
@@ -1390,16 +1429,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_links(self):
         with connect() as conn:
-            return rows_to_list(
+            links = rows_to_list(
                 conn.execute(
                     """
                     SELECT l.*, u.display_name AS creator
                     FROM links l
                     LEFT JOIN users u ON u.id = l.created_by
-                    ORDER BY l.category, l.title
+                    ORDER BY l.invalid ASC, l.pinned DESC, l.category, l.title
                     """
                 ).fetchall()
             )
+        for link in links:
+            for key in ("machine_scope", "process_tags"):
+                try:
+                    link[key] = json.loads(link.get(key) or "[]")
+                except json.JSONDecodeError:
+                    link[key] = []
+        return links
 
     def create_link(self):
         user = self.current_user()
@@ -1408,17 +1454,80 @@ class Handler(BaseHTTPRequestHandler):
         url = (data.get("url") or "").strip()
         if not title or not url:
             raise AppError(400, "链接名称和地址不能为空")
+        machine_scope = data.get("machine_scope") or []
+        process_tags = data.get("process_tags") or []
+        if isinstance(machine_scope, str):
+            machine_scope = [item.strip() for item in machine_scope.split(",") if item.strip()]
+        if isinstance(process_tags, str):
+            process_tags = [item.strip() for item in process_tags.split(",") if item.strip()]
         with connect() as conn:
             category = data.get("category")
             if not category:
                 first = conn.execute("SELECT name FROM link_categories WHERE active=1 ORDER BY sort_order, id LIMIT 1").fetchone()
                 category = first["name"] if first else "通用"
             cursor = conn.execute(
-                "INSERT INTO links(title, url, category, description, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                (title, url, category, data.get("description") or "", user["id"], now_iso()),
+                """
+                INSERT INTO links(
+                    title, url, category, description, machine_scope, process_tags,
+                    pinned, invalid, quality_note, created_by, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    title,
+                    url,
+                    category,
+                    data.get("description") or "",
+                    json.dumps(machine_scope, ensure_ascii=False),
+                    json.dumps(process_tags, ensure_ascii=False),
+                    0,
+                    0,
+                    "",
+                    user["id"],
+                    now_iso(),
+                ),
             )
             write_audit(conn, user, "link.create", "link", cursor.lastrowid, "常用链接已归档", {"title": title, "category": category}, self.client_address[0])
         return {"message": "链接已归档", "links": self.list_links()}
+
+    def update_link_quality(self, link_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        fields = []
+        values = []
+        for key in ("pinned", "invalid"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append(1 if data.get(key) in (1, "1", True, "true", "on", "yes", "置顶", "失效") else 0)
+        for key in ("quality_note", "description", "category"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append(data.get(key) or "")
+        for key in ("machine_scope", "process_tags"):
+            if key in data:
+                items = data.get(key) or []
+                if isinstance(items, str):
+                    items = [item.strip() for item in items.split(",") if item.strip()]
+                fields.append(f"{key}=?")
+                values.append(json.dumps(items, ensure_ascii=False))
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        values.append(link_id)
+        with connect() as conn:
+            link = conn.execute("SELECT id, title FROM links WHERE id=?", (link_id,)).fetchone()
+            if not link:
+                raise AppError(404, "链接不存在")
+            conn.execute(f"UPDATE links SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(
+                conn,
+                admin,
+                "link.quality_update",
+                "link",
+                link_id,
+                "链接质量信息已更新",
+                {"title": link["title"], "fields": list(data.keys())},
+                self.client_address[0],
+            )
+        return {"message": "链接质量已更新", "links": self.list_links()}
 
     def list_link_categories(self):
         with connect() as conn:

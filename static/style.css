@@ -445,6 +445,11 @@ th {
   color: var(--orange);
 }
 
+.pill.success {
+  background: #e8fff6;
+  color: var(--green);
+}
+
 .member-layout {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -894,7 +899,7 @@ th {
 
 .link-toolbar {
   display: grid;
-  grid-template-columns: 150px minmax(220px, 1fr);
+  grid-template-columns: 150px 130px minmax(220px, 1fr);
   gap: 8px;
   min-width: min(460px, 100%);
 }
@@ -903,6 +908,27 @@ th {
   color: var(--blue);
   word-break: break-all;
   text-decoration: none;
+}
+
+.link-url.disabled {
+  color: var(--subtle);
+  text-decoration: line-through;
+}
+
+.link-invalid {
+  background: #fffaf7;
+}
+
+.link-quality-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(90px, 1fr));
+  gap: 8px;
+  min-width: 320px;
+}
+
+.link-quality-form input[name="quality_note"],
+.link-quality-form button {
+  grid-column: 1 / -1;
 }
 
 .settings-form {

@@ -669,23 +669,71 @@ async function loadLinks() {
 
 function renderLinks() {
   const category = $("#linkCategoryFilter")?.value || "";
+  const status = $("#linkStatusFilter")?.value || "";
   const keyword = ($("#linkKeywordSearch")?.value || "").trim().toLowerCase();
   const filtered = state.links.filter((link) => {
     const hitCategory = !category || link.category === category;
-    const text = [link.title, link.url, link.description, link.category, link.creator].filter(Boolean).join(" ").toLowerCase();
-    return hitCategory && (!keyword || text.includes(keyword));
+    const hitStatus = !status
+      || (status === "valid" && Number(link.invalid) !== 1)
+      || (status === "pinned" && Number(link.pinned) === 1)
+      || (status === "invalid" && Number(link.invalid) === 1);
+    const text = [
+      link.title,
+      link.url,
+      link.description,
+      link.category,
+      link.creator,
+      link.quality_note,
+      ...(link.machine_scope || []),
+      ...(link.process_tags || []),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return hitCategory && hitStatus && (!keyword || text.includes(keyword));
   });
+  const qualityHeader = state.permissions.isAdmin ? "<th>质量管理</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
     <table>
-      <thead><tr><th>名称</th><th>分类</th><th>地址</th><th>说明</th><th>归档人</th></tr></thead>
+      <thead><tr><th>名称</th><th>质量</th><th>分类</th><th>适用范围</th><th>地址</th><th>点击</th><th>归档人</th>${qualityHeader}</tr></thead>
       <tbody>
         ${filtered.map((link) => `
-          <tr>
-            <td><strong>${escapeHtml(link.title)}</strong></td>
+          <tr class="${Number(link.invalid) === 1 ? "link-invalid" : ""}">
+            <td>
+              <strong>${escapeHtml(link.title)}</strong>
+              ${Number(link.pinned) === 1 ? '<span class="pill">置顶</span>' : ""}
+            </td>
+            <td>
+              <span class="pill ${Number(link.invalid) === 1 ? "warn" : "success"}">${Number(link.invalid) === 1 ? "失效" : "可用"}</span>
+              ${link.quality_note ? `<p>${escapeHtml(link.quality_note)}</p>` : ""}
+            </td>
             <td><span class="pill">${escapeHtml(link.category)}</span></td>
-            <td><a class="link-url" href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a></td>
-            <td>${escapeHtml(link.description || "")}</td>
+            <td>
+              <div class="tags">${(link.machine_scope || []).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("")}</div>
+              <div class="tags">${(link.process_tags || []).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("")}</div>
+            </td>
+            <td>
+              ${Number(link.invalid) === 1
+                ? `<span class="link-url disabled">${escapeHtml(link.url)}</span>`
+                : `<a class="link-url" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>`}
+              ${link.description ? `<p>${escapeHtml(link.description)}</p>` : ""}
+            </td>
+            <td>${Number(link.click_count || 0)} 次${link.last_clicked_at ? `<br><small>${escapeHtml(link.last_clicked_at)}</small>` : ""}</td>
             <td>${escapeHtml(link.creator || "-")}</td>
+            ${state.permissions.isAdmin ? `
+              <td>
+                <form class="link-quality-form" data-link-id="${link.id}">
+                  <select name="pinned">
+                    <option value="0" ${Number(link.pinned) === 1 ? "" : "selected"}>不置顶</option>
+                    <option value="1" ${Number(link.pinned) === 1 ? "selected" : ""}>置顶</option>
+                  </select>
+                  <select name="invalid">
+                    <option value="0" ${Number(link.invalid) === 1 ? "" : "selected"}>可用</option>
+                    <option value="1" ${Number(link.invalid) === 1 ? "selected" : ""}>失效</option>
+                  </select>
+                  <input name="machine_scope" value="${escapeHtml((link.machine_scope || []).join(", "))}" placeholder="适用机台">
+                  <input name="process_tags" value="${escapeHtml((link.process_tags || []).join(", "))}" placeholder="流程标签">
+                  <input name="quality_note" value="${escapeHtml(link.quality_note || "")}" placeholder="质量备注">
+                  <button>保存</button>
+                </form>
+              </td>` : ""}
           </tr>`).join("")}
       </tbody>
     </table>` : "<p>没有匹配的链接</p>";
@@ -951,6 +999,7 @@ function bindEvents() {
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
+  $("#linkStatusFilter").addEventListener("change", renderLinks);
   $("#linkKeywordSearch").addEventListener("input", renderLinks);
 
   const memberForm = $("#memberForm");
@@ -1020,7 +1069,8 @@ function bindEvents() {
     const attendanceForm = event.target.closest(".attendance-row");
     const minuteForm = event.target.closest(".minute-form");
     const presetForm = event.target.closest(".preset-form");
-    if (!postForm && !avatarForm && !profileForm && !topicForm && !attendanceForm && !minuteForm && !presetForm) return;
+    const linkQualityForm = event.target.closest(".link-quality-form");
+    if (!postForm && !avatarForm && !profileForm && !topicForm && !attendanceForm && !minuteForm && !presetForm && !linkQualityForm) return;
     event.preventDefault();
     try {
       if (postForm) {
@@ -1046,6 +1096,9 @@ function bindEvents() {
       }
       if (presetForm) {
         await api(`/api/meeting-topic-options/${presetForm.dataset.optionId}`, { method: "PATCH", body: JSON.stringify(fullFormData(presetForm)) });
+      }
+      if (linkQualityForm) {
+        await api(`/api/links/${linkQualityForm.dataset.linkId}`, { method: "PATCH", body: JSON.stringify(fullFormData(linkQualityForm)) });
       }
       event.target.reset();
       setDefaultDates();
