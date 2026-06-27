@@ -17,7 +17,20 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "weekly_team.db"
+BACKUP_DIR = DATA_DIR / "backups"
 SESSIONS = {}
+
+DEFAULT_SETTINGS = [
+    ("meeting_default_title", "默认会议标题", "周例会", "text", "创建会议和批量生成时使用的默认标题"),
+    ("meeting_bulk_default_weeks", "批量生成周数", "4", "number", "会议沙盘批量生成默认覆盖的周数"),
+    ("shift_default_hours", "默认班次小时", "12", "number", "新增排班时默认计入的工时"),
+    ("thank_you_weekly_limit", "每周 Thank You 上限", "3", "number", "每位成员每周最多感谢的人数"),
+    ("red_score_default_points", "红榜默认分值", "1", "number", "记录红榜积分时的默认分值"),
+    ("black_score_default_points", "黑榜默认分值", "1", "number", "记录黑榜积分时的默认分值"),
+    ("late_donation_label", "迟到乐捐说明", "迟到要乐捐", "text", "参会签到中迟到乐捐的口径说明"),
+    ("backup_auto_enabled", "每日自动备份", "1", "boolean", "启用后系统每天自动生成一次数据库备份"),
+    ("backup_retention_days", "备份保留天数", "30", "number", "自动清理超过该天数的备份，0 表示不清理"),
+]
 
 
 def now_iso():
@@ -119,6 +132,131 @@ def seed_link_categories(conn):
             "INSERT INTO link_categories(name, sort_order, active, created_at) VALUES(?,?,1,?)",
             (name, index, now_iso()),
         )
+
+
+def seed_system_settings(conn):
+    for key, label, value, value_type, description in DEFAULT_SETTINGS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO system_settings(key, label, value, value_type, description, updated_at)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (key, label, value, value_type, description, now_iso()),
+        )
+
+
+def get_setting_value(conn, key, default=None):
+    row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def get_int_setting(conn, key, default, minimum=None, maximum=None):
+    try:
+        value = int(get_setting_value(conn, key, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def get_float_setting(conn, key, default, minimum=None, maximum=None):
+    try:
+        value = float(get_setting_value(conn, key, default))
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def write_audit(conn, user, action, entity_type, entity_id=None, summary="", metadata=None, ip_address=""):
+    user_id = user.get("id") if isinstance(user, dict) else user
+    conn.execute(
+        """
+        INSERT INTO audit_logs(user_id, action, entity_type, entity_id, summary, metadata, ip_address, created_at)
+        VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (
+            user_id,
+            action,
+            entity_type,
+            entity_id,
+            summary,
+            json.dumps(metadata or {}, ensure_ascii=False),
+            ip_address,
+            now_iso(),
+        ),
+    )
+
+
+def prune_old_backups(conn):
+    retention_days = get_int_setting(conn, "backup_retention_days", 30, minimum=0, maximum=3650)
+    if retention_days <= 0:
+        return
+    cutoff = dt.datetime.now() - dt.timedelta(days=retention_days)
+    for row in conn.execute("SELECT id, filename, created_at FROM backups").fetchall():
+        try:
+            created_at = dt.datetime.fromisoformat(row["created_at"])
+        except ValueError:
+            continue
+        if created_at >= cutoff:
+            continue
+        backup_path = BACKUP_DIR / row["filename"]
+        if backup_path.exists():
+            backup_path.unlink()
+        conn.execute("DELETE FROM backups WHERE id=?", (row["id"],))
+
+
+def create_database_backup(kind="manual", user_id=None):
+    if not DB_PATH.exists():
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"weekly_team_{kind}_{stamp}.db"
+    target = BACKUP_DIR / filename
+    with sqlite3.connect(DB_PATH) as source, sqlite3.connect(target) as dest:
+        source.backup(dest)
+    size = target.stat().st_size
+    with connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO backups(filename, size_bytes, kind, created_by, created_at) VALUES(?,?,?,?,?)",
+            (filename, size, kind, user_id, now_iso()),
+        )
+        write_audit(
+            conn,
+            user_id,
+            "backup.create",
+            "backup",
+            cursor.lastrowid,
+            "自动备份已生成" if kind == "auto" else "手动备份已生成",
+            {"filename": filename, "size_bytes": size, "kind": kind},
+        )
+        prune_old_backups(conn)
+    return {"filename": filename, "size_bytes": size, "kind": kind}
+
+
+def ensure_daily_backup():
+    if not DB_PATH.exists():
+        return
+    with connect() as conn:
+        enabled = get_setting_value(conn, "backup_auto_enabled", "1") != "0"
+        if not enabled:
+            return
+        today_prefix = f"weekly_team_auto_{dt.datetime.now().strftime('%Y%m%d')}_"
+        exists = conn.execute(
+            "SELECT id FROM backups WHERE kind='auto' AND filename LIKE ? LIMIT 1",
+            (f"{today_prefix}%",),
+        ).fetchone()
+    if exists:
+        return
+    if any(BACKUP_DIR.glob(f"{today_prefix}*.db")):
+        return
+    create_database_backup(kind="auto", user_id=None)
 
 
 def default_member_title(role):
@@ -325,15 +463,52 @@ def init_db():
                 created_at TEXT NOT NULL,
                 UNIQUE(voter_id, receiver_id, week_start)
             );
+
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                value TEXT NOT NULL,
+                value_type TEXT NOT NULL DEFAULT 'text',
+                description TEXT,
+                updated_by INTEGER REFERENCES users(id),
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id),
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER,
+                summary TEXT,
+                metadata TEXT,
+                ip_address TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS backups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL CHECK(kind IN ('auto', 'manual')),
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
             """
         )
         ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "members", "skills", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "members", "machine_scope", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "members", "expertise", "TEXT")
+        ensure_column(conn, "members", "backup_owner", "TEXT")
+        ensure_column(conn, "members", "contact", "TEXT")
         ensure_column(conn, "meeting_items", "type_id", "INTEGER")
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
         ensure_column(conn, "meeting_items", "minutes", "TEXT")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
         seed_meeting_topics(conn)
         seed_link_categories(conn)
+        seed_system_settings(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
@@ -393,6 +568,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path.startswith("/api/"):
+                ensure_daily_backup()
+            if parsed.path == "/api/backups/download" and method == "GET":
+                self.send_backup_file(parse_qs(parsed.query))
+                return
+            if parsed.path.startswith("/api/"):
                 result = self.route_api(method, parsed.path, parse_qs(parsed.query))
                 self.send_json(result)
             else:
@@ -428,6 +608,25 @@ class Handler(BaseHTTPRequestHandler):
         content = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        self.wfile.write(content)
+        self.wfile.flush()
+
+    def send_backup_file(self, query):
+        self.require_admin()
+        filename = (query.get("file") or [""])[0]
+        if not filename or "/" in filename or "\\" in filename or not filename.endswith(".db"):
+            raise AppError(400, "备份文件名不合法")
+        file_path = (BACKUP_DIR / filename).resolve()
+        if BACKUP_DIR.resolve() not in file_path.parents or not file_path.exists():
+            raise AppError(404, "备份文件不存在")
+        content = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Connection", "close")
         self.close_connection = True
@@ -569,6 +768,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/dashboards/thank-you" and method == "GET":
             return self.thank_you_dashboard(query)
 
+        if path == "/api/settings":
+            if method == "GET":
+                return {"settings": self.list_settings()}
+            if method == "PATCH":
+                return self.update_settings()
+
+        if path == "/api/audit-logs" and method == "GET":
+            return {"logs": self.list_audit_logs(query)}
+
+        if path == "/api/backups":
+            if method == "GET":
+                return {"backups": self.list_backups()}
+            if method == "POST":
+                return self.create_manual_backup()
+
         raise AppError(404, "接口不存在")
 
     def login(self):
@@ -582,6 +796,8 @@ class Handler(BaseHTTPRequestHandler):
         token = secrets.token_urlsafe(32)
         SESSIONS[token] = user["id"]
         safe_user = {key: user[key] for key in ("id", "username", "display_name", "role", "active", "created_at")}
+        with connect() as conn:
+            write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
         return {
             "user": safe_user,
             "permissions": permissions_for(safe_user),
@@ -621,7 +837,7 @@ class Handler(BaseHTTPRequestHandler):
             return rows_to_list(conn.execute("SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id").fetchall())
 
     def create_user(self):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
         salt, password_hash = make_hash(data.get("password") or "123456")
         with connect() as conn:
@@ -630,10 +846,11 @@ class Handler(BaseHTTPRequestHandler):
                 ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", 1, now_iso()),
             )
             sync_member_for_user(conn, cursor.lastrowid)
+            write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": data.get("username"), "role": data.get("role") or "user"}, self.client_address[0])
         return {"message": "用户已创建", "users": self.list_users()}
 
     def update_user(self, user_id):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
         fields = []
         values = []
@@ -651,6 +868,7 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
             sync_member_for_user(conn, user_id)
+            write_audit(conn, admin, "user.update", "user", user_id, "用户已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "用户已更新", "users": self.list_users()}
 
     def delete_user(self, user_id, current_user):
@@ -665,6 +883,7 @@ class Handler(BaseHTTPRequestHandler):
                 return {"message": "用户已删除", "users": self.list_users()}
             conn.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
             conn.execute("UPDATE members SET active=0 WHERE user_id=?", (user_id,))
+            write_audit(conn, current_user, "user.delete", "user", user_id, "用户已删除", {}, self.client_address[0])
         for token, session_user_id in list(SESSIONS.items()):
             if session_user_id == user_id:
                 del SESSIONS[token]
@@ -698,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
             post_map.setdefault(post["member_id"], []).append(post)
         for member in members:
             member["tags"] = json.loads(member["tags"] or "[]")
+            member["skills"] = json.loads(member["skills"] or "[]")
+            member["machine_scope"] = json.loads(member["machine_scope"] or "[]")
             member["posts"] = post_map.get(member["id"], [])
         return members
 
@@ -725,23 +946,25 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(403, "无权修改该成员档案")
             fields = []
             values = []
-            allowed = ("name", "avatar_url", "title", "responsibilities", "comment", "user_id")
+            allowed = ("name", "avatar_url", "title", "responsibilities", "comment", "user_id", "expertise", "backup_owner", "contact")
             for key in allowed:
                 if key in data:
                     fields.append(f"{key}=?")
                     values.append(data[key] or None if key == "user_id" else data[key])
-            if "tags" in data:
-                tags = data.get("tags") or []
-                if isinstance(tags, str):
-                    tags = [item.strip() for item in tags.split(",") if item.strip()]
-                fields.append("tags=?")
-                values.append(json.dumps(tags, ensure_ascii=False))
+            for json_key in ("tags", "skills", "machine_scope"):
+                if json_key in data:
+                    items = data.get(json_key) or []
+                    if isinstance(items, str):
+                        items = [item.strip() for item in items.split(",") if item.strip()]
+                    fields.append(f"{json_key}=?")
+                    values.append(json.dumps(items, ensure_ascii=False))
             if not fields:
                 raise AppError(400, "没有可更新字段")
             values.append(member_id)
             conn.execute(f"UPDATE members SET {', '.join(fields)} WHERE id=?", values)
             if member["user_id"] and "name" in data:
                 conn.execute("UPDATE users SET display_name=? WHERE id=?", (data["name"], member["user_id"]))
+            write_audit(conn, user, "member.update", "member", member_id, "成员画像已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "成员档案已更新", "members": self.list_members()}
 
     def create_member_post(self, member_id, user):
@@ -801,10 +1024,11 @@ class Handler(BaseHTTPRequestHandler):
         title = (data.get("title") or content[:24] or "红黑榜规则").strip()
         kind = data.get("kind") if data.get("kind") in ("red", "black") else "red"
         with connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO red_black_rules(title, kind, content, effective_from, effective_to, active, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (title, kind, content, None, None, 1, admin["id"], now_iso()),
             )
+            write_audit(conn, admin, "rule.create", "red_black_rule", cursor.lastrowid, "红黑榜规则已发布", {"kind": kind}, self.client_address[0])
         return {"message": "规则已发布", "rules": self.list_rules({})}
 
     def list_scores(self, query):
@@ -831,10 +1055,11 @@ class Handler(BaseHTTPRequestHandler):
         if data.get("kind") == "black":
             points = -points
         with connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO red_black_scores(user_id, rule_id, kind, points, reason, score_date, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (data.get("user_id"), data.get("rule_id") or None, data.get("kind"), points, data.get("reason") or "", data.get("score_date") or today_iso(), admin["id"], now_iso()),
             )
+            write_audit(conn, admin, "score.create", "red_black_score", cursor.lastrowid, "红黑榜积分已记录", {"user_id": data.get("user_id"), "points": points}, self.client_address[0])
         return {"message": "积分已记录", "scores": self.list_scores({})}
 
     def red_black_dashboard(self, query):
@@ -925,23 +1150,26 @@ class Handler(BaseHTTPRequestHandler):
         self.require_admin()
         data = read_json(self)
         with connect() as conn:
-            conn.execute(
+            default_title = get_setting_value(conn, "meeting_default_title", "周例会")
+            cursor = conn.execute(
                 "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                (data.get("meeting_date") or today_iso(), data.get("title") or "周例会", data.get("summary") or "", "open", user["id"], now_iso()),
+                (data.get("meeting_date") or today_iso(), data.get("title") or default_title, data.get("summary") or "", "open", user["id"], now_iso()),
             )
+            write_audit(conn, user, "meeting.create", "meeting", cursor.lastrowid, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
         return {"message": "会议已创建", "meetings": self.list_meetings({})}
 
     def bulk_generate_meetings(self):
         admin = self.require_admin()
         data = read_json(self)
         start = week_start(data.get("start_date") or today_iso())
-        weeks = max(1, min(26, int(data.get("weeks") or 4)))
-        title = (data.get("title") or "周例会").strip()
         summary = (data.get("summary") or "按预设议题自动生成").strip()
         start_date = dt.date.fromisoformat(start)
         created_meetings = 0
         created_items = 0
         with connect() as conn:
+            default_weeks = get_int_setting(conn, "meeting_bulk_default_weeks", 4, minimum=1, maximum=52)
+            weeks = max(1, min(52, int(data.get("weeks") or default_weeks)))
+            title = (data.get("title") or get_setting_value(conn, "meeting_default_title", "周例会")).strip()
             options = rows_to_list(
                 conn.execute(
                     """
@@ -1003,6 +1231,7 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
                     created_items += 1
+            write_audit(conn, admin, "meeting.bulk_generate", "meeting", None, "周例会已批量生成", {"weeks": weeks, "created_meetings": created_meetings, "created_items": created_items}, self.client_address[0])
         return {
             "message": f"已生成 {created_meetings} 场会议、{created_items} 个议题",
             "meetings": self.list_meetings({}),
@@ -1031,10 +1260,11 @@ class Handler(BaseHTTPRequestHandler):
         self.require_admin()
         data = read_json(self)
         with connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO meeting_topic_types(name, color, sort_order, active) VALUES(?,?,?,1)",
                 (data.get("name"), data.get("color") or "#3370ff", int(data.get("sort_order") or 0)),
             )
+            write_audit(conn, self.current_user(), "meeting_topic_type.create", "meeting_topic_type", cursor.lastrowid, "议题类型已创建", {"name": data.get("name")}, self.client_address[0])
         return {"message": "议题类型已创建", **self.list_meeting_topics()}
 
     def create_meeting_topic_option(self):
@@ -1042,14 +1272,15 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         recurrence = max(1, min(4, int(data.get("recurrence_weeks") or 1)))
         with connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO meeting_topic_options(type_id, title, default_detail, recurrence_weeks, sort_order, active) VALUES(?,?,?,?,?,1)",
                 (data.get("type_id"), data.get("title"), data.get("default_detail") or "", recurrence, int(data.get("sort_order") or 0)),
             )
+            write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_weeks": recurrence}, self.client_address[0])
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
 
     def update_meeting_topic_option(self, option_id):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
         fields = []
         values = []
@@ -1065,12 +1296,14 @@ class Handler(BaseHTTPRequestHandler):
         values.append(option_id)
         with connect() as conn:
             conn.execute(f"UPDATE meeting_topic_options SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(conn, admin, "meeting_topic_option.update", "meeting_topic_option", option_id, "预设议题已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "预设议题已更新", **self.list_meeting_topics()}
 
     def delete_meeting_topic_option(self, option_id):
-        self.require_admin()
+        admin = self.require_admin()
         with connect() as conn:
             conn.execute("UPDATE meeting_topic_options SET active=0 WHERE id=?", (option_id,))
+            write_audit(conn, admin, "meeting_topic_option.delete", "meeting_topic_option", option_id, "预设议题已删除", {}, self.client_address[0])
         return {"message": "预设议题已删除", **self.list_meeting_topics()}
 
     def create_meeting_item(self, meeting_id, user):
@@ -1104,13 +1337,15 @@ class Handler(BaseHTTPRequestHandler):
                     section = topic_type["name"]
             if not title:
                 raise AppError(400, "议题标题不能为空")
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
             )
+            write_audit(conn, user, "meeting_item.create", "meeting_item", cursor.lastrowid, "会议议题已添加", {"meeting_id": meeting_id, "title": title}, self.client_address[0])
         return {"message": "议题已添加", "meetings": self.list_meetings({})}
 
     def update_meeting_item(self, item_id):
+        user = self.current_user()
         data = read_json(self)
         fields = []
         values = []
@@ -1126,6 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
             if not item:
                 raise AppError(404, "议题不存在")
             conn.execute(f"UPDATE meeting_items SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(conn, user, "meeting_item.update", "meeting_item", item_id, "会议议题/纪要已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "会议纪要已保存", "meetings": self.list_meetings({})}
 
     def upsert_attendance(self, meeting_id):
@@ -1149,6 +1385,7 @@ class Handler(BaseHTTPRequestHandler):
                 """,
                 (meeting_id, data.get("user_id"), status, donation_required, donation_done, data.get("note") or "", admin["id"], now_iso()),
             )
+            write_audit(conn, admin, "attendance.upsert", "meeting_attendance", meeting_id, "参会状态已更新", {"meeting_id": meeting_id, "user_id": data.get("user_id"), "status": status}, self.client_address[0])
         return {"message": "参会状态已更新", "meetings": self.list_meetings({})}
 
     def list_links(self):
@@ -1176,10 +1413,11 @@ class Handler(BaseHTTPRequestHandler):
             if not category:
                 first = conn.execute("SELECT name FROM link_categories WHERE active=1 ORDER BY sort_order, id LIMIT 1").fetchone()
                 category = first["name"] if first else "通用"
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO links(title, url, category, description, created_by, created_at) VALUES(?,?,?,?,?,?)",
                 (title, url, category, data.get("description") or "", user["id"], now_iso()),
             )
+            write_audit(conn, user, "link.create", "link", cursor.lastrowid, "常用链接已归档", {"title": title, "category": category}, self.client_address[0])
         return {"message": "链接已归档", "links": self.list_links()}
 
     def list_link_categories(self):
@@ -1202,6 +1440,8 @@ class Handler(BaseHTTPRequestHandler):
                 (name, int(data.get("sort_order") or 0), now_iso()),
             )
             conn.execute("UPDATE link_categories SET active=1 WHERE name=?", (name,))
+            row = conn.execute("SELECT id FROM link_categories WHERE name=?", (name,)).fetchone()
+            write_audit(conn, self.current_user(), "link_category.upsert", "link_category", row["id"] if row else None, "链接分类已保存", {"name": name}, self.client_address[0])
         return {"message": "链接分类已保存", "categories": self.list_link_categories()}
 
     def list_machines(self):
@@ -1209,10 +1449,11 @@ class Handler(BaseHTTPRequestHandler):
             return rows_to_list(conn.execute("SELECT * FROM machines ORDER BY name").fetchall())
 
     def create_machine(self):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
         with connect() as conn:
-            conn.execute("INSERT INTO machines(name, description) VALUES(?,?)", (data.get("name"), data.get("description") or ""))
+            cursor = conn.execute("INSERT INTO machines(name, description) VALUES(?,?)", (data.get("name"), data.get("description") or ""))
+            write_audit(conn, admin, "machine.create", "machine", cursor.lastrowid, "机台已创建", {"name": data.get("name")}, self.client_address[0])
         return {"message": "机台已创建", "machines": self.list_machines()}
 
     def list_shifts(self, query):
@@ -1236,10 +1477,12 @@ class Handler(BaseHTTPRequestHandler):
         admin = self.require_admin()
         data = read_json(self)
         with connect() as conn:
-            conn.execute(
+            default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
+            cursor = conn.execute(
                 "INSERT INTO shifts(machine_id, user_id, shift_type, shift_date, hours, note, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), data.get("shift_date") or today_iso(), float(data.get("hours") or 12), data.get("note") or "", admin["id"], now_iso()),
+                (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), data.get("shift_date") or today_iso(), float(data.get("hours") or default_hours), data.get("note") or "", admin["id"], now_iso()),
             )
+            write_audit(conn, admin, "shift.create", "shift", cursor.lastrowid, "排班已保存", {"shift_date": data.get("shift_date") or today_iso(), "user_id": data.get("user_id")}, self.client_address[0])
         return {"message": "排班已保存", "shifts": self.list_shifts({})}
 
     def shift_dashboard(self, query):
@@ -1300,13 +1543,15 @@ class Handler(BaseHTTPRequestHandler):
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
+            weekly_limit = get_int_setting(conn, "thank_you_weekly_limit", 3, minimum=1, maximum=20)
             count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
-            if count >= 3:
-                raise AppError(400, "本周最多点赞 3 人")
+            if count >= weekly_limit:
+                raise AppError(400, f"本周最多点赞 {weekly_limit} 人")
             conn.execute(
                 "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
                 (user["id"], receiver_id, start, evidence, now_iso()),
             )
+            write_audit(conn, user, "thank_you.create", "thank_you", receiver_id, "Thank You 已送达", {"receiver_id": receiver_id, "week_start": start}, self.client_address[0])
         return {"message": "Thank You 已送达", "votes": self.list_thank_you({"from": [start], "to": [start]})}
 
     def thank_you_dashboard(self, query):
@@ -1339,6 +1584,122 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"stars": stars, "weekly": weekly}
 
+    def list_settings(self):
+        self.require_admin()
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    """
+                    SELECT s.*, u.display_name AS updated_by_name
+                    FROM system_settings s
+                    LEFT JOIN users u ON u.id = s.updated_by
+                    ORDER BY s.key
+                    """
+                ).fetchall()
+            )
+
+    def update_settings(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        settings = data.get("settings") if isinstance(data.get("settings"), dict) else data
+        if not isinstance(settings, dict) or not settings:
+            raise AppError(400, "没有可更新配置")
+        allowed = {key for key, *_ in DEFAULT_SETTINGS}
+        with connect() as conn:
+            for key, value in settings.items():
+                if key not in allowed:
+                    continue
+                row = conn.execute("SELECT value_type FROM system_settings WHERE key=?", (key,)).fetchone()
+                if not row:
+                    continue
+                normalized = str(value).strip()
+                if row["value_type"] == "number":
+                    try:
+                        normalized = str(max(0, int(float(normalized))))
+                    except ValueError:
+                        raise AppError(400, f"{key} 必须是数字")
+                if row["value_type"] == "boolean":
+                    normalized = "1" if normalized in ("1", "true", "on", "yes", "启用") else "0"
+                conn.execute(
+                    "UPDATE system_settings SET value=?, updated_by=?, updated_at=? WHERE key=?",
+                    (normalized, admin["id"], now_iso(), key),
+                )
+            write_audit(
+                conn,
+                admin,
+                "settings.update",
+                "system_settings",
+                None,
+                "系统配置已更新",
+                {"keys": list(settings.keys())},
+                self.client_address[0],
+            )
+        return {"message": "系统配置已更新", "settings": self.list_settings()}
+
+    def list_audit_logs(self, query):
+        self.require_admin()
+        limit = 100
+        if query.get("limit"):
+            try:
+                limit = max(20, min(500, int(query["limit"][0])))
+            except ValueError:
+                limit = 100
+        with connect() as conn:
+            logs = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT l.*, u.display_name AS actor
+                    FROM audit_logs l
+                    LEFT JOIN users u ON u.id = l.user_id
+                    ORDER BY l.created_at DESC, l.id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            )
+        for log in logs:
+            try:
+                log["metadata"] = json.loads(log.get("metadata") or "{}")
+            except json.JSONDecodeError:
+                log["metadata"] = {}
+        return logs
+
+    def list_backups(self):
+        self.require_admin()
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        with connect() as conn:
+            rows = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT b.*, u.display_name AS creator
+                    FROM backups b
+                    LEFT JOIN users u ON u.id = b.created_by
+                    ORDER BY b.created_at DESC, b.id DESC
+                    """
+                ).fetchall()
+            )
+        known = {row["filename"] for row in rows}
+        for file_path in sorted(BACKUP_DIR.glob("*.db"), reverse=True):
+            if file_path.name not in known:
+                rows.append(
+                    {
+                        "id": None,
+                        "filename": file_path.name,
+                        "size_bytes": file_path.stat().st_size,
+                        "kind": "manual",
+                        "creator": "",
+                        "created_at": dt.datetime.fromtimestamp(file_path.stat().st_mtime).replace(microsecond=0).isoformat(),
+                    }
+                )
+        return rows
+
+    def create_manual_backup(self):
+        admin = self.require_admin()
+        backup = create_database_backup(kind="manual", user_id=admin["id"])
+        if not backup:
+            raise AppError(500, "备份失败")
+        return {"message": "备份已创建", "backup": backup, "backups": self.list_backups()}
+
 
 def permissions_for(user):
     is_admin = bool(user and user.get("role") == "admin")
@@ -1352,6 +1713,7 @@ def permissions_for(user):
         "canManageMembers": is_admin,
         "canManageMeetingTopics": is_admin,
         "canManageAttendance": is_admin,
+        "canManageSystem": is_admin,
         "canCreateMeeting": bool(user),
         "canPostThankYou": bool(user),
     }
@@ -1375,6 +1737,7 @@ def main():
     parser.add_argument("--port", default=8000, type=int, help="监听端口")
     args = parser.parse_args()
     init_db()
+    ensure_daily_backup()
     os.chdir(ROOT)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"周例会 Web 已启动: http://{args.host}:{args.port}")

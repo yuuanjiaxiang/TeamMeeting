@@ -318,6 +318,43 @@
               <div id="userList" class="table"></div>
             </section>
           </section>
+
+          <section id="system" class="page">
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>系统配置中心</h2>
+                  <p>维护会议、排班、Thank You、备份等全局参数。</p>
+                </div>
+              </div>
+              <form id="settingsForm" class="settings-form"></form>
+            </section>
+
+            <div class="split admin-only">
+              <section class="panel">
+                <div class="panel-title">
+                  <div>
+                    <h2>数据备份</h2>
+                    <p>系统每天自动备份一次，也可以手动生成备份。</p>
+                  </div>
+                  <form id="manualBackupForm">
+                    <button type="submit">立即备份</button>
+                  </form>
+                </div>
+                <div id="backupList" class="table"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-title">
+                  <div>
+                    <h2>审计日志</h2>
+                    <p>记录关键管理操作，便于追溯责任和排查问题。</p>
+                  </div>
+                </div>
+                <div id="auditLogList" class="table"></div>
+              </section>
+            </div>
+          </section>
         </section>
       </main>
     </div>

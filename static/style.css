@@ -519,6 +519,33 @@ th {
   font-size: 12px;
 }
 
+.member-persona {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.member-persona div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.member-persona span {
+  font-size: 12px;
+  color: var(--subtle);
+}
+
+.member-persona strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  word-break: break-word;
+}
+
 .chat-panel {
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -878,6 +905,34 @@ th {
   text-decoration: none;
 }
 
+.settings-form {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.setting-field {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.setting-field span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.setting-field small {
+  min-height: 34px;
+  line-height: 1.5;
+}
+
 .toast {
   position: fixed;
   top: 20px;
@@ -912,7 +967,8 @@ th {
   .link-grid,
   .topic-board,
   .preset-row,
-  .link-toolbar {
+  .link-toolbar,
+  .settings-grid {
     grid-template-columns: 1fr;
   }
 

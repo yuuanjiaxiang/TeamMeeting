@@ -9,6 +9,9 @@ const state = {
   linkCategories: [],
   links: [],
   meetings: [],
+  settings: [],
+  backups: [],
+  auditLogs: [],
   shifts: [],
   currentPage: "members",
   shiftMonth: new Date(),
@@ -26,6 +29,7 @@ const pages = [
   ["thanks", "♥", "Thank You", "每周感谢帮助过自己的团队成员。"],
   ["links", "↗", "常用链接", "归档团队常用系统、文档和工具入口。"],
   ["users", "⚙", "用户管理", "管理员维护账号和权限。"],
+  ["system", "▣", "系统管理", "配置、备份和审计日志。"],
 ];
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -165,7 +169,7 @@ function applyAuthView() {
 
 function renderNav() {
   $("#nav").innerHTML = pages
-    .filter(([id]) => id !== "users" || state.permissions.isAdmin)
+    .filter(([id]) => !["users", "system"].includes(id) || state.permissions.isAdmin)
     .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
     .join("");
 }
@@ -247,6 +251,18 @@ function renderRank(items, field, unit) {
   }).join("");
 }
 
+function settingValue(key, fallback = "") {
+  const setting = state.settings.find((item) => item.key === key);
+  return setting ? setting.value : fallback;
+}
+
+function formatBytes(value = 0) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 async function loadDashboard() {
   const [scores, thanks, shifts, meetings] = await Promise.all([
     api(`/api/dashboards/red-black?${periodQuery()}`),
@@ -280,6 +296,97 @@ function renderUserTable(users) {
       <td>${user.active ? "启用" : "已删除"}</td>
       <td>${user.active && user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : "-"}</td>
     </tr>`).join("")}</tbody></table>`;
+}
+
+async function loadSystemAdmin() {
+  if (!state.permissions.isAdmin) return;
+  const [settings, backups, logs] = await Promise.all([
+    api("/api/settings"),
+    api("/api/backups"),
+    api("/api/audit-logs?limit=120"),
+  ]);
+  state.settings = settings.settings;
+  state.backups = backups.backups;
+  state.auditLogs = logs.logs;
+  renderSettings();
+  renderBackups();
+  renderAuditLogs();
+  applySettingDefaults();
+}
+
+function renderSettings() {
+  const form = $("#settingsForm");
+  if (!form) return;
+  form.innerHTML = `
+    <div class="settings-grid">
+      ${state.settings.map((setting) => {
+        const inputType = setting.value_type === "number" ? "number" : "text";
+        if (setting.value_type === "boolean") {
+          return `<label class="setting-field">
+            <span>${escapeHtml(setting.label)}</span>
+            <select name="${escapeHtml(setting.key)}">
+              <option value="1" ${setting.value === "1" ? "selected" : ""}>启用</option>
+              <option value="0" ${setting.value === "0" ? "selected" : ""}>停用</option>
+            </select>
+            <small>${escapeHtml(setting.description || "")}</small>
+          </label>`;
+        }
+        return `<label class="setting-field">
+          <span>${escapeHtml(setting.label)}</span>
+          <input name="${escapeHtml(setting.key)}" type="${inputType}" value="${escapeHtml(setting.value)}">
+          <small>${escapeHtml(setting.description || "")}</small>
+        </label>`;
+      }).join("")}
+    </div>
+    <button>保存系统配置</button>`;
+}
+
+function renderBackups() {
+  const list = $("#backupList");
+  if (!list) return;
+  list.innerHTML = state.backups.length ? `
+    <table>
+      <thead><tr><th>文件</th><th>类型</th><th>大小</th><th>创建时间</th><th>创建人</th><th>操作</th></tr></thead>
+      <tbody>
+        ${state.backups.map((backup) => `
+          <tr>
+            <td>${escapeHtml(backup.filename)}</td>
+            <td>${backup.kind === "auto" ? "自动" : "手动"}</td>
+            <td>${formatBytes(backup.size_bytes)}</td>
+            <td>${escapeHtml(backup.created_at || "")}</td>
+            <td>${escapeHtml(backup.creator || "系统")}</td>
+            <td><a class="link-url" href="/api/backups/download?file=${encodeURIComponent(backup.filename)}">下载</a></td>
+          </tr>`).join("")}
+      </tbody>
+    </table>` : "<p>暂无备份</p>";
+}
+
+function renderAuditLogs() {
+  const list = $("#auditLogList");
+  if (!list) return;
+  list.innerHTML = state.auditLogs.length ? `
+    <table>
+      <thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>摘要</th></tr></thead>
+      <tbody>
+        ${state.auditLogs.map((log) => `
+          <tr>
+            <td>${escapeHtml(log.created_at)}</td>
+            <td>${escapeHtml(log.actor || "系统")}</td>
+            <td><span class="pill">${escapeHtml(log.action)}</span></td>
+            <td>${escapeHtml(log.entity_type)}${log.entity_id ? ` #${escapeHtml(log.entity_id)}` : ""}</td>
+            <td>${escapeHtml(log.summary || "")}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>` : "<p>暂无审计日志</p>";
+}
+
+function applySettingDefaults() {
+  const shiftHours = $('input[name="hours"]');
+  if (shiftHours && !shiftHours.value) shiftHours.value = settingValue("shift_default_hours", "12");
+  const thankEvidence = $('textarea[name="evidence"]');
+  if (thankEvidence) thankEvidence.placeholder = `写下对方帮助你的具体事实。本周最多感谢 ${settingValue("thank_you_weekly_limit", "3")} 人。`;
+  const scorePoints = $('input[name="points"]');
+  if (scorePoints && !scorePoints.value) scorePoints.value = settingValue("red_score_default_points", "1");
 }
 
 async function loadRulesAndScores() {
@@ -654,6 +761,7 @@ async function refreshAll() {
     loadLinks(),
     loadShifts(),
     loadThanks(),
+    loadSystemAdmin(),
   ]);
   applyAuthView();
 }
@@ -699,6 +807,11 @@ async function submitProfileForm(form) {
     body: JSON.stringify({
       tags: data.tags || "",
       responsibilities: data.responsibilities || "",
+      skills: data.skills || "",
+      machine_scope: data.machine_scope || "",
+      expertise: data.expertise || "",
+      backup_owner: data.backup_owner || "",
+      contact: data.contact || "",
     }),
   });
 }
@@ -727,6 +840,8 @@ async function loadMembers() {
     const profileEditTitle = state.permissions.isAdmin ? "管理员编辑标签与职责" : "编辑我的标签与职责";
     const tagPlaceholder = state.permissions.isAdmin ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
     const responsibilityPlaceholder = state.permissions.isAdmin ? "成员职责范围" : "我的职责范围";
+    const skills = member.skills || [];
+    const machines = member.machine_scope || [];
     return `
       <article class="member-card profile-only">
         <section class="member-profile">
@@ -737,12 +852,24 @@ async function loadMembers() {
           <div class="tags">${(member.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
           <p><strong>职责：</strong>${escapeHtml(member.responsibilities || "未填写")}</p>
           <p>${escapeHtml(member.comment || "")}</p>
+          <div class="member-persona">
+            <div><span>技能</span><strong>${skills.length ? skills.map(escapeHtml).join(" / ") : "未填写"}</strong></div>
+            <div><span>负责机台</span><strong>${machines.length ? machines.map(escapeHtml).join(" / ") : "未填写"}</strong></div>
+            <div><span>擅长问题</span><strong>${escapeHtml(member.expertise || "未填写")}</strong></div>
+            <div><span>备用负责人</span><strong>${escapeHtml(member.backup_owner || "未填写")}</strong></div>
+            <div><span>联系方式</span><strong>${escapeHtml(member.contact || "未填写")}</strong></div>
+          </div>
           ${canEdit ? `
             <form class="profile-edit-form" data-member-id="${member.id}">
               <strong>${profileEditTitle}</strong>
               <input name="tags" value="${escapeHtml((member.tags || []).join(", "))}" placeholder="${tagPlaceholder}">
               <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
-              <button>保存标签和职责</button>
+              <input name="skills" value="${escapeHtml(skills.join(", "))}" placeholder="技能标签，用逗号分隔">
+              <input name="machine_scope" value="${escapeHtml(machines.join(", "))}" placeholder="负责机台，用逗号分隔">
+              <input name="expertise" value="${escapeHtml(member.expertise || "")}" placeholder="擅长问题类型">
+              <input name="backup_owner" value="${escapeHtml(member.backup_owner || "")}" placeholder="备用负责人">
+              <input name="contact" value="${escapeHtml(member.contact || "")}" placeholder="联系方式">
+              <button>保存成员画像</button>
             </form>
             <form class="avatar-tools avatar-form" data-member-id="${member.id}">
               <input name="avatar_url" placeholder="头像 URL">
@@ -820,6 +947,8 @@ function bindEvents() {
   bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#thankForm", (data) => api("/api/thank-you", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
+  bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
   $("#linkKeywordSearch").addEventListener("input", renderLinks);
