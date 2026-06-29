@@ -15,9 +15,12 @@ const state = {
   shifts: [],
   currentPage: "members",
   shiftMonth: new Date(),
-  selectedShiftDate: new Date().toISOString().slice(0, 10),
+  selectedShiftDate: iso(new Date()),
   meetingMonth: new Date(),
-  selectedMeetingDate: new Date().toISOString().slice(0, 10),
+  selectedMeetingDate: iso(new Date()),
+  selectedMeetingId: null,
+  viewMode: safeStorageGet("teamLoopViewMode", "admin"),
+  uiTheme: safeStorageGet("teamLoopUiTheme", "yuque"),
 };
 
 const pages = [
@@ -35,6 +38,50 @@ const pages = [
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules", "thanks"]);
+const uiThemes = new Set(["feishu", "yuque", "linear", "dingtalk"]);
+
+function safeStorageGet(key, fallback) {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Theme preference is cosmetic; ignore storage failures.
+  }
+}
+
+function applyUiTheme() {
+  const theme = uiThemes.has(state.uiTheme) ? state.uiTheme : "yuque";
+  state.uiTheme = theme;
+  document.body.dataset.theme = theme;
+  const select = $("#themeSelect");
+  if (select) select.value = theme;
+}
+
+function setUiTheme(theme) {
+  state.uiTheme = uiThemes.has(theme) ? theme : "yuque";
+  safeStorageSet("teamLoopUiTheme", state.uiTheme);
+  applyUiTheme();
+}
+
+function isAdminAccount() {
+  return Boolean(state.permissions?.isAdmin);
+}
+
+function isAdminView() {
+  return isAdminAccount() && state.viewMode !== "user";
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode === "user" ? "user" : "admin";
+  safeStorageSet("teamLoopViewMode", state.viewMode);
+}
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -47,7 +94,11 @@ function escapeHtml(value = "") {
 }
 
 function iso(date) {
-  return date.toISOString().slice(0, 10);
+  const value = new Date(date);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function mondayOf(value) {
@@ -72,8 +123,10 @@ function setDefaultDates() {
   $$('input[type="date"]').forEach((input) => {
     if (!input.value) input.value = today;
   });
-  const shiftDate = $('input[name="shift_date"]');
-  if (shiftDate) shiftDate.value = state.selectedShiftDate;
+  const shiftStartDate = $('input[name="shift_start_date"]');
+  const shiftEndDate = $('input[name="shift_end_date"]');
+  if (shiftStartDate) shiftStartDate.value = state.selectedShiftDate;
+  if (shiftEndDate && !shiftEndDate.value) shiftEndDate.value = state.selectedShiftDate;
   const meetingDate = $('input[name="meeting_date"]');
   if (meetingDate) meetingDate.value = state.selectedMeetingDate;
   const generateStart = $('input[name="start_date"]');
@@ -155,26 +208,38 @@ function meetingPeriodQuery() {
 function renderPageToolbar(id = state.currentPage) {
   const toolbar = $("#pageToolbar");
   if (!toolbar) return;
-  toolbar.classList.toggle("hidden", !dateFilterPages.has(id));
+  const periodControls = $("#periodControls");
+  const showDateFilter = dateFilterPages.has(id);
+  toolbar.classList.toggle("toolbar-compact", !showDateFilter);
+  if (periodControls) periodControls.classList.toggle("hidden", !showDateFilter);
 }
 
 function applyAuthView() {
+  if (state.user && !isAdminAccount()) setViewMode("user");
   $("#loginView").classList.toggle("hidden", Boolean(state.user));
   $("#appView").classList.toggle("hidden", !state.user);
-  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${state.user.role === "admin" ? "管理员" : "普通用户"}` : "未登录";
-  $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !state.permissions.isAdmin));
+  const roleText = state.user?.role === "admin" ? "管理员" : "普通用户";
+  const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
+  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "未登录";
+  const viewModeBtn = $("#viewModeBtn");
+  if (viewModeBtn) {
+    viewModeBtn.classList.toggle("hidden", !isAdminAccount());
+    viewModeBtn.textContent = isAdminView() ? "切换用户视图" : "切换管理视图";
+  }
+  $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
   renderPageToolbar();
   renderNav();
 }
 
 function renderNav() {
   $("#nav").innerHTML = pages
-    .filter(([id]) => !["users", "system"].includes(id) || state.permissions.isAdmin)
+    .filter(([id]) => !["users", "system"].includes(id) || isAdminView())
     .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
     .join("");
 }
 
 function switchPage(id) {
+  if (!isAdminView() && ["users", "system"].includes(id)) id = "members";
   state.currentPage = id;
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
   const meta = pages.find((page) => page[0] === id);
@@ -197,7 +262,7 @@ async function loadReferenceData() {
   state.machines = machines.machines;
   state.topics = topics.types;
   state.linkCategories = linkCategories.categories;
-  if (state.permissions.isAdmin) {
+  if (isAdminView()) {
     state.users = (await api("/api/users")).users;
   } else {
     state.users = state.members
@@ -279,7 +344,7 @@ async function loadDashboard() {
 }
 
 async function loadUsers() {
-  if (!state.permissions.isAdmin) return;
+  if (!isAdminView()) return;
   const data = await api("/api/users");
   state.users = data.users;
   $("#userList").innerHTML = renderUserTable(data.users);
@@ -288,18 +353,28 @@ async function loadUsers() {
 
 function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
-  return `<table><thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  return `<table><thead><tr><th>账号</th><th>姓名 / 角色</th><th>密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
       <td>${escapeHtml(user.username)}</td>
-      <td>${escapeHtml(user.display_name)}</td>
-      <td>${user.role === "admin" ? "管理员" : "普通用户"}</td>
-      <td>${user.active ? "启用" : "已删除"}</td>
-      <td>${user.active && user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : "-"}</td>
+      <td>
+        <form id="userEdit${user.id}" class="user-edit-form user-inline-form" data-user-id="${user.id}">
+          <input name="display_name" value="${escapeHtml(user.display_name)}" placeholder="姓名" required>
+          <select name="role" ${user.id === state.user?.id ? "disabled" : ""}>
+            <option value="user" ${user.role === "user" ? "selected" : ""}>普通用户</option>
+            <option value="admin" ${user.role === "admin" ? "selected" : ""}>管理员</option>
+          </select>
+        </form>
+      </td>
+      <td><input form="userEdit${user.id}" class="user-password-input" name="password" placeholder="不修改则留空"></td>
+      <td>
+        <button form="userEdit${user.id}" type="submit">保存</button>
+        ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
+      </td>
     </tr>`).join("")}</tbody></table>`;
 }
 
 async function loadSystemAdmin() {
-  if (!state.permissions.isAdmin) return;
+  if (!isAdminView()) return;
   const [settings, backups, logs] = await Promise.all([
     api("/api/settings"),
     api("/api/backups"),
@@ -392,11 +467,19 @@ function applySettingDefaults() {
 async function loadRulesAndScores() {
   state.rules = (await api("/api/rules")).rules;
   const scores = (await api(`/api/scores?${periodQuery()}`)).scores;
-  $("#ruleList").innerHTML = state.rules.length ? state.rules.map((rule) => `
-    <div class="item">
-      <span class="pill ${rule.kind === "red" ? "red" : "black"}">${rule.kind === "red" ? "红榜" : "黑榜"}</span>
-      <p>${escapeHtml(rule.content)}</p>
-    </div>`).join("") : "<p>暂无规则</p>";
+  const renderRuleColumn = (kind, title) => {
+    const rules = state.rules.filter((rule) => rule.kind === kind);
+    return `<section class="rule-column ${kind}">
+      <div class="rule-column-head">
+        <span class="pill ${kind}">${title}</span>
+        <small>${rules.length} 条</small>
+      </div>
+      <div class="item-list">
+        ${rules.length ? rules.map((rule) => `<div class="item"><p>${escapeHtml(rule.content)}</p></div>`).join("") : "<p>暂无规则</p>"}
+      </div>
+    </section>`;
+  };
+  $("#ruleList").innerHTML = renderRuleColumn("red", "红榜") + renderRuleColumn("black", "黑榜");
   $("#scoreList").innerHTML = table(["日期", "成员", "类型", "积分", "规则", "依据"], scores.map((score) => [
     score.score_date,
     score.display_name,
@@ -408,41 +491,26 @@ async function loadRulesAndScores() {
   populateSelects();
 }
 
-async function loadMembers() {
-  state.members = (await api("/api/members")).members;
-  $("#memberList").innerHTML = state.members.map((member) => {
-    const posts = [...(member.posts || [])].reverse();
-    const canEdit = state.permissions.isAdmin || member.user_id === state.user?.id;
-    return `
-      <article class="member-card">
-        <section class="member-profile">
-          <div class="member-head">
-            ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
-            <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
-          </div>
-          <div class="tags">${(member.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
-          <p><strong>职责：</strong>${escapeHtml(member.responsibilities || "未填写")}</p>
-          <p>${escapeHtml(member.comment || "")}</p>
-          ${canEdit ? `<form class="avatar-tools avatar-form" data-member-id="${member.id}"><input name="avatar_url" placeholder="头像 URL"><input name="avatar_file" type="file" accept="image/*"><button>更换头像</button></form>` : ""}
-        </section>
-        <section class="chat-panel">
-          <div class="chat-title"><strong>成员对话</strong><span>评论 / 吐槽广场</span></div>
-          <div class="chat-list" data-chat-list>
-            ${posts.length ? posts.map((post) => `<div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}"><span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span><p>${escapeHtml(post.content)}</p><small>${escapeHtml(post.display_name)} · ${post.created_at}</small></div>`).join("") : "<p>还没有对话，来开个头。</p>"}
-          </div>
-          <form class="chat-form post-form" data-member-id="${member.id}">
-            <select name="kind"><option value="comment">评论</option><option value="roast">吐槽</option></select>
-            <input name="content" placeholder="输入后发布，消息会出现在下方聊天流" required />
-            <button>发送</button>
-          </form>
-        </section>
-      </article>`;
-  }).join("");
-  $$("[data-chat-list]").forEach((el) => { el.scrollTop = el.scrollHeight; });
+function recurrenceRule(option = {}) {
+  const type = option.recurrence_type || "weekly";
+  const value = option.recurrence_value || option.recurrence_weeks || "1";
+  return `${type}:${value}`;
 }
 
-function recurrenceOptions(selected = 1) {
-  return [1, 2, 3, 4].map((value) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>每 ${value} 周</option>`).join("");
+function recurrenceOptions(selected = "weekly:1") {
+  const options = [
+    ["weekly:1", "每 1 周"],
+    ["weekly:2", "每 2 周"],
+    ["weekly:3", "每 3 周"],
+    ["weekly:4", "每 4 周"],
+    ["monthly_week:first", "每月第 1 周"],
+    ["monthly_week:second", "每月第 2 周"],
+    ["monthly_week:third", "每月第 3 周"],
+    ["monthly_week:fourth", "每月第 4 周"],
+    ["monthly_week:penultimate", "每月倒数第 2 周"],
+    ["monthly_week:last", "每月最后 1 周"],
+  ];
+  return options.map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
 }
 
 function renderPresetTypeOptions(selectedId) {
@@ -459,7 +527,7 @@ function renderTopicPresetList() {
         <form class="preset-row preset-form" data-option-id="${option.id}">
           <select name="type_id">${renderPresetTypeOptions(option.type_id)}</select>
           <input name="title" value="${escapeHtml(option.title)}" placeholder="议题名称" required>
-          <select name="recurrence_weeks">${recurrenceOptions(option.recurrence_weeks || 1)}</select>
+          <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
           <input name="default_detail" value="${escapeHtml(option.default_detail || "")}" placeholder="默认说明">
           <button>保存</button>
           <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
@@ -613,7 +681,8 @@ function renderMeetingCalendar(meetings) {
     d.setDate(gridStart.getDate() + i);
     const date = iso(d);
     const dayMeetings = byDate[date] || [];
-    cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
+    const hasSelected = dayMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+    cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${hasSelected ? "active-meeting-day" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
       ${dayMeetings.map((meeting) => `<div class="meeting-line">${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</div>`).join("")}
     </div>`);
@@ -621,37 +690,83 @@ function renderMeetingCalendar(meetings) {
   $("#meetingCalendar").innerHTML = weekdays + cells.join("");
 }
 
+function renderMeetingList(meetings) {
+  const list = $("#meetingList");
+  if (!list) return;
+  list.innerHTML = meetings.length ? meetings.map((meeting) => `
+    <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
+      <span>${escapeHtml(meeting.meeting_date)}</span>
+      <strong>${escapeHtml(meeting.title)}</strong>
+      <small>${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
+    </button>`).join("") : "<p>本月暂无会议。</p>";
+}
+
+function renderMeetingDetail(meeting) {
+  const detail = $("#meetingDetail");
+  if (!detail) return;
+  if (!meeting) {
+    detail.innerHTML = `
+      <div class="meeting-empty">
+        <h2>选择一场会议</h2>
+        <p>从左侧列表或上方月历选择会议后，这里会显示议题、纪要、签到和邮件入口。</p>
+      </div>`;
+    return;
+  }
+  detail.innerHTML = `
+    <div class="meeting-detail-head">
+      <div>
+        <h2>${escapeHtml(meeting.title)}</h2>
+        <p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
+      </div>
+      <div class="meeting-meta-actions">
+        <span class="pill">${escapeHtml(meeting.creator || "")}</span>
+        <a class="button-link" href="${escapeHtml(buildMeetingEmailHref(meeting))}">生成会议邮件</a>
+      </div>
+    </div>
+
+    <div class="meeting-kpis">
+      <div><span>议题</span><strong>${meeting.items.length}</strong></div>
+      <div><span>已签到</span><strong>${(meeting.attendance || []).length}</strong></div>
+      <div><span>未补纪要</span><strong>${meeting.items.filter((item) => !item.minutes).length}</strong></div>
+    </div>
+
+    <section class="detail-section">
+      <h3>议题与纪要</h3>
+      ${renderTopicBoard(meeting)}
+    </section>
+
+    <div class="meeting-detail-grid">
+      <section class="detail-card">
+        <h3>成员自定义议题</h3>
+        ${renderCustomTopicForm(meeting.id)}
+      </section>
+      <section class="detail-card admin-only">
+        <h3>管理员添加预设议题</h3>
+        ${renderPresetTopicForm(meeting.id)}
+      </section>
+      <section class="detail-card">
+        <h3>参会签到</h3>
+        ${isAdminView() ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
+      </section>
+    </div>`;
+  $$(".admin-only", detail).forEach((el) => el.classList.toggle("hidden", !isAdminView()));
+}
+
 async function loadMeetings() {
   const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
   state.meetings = data.meetings;
+  const selectedStillVisible = state.meetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  if (!selectedStillVisible) {
+    const sameDate = state.meetings.find((meeting) => meeting.meeting_date === state.selectedMeetingDate);
+    state.selectedMeetingId = sameDate?.id || state.meetings[0]?.id || null;
+  }
+  const selectedMeeting = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  if (selectedMeeting) state.selectedMeetingDate = selectedMeeting.meeting_date;
   renderMeetingCalendar(state.meetings);
+  renderMeetingList(state.meetings);
+  renderMeetingDetail(selectedMeeting);
   renderTopicPresetList();
   $("#topicTypeList").innerHTML = state.topics.map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)} · ${topic.options.length} 项</span>`).join("");
-  $("#meetingList").innerHTML = data.meetings.length ? data.meetings.map((meeting) => `
-    <article class="meeting-card">
-      <div class="meeting-meta">
-        <div><h3>${escapeHtml(meeting.title)}</h3><p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "")}</p></div>
-        <div class="meeting-meta-actions">
-          <span class="pill">${escapeHtml(meeting.creator || "")}</span>
-          <a class="button-link" href="${escapeHtml(buildMeetingEmailHref(meeting))}">生成会议邮件</a>
-        </div>
-      </div>
-      ${renderTopicBoard(meeting)}
-      <div class="meeting-actions">
-        <section class="panel">
-          <h2>自定义议题</h2>
-          ${renderCustomTopicForm(meeting.id)}
-        </section>
-        <section class="panel admin-only">
-          <h2>添加预设议题</h2>
-          ${renderPresetTopicForm(meeting.id)}
-        </section>
-        <section class="panel">
-          <h2>参会签到</h2>
-          ${state.permissions.isAdmin ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
-        </section>
-      </div>
-    </article>`).join("") : "<section class='panel'><p>本月暂无会议，管理员可先生成周例会。</p></section>";
   populateSelects();
 }
 
@@ -689,7 +804,7 @@ function renderLinks() {
     ].filter(Boolean).join(" ").toLowerCase();
     return hitCategory && hitStatus && (!keyword || text.includes(keyword));
   });
-  const qualityHeader = state.permissions.isAdmin ? "<th>质量管理</th>" : "";
+  const qualityHeader = isAdminView() ? "<th>质量管理</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
     <table>
       <thead><tr><th>名称</th><th>质量</th><th>分类</th><th>适用范围</th><th>地址</th><th>点击</th><th>归档人</th>${qualityHeader}</tr></thead>
@@ -717,7 +832,7 @@ function renderLinks() {
             </td>
             <td>${Number(link.click_count || 0)} 次${link.last_clicked_at ? `<br><small>${escapeHtml(link.last_clicked_at)}</small>` : ""}</td>
             <td>${escapeHtml(link.creator || "-")}</td>
-            ${state.permissions.isAdmin ? `
+            ${isAdminView() ? `
               <td>
                 <form class="link-quality-form" data-link-id="${link.id}">
                   <select name="pinned">
@@ -753,9 +868,11 @@ function renderCalendar() {
   const title = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
   $("#shiftMonthTitle").textContent = title;
   $("#shiftMonthTitle2").textContent = title;
-  $("#selectedShiftDateTitle").textContent = state.permissions.isAdmin ? `编辑排班 · ${state.selectedShiftDate}` : "我的本月排班";
-  const shiftDateInput = $('input[name="shift_date"]');
-  if (shiftDateInput) shiftDateInput.value = state.selectedShiftDate;
+  $("#selectedShiftDateTitle").textContent = isAdminView() ? `编辑排班 · ${state.selectedShiftDate}` : "我的本月排班";
+  const shiftStartInput = $('input[name="shift_start_date"]');
+  const shiftEndInput = $('input[name="shift_end_date"]');
+  if (shiftStartInput) shiftStartInput.value = state.selectedShiftDate;
+  if (shiftEndInput) shiftEndInput.value = state.selectedShiftDate;
 
   const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
   const cells = [];
@@ -767,7 +884,10 @@ function renderCalendar() {
     const hasMine = shifts.some((shift) => Number(shift.user_id) === Number(state.user?.id));
     cells.push(`<div class="day-cell shift-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""} ${hasMine ? "has-mine" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""} ${Number(shift.user_id) === Number(state.user?.id) ? "mine" : ""}">${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</div>`).join("")}
+      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""} ${Number(shift.user_id) === Number(state.user?.id) ? "mine" : ""}">
+        <span>${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</span>
+        ${isAdminView() ? `<button class="shift-delete-btn" type="button" data-shift-id="${shift.id}" title="删除排班">×</button>` : ""}
+      </div>`).join("")}
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
@@ -853,8 +973,11 @@ async function submitProfileForm(form) {
   await api(`/api/members/${form.dataset.memberId}`, {
     method: "PATCH",
     body: JSON.stringify({
+      name: data.name || "",
+      title: data.title || "",
       tags: data.tags || "",
       responsibilities: data.responsibilities || "",
+      comment: data.comment || "",
       skills: data.skills || "",
       machine_scope: data.machine_scope || "",
       expertise: data.expertise || "",
@@ -862,6 +985,21 @@ async function submitProfileForm(form) {
       contact: data.contact || "",
     }),
   });
+  if (Number(form.dataset.userId) === Number(state.user?.id) && data.name) {
+    state.user.display_name = data.name;
+    applyAuthView();
+  }
+}
+
+async function submitUserEditForm(form) {
+  const data = formData(form);
+  const response = await api(`/api/users/${form.dataset.userId}`, { method: "PATCH", body: JSON.stringify(data) });
+  state.users = response.users || state.users;
+  if (Number(form.dataset.userId) === Number(state.user?.id)) {
+    state.user.display_name = data.display_name || state.user.display_name;
+    if (data.role) state.user.role = data.role;
+    applyAuthView();
+  }
 }
 
 function renderTeamChat(posts) {
@@ -876,6 +1014,74 @@ function renderTeamChat(posts) {
   list.scrollTop = list.scrollHeight;
 }
 
+function filledText(value) {
+  return String(value || "").trim();
+}
+
+function memberPersona(member, skills = [], machines = []) {
+  const rows = [
+    ["技能", skills.map(escapeHtml).join(" / ")],
+    ["负责机台", machines.map(escapeHtml).join(" / ")],
+    ["擅长问题", escapeHtml(filledText(member.expertise))],
+    ["备用负责人", escapeHtml(filledText(member.backup_owner))],
+    ["联系方式", escapeHtml(filledText(member.contact))],
+  ].filter(([, value]) => value);
+  if (!rows.length) return "";
+  return `<div class="member-persona">
+    ${rows.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}
+  </div>`;
+}
+
+function renderMemberCard(member) {
+  const canEdit = isAdminView() || member.user_id === state.user?.id;
+  const profileEditTitle = isAdminView() ? "管理员编辑成员资料" : "编辑我的成员资料";
+  const tagPlaceholder = isAdminView() ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
+  const responsibilityPlaceholder = isAdminView() ? "成员职责范围" : "我的职责范围";
+  const skills = member.skills || [];
+  const machines = member.machine_scope || [];
+  const tags = member.tags || [];
+  const responsibilities = filledText(member.responsibilities);
+  const comment = filledText(member.comment);
+  return `
+    <article class="member-card profile-only">
+      <section class="member-profile">
+        <div class="member-head">
+          ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
+          <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
+        </div>
+        ${tags.length ? `<div class="tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+        <div class="member-brief">
+          <p><strong>职责：</strong>${responsibilities ? escapeHtml(responsibilities) : "待补充"}</p>
+          ${comment ? `<p>${escapeHtml(comment)}</p>` : ""}
+        </div>
+        ${memberPersona(member, skills, machines)}
+        ${canEdit ? `
+          <details class="member-editor">
+            <summary>编辑资料</summary>
+            <form class="profile-edit-form" data-member-id="${member.id}" data-user-id="${member.user_id || ""}">
+              <strong>${profileEditTitle}</strong>
+              <input name="name" value="${escapeHtml(member.name || "")}" placeholder="姓名" required>
+              <input name="title" value="${escapeHtml(member.title || "")}" placeholder="岗位 / 角色">
+              <input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="${tagPlaceholder}">
+              <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
+              <textarea name="comment" placeholder="个人备注">${escapeHtml(member.comment || "")}</textarea>
+              <input name="skills" value="${escapeHtml(skills.join(", "))}" placeholder="技能标签，用逗号分隔">
+              <input name="machine_scope" value="${escapeHtml(machines.join(", "))}" placeholder="负责机台，用逗号分隔">
+              <input name="expertise" value="${escapeHtml(member.expertise || "")}" placeholder="擅长问题类型">
+              <input name="backup_owner" value="${escapeHtml(member.backup_owner || "")}" placeholder="备用负责人">
+              <input name="contact" value="${escapeHtml(member.contact || "")}" placeholder="联系方式">
+              <button>保存成员资料</button>
+            </form>
+            <form class="avatar-tools avatar-form" data-member-id="${member.id}">
+              <input name="avatar_url" placeholder="头像 URL">
+              <input name="avatar_file" type="file" accept="image/*">
+              <button>更换头像</button>
+            </form>
+          </details>` : ""}
+      </section>
+    </article>`;
+}
+
 async function loadMembers() {
   const [membersData, postsData] = await Promise.all([
     api("/api/members"),
@@ -883,50 +1089,7 @@ async function loadMembers() {
   ]);
   state.members = membersData.members;
   renderTeamChat(postsData.posts);
-  $("#memberList").innerHTML = state.members.map((member) => {
-    const canEdit = state.permissions.isAdmin || member.user_id === state.user?.id;
-    const profileEditTitle = state.permissions.isAdmin ? "管理员编辑标签与职责" : "编辑我的标签与职责";
-    const tagPlaceholder = state.permissions.isAdmin ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
-    const responsibilityPlaceholder = state.permissions.isAdmin ? "成员职责范围" : "我的职责范围";
-    const skills = member.skills || [];
-    const machines = member.machine_scope || [];
-    return `
-      <article class="member-card profile-only">
-        <section class="member-profile">
-          <div class="member-head">
-            ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
-            <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
-          </div>
-          <div class="tags">${(member.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
-          <p><strong>职责：</strong>${escapeHtml(member.responsibilities || "未填写")}</p>
-          <p>${escapeHtml(member.comment || "")}</p>
-          <div class="member-persona">
-            <div><span>技能</span><strong>${skills.length ? skills.map(escapeHtml).join(" / ") : "未填写"}</strong></div>
-            <div><span>负责机台</span><strong>${machines.length ? machines.map(escapeHtml).join(" / ") : "未填写"}</strong></div>
-            <div><span>擅长问题</span><strong>${escapeHtml(member.expertise || "未填写")}</strong></div>
-            <div><span>备用负责人</span><strong>${escapeHtml(member.backup_owner || "未填写")}</strong></div>
-            <div><span>联系方式</span><strong>${escapeHtml(member.contact || "未填写")}</strong></div>
-          </div>
-          ${canEdit ? `
-            <form class="profile-edit-form" data-member-id="${member.id}">
-              <strong>${profileEditTitle}</strong>
-              <input name="tags" value="${escapeHtml((member.tags || []).join(", "))}" placeholder="${tagPlaceholder}">
-              <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
-              <input name="skills" value="${escapeHtml(skills.join(", "))}" placeholder="技能标签，用逗号分隔">
-              <input name="machine_scope" value="${escapeHtml(machines.join(", "))}" placeholder="负责机台，用逗号分隔">
-              <input name="expertise" value="${escapeHtml(member.expertise || "")}" placeholder="擅长问题类型">
-              <input name="backup_owner" value="${escapeHtml(member.backup_owner || "")}" placeholder="备用负责人">
-              <input name="contact" value="${escapeHtml(member.contact || "")}" placeholder="联系方式">
-              <button>保存成员画像</button>
-            </form>
-            <form class="avatar-tools avatar-form" data-member-id="${member.id}">
-              <input name="avatar_url" placeholder="头像 URL">
-              <input name="avatar_file" type="file" accept="image/*">
-              <button>更换头像</button>
-            </form>` : ""}
-        </section>
-      </article>`;
-  }).join("");
+  $("#memberList").innerHTML = state.members.map(renderMemberCard).join("");
 }
 
 function updateOptionSelect(typeSelect) {
@@ -975,6 +1138,20 @@ function bindEvents() {
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#themeSelect").addEventListener("change", (event) => {
+    setUiTheme(event.target.value);
+    const label = event.target.selectedOptions?.[0]?.textContent || "新主题";
+    toast(`已切换到 ${label}`);
+  });
+  $("#viewModeBtn").addEventListener("click", async () => {
+    setViewMode(isAdminView() ? "user" : "admin");
+    if (!isAdminView() && ["users", "system"].includes(state.currentPage)) {
+      switchPage("members");
+    }
+    applyAuthView();
+    await refreshAll();
+    toast(isAdminView() ? "已切换到管理视图" : "已切换到用户视图");
+  });
   $("#prevMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(-1));
   $("#nextMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(1));
   $("#prevMonthBtn").addEventListener("click", () => moveMonth(-1));
@@ -1037,12 +1214,36 @@ function bindEvents() {
         .catch((error) => toast(error.message));
       return;
     }
+    const meetingSelect = event.target.closest(".meeting-select-btn");
+    if (meetingSelect) {
+      const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingSelect.dataset.meetingId));
+      state.selectedMeetingId = meeting?.id || null;
+      if (meeting) state.selectedMeetingDate = meeting.meeting_date;
+      renderMeetingCalendar(state.meetings);
+      renderMeetingList(state.meetings);
+      renderMeetingDetail(meeting);
+      return;
+    }
     const meetingCell = event.target.closest(".meeting-day");
     if (meetingCell) {
       state.selectedMeetingDate = meetingCell.dataset.date;
       const input = $('input[name="meeting_date"]');
       if (input) input.value = state.selectedMeetingDate;
+      const meeting = state.meetings.find((item) => item.meeting_date === state.selectedMeetingDate);
+      state.selectedMeetingId = meeting?.id || null;
       renderMeetingCalendar(state.meetings);
+      renderMeetingList(state.meetings);
+      renderMeetingDetail(meeting || null);
+      return;
+    }
+    const shiftDelete = event.target.closest(".shift-delete-btn");
+    if (shiftDelete) {
+      event.stopPropagation();
+      if (!window.confirm("确定删除这条排班吗？")) return;
+      api(`/api/shifts/${shiftDelete.dataset.shiftId}`, { method: "DELETE" })
+        .then(loadShifts)
+        .then(() => toast("排班已删除"))
+        .catch((error) => toast(error.message));
       return;
     }
     const shiftCell = event.target.closest(".shift-day");
@@ -1065,14 +1266,21 @@ function bindEvents() {
     const postForm = event.target.closest(".post-form");
     const avatarForm = event.target.closest(".avatar-form");
     const profileForm = event.target.closest(".profile-edit-form");
+    const userEditForm = event.target.closest(".user-edit-form");
     const topicForm = event.target.closest(".topic-item-form");
     const attendanceForm = event.target.closest(".attendance-row");
     const minuteForm = event.target.closest(".minute-form");
     const presetForm = event.target.closest(".preset-form");
     const linkQualityForm = event.target.closest(".link-quality-form");
-    if (!postForm && !avatarForm && !profileForm && !topicForm && !attendanceForm && !minuteForm && !presetForm && !linkQualityForm) return;
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !attendanceForm && !minuteForm && !presetForm && !linkQualityForm) return;
     event.preventDefault();
     try {
+      if (userEditForm) {
+        await submitUserEditForm(userEditForm);
+        await refreshAll();
+        toast("用户已更新");
+        return;
+      }
       if (postForm) {
         await api(`/api/members/${postForm.dataset.memberId}/posts`, { method: "POST", body: JSON.stringify(formData(postForm)) });
       }
@@ -1111,6 +1319,7 @@ function bindEvents() {
 }
 
 async function boot() {
+  applyUiTheme();
   setDefaultDates();
   bindEvents();
   try {

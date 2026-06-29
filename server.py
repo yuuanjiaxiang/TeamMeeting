@@ -32,6 +32,8 @@ DEFAULT_SETTINGS = [
     ("backup_retention_days", "备份保留天数", "30", "number", "自动清理超过该天数的备份，0 表示不清理"),
 ]
 
+MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate", "last"}
+
 
 def now_iso():
     return dt.datetime.now().replace(microsecond=0).isoformat()
@@ -47,6 +49,64 @@ def week_start(value=None):
     else:
         date = dt.date.today()
     return (date - dt.timedelta(days=date.weekday())).isoformat()
+
+
+def date_range(start, end, max_days=62):
+    start_date = dt.date.fromisoformat(start)
+    end_date = dt.date.fromisoformat(end or start)
+    if end_date < start_date:
+        raise AppError(400, "结束日期不能早于开始日期")
+    days = (end_date - start_date).days + 1
+    if days > max_days:
+        raise AppError(400, f"一次最多批量处理 {max_days} 天")
+    return [(start_date + dt.timedelta(days=offset)).isoformat() for offset in range(days)]
+
+
+def normalize_recurrence(data):
+    rule = data.get("recurrence_rule") or ""
+    recurrence_type = data.get("recurrence_type") or "weekly"
+    recurrence_value = str(data.get("recurrence_value") or data.get("recurrence_weeks") or "1")
+    if rule:
+        if ":" in rule:
+            recurrence_type, recurrence_value = rule.split(":", 1)
+        else:
+            recurrence_type, recurrence_value = "weekly", rule
+    if recurrence_type == "monthly_week":
+        if recurrence_value not in MONTHLY_RECURRENCE_VALUES:
+            raise AppError(400, "月度生成规则不合法")
+        return recurrence_type, recurrence_value, 1
+    recurrence = max(1, min(4, int(recurrence_value or 1)))
+    return "weekly", str(recurrence), recurrence
+
+
+def monthly_week_position(date):
+    current = dt.date.fromisoformat(date) if isinstance(date, str) else date
+    same_weekday = []
+    cursor = current.replace(day=1)
+    while cursor.month == current.month:
+        if cursor.weekday() == current.weekday():
+            same_weekday.append(cursor)
+        cursor += dt.timedelta(days=1)
+    ordinal = same_weekday.index(current) + 1 if current in same_weekday else 0
+    reverse = len(same_weekday) - ordinal + 1 if ordinal else 0
+    return ordinal, reverse
+
+
+def recurrence_matches(option, offset, meeting_date):
+    recurrence_type = option.get("recurrence_type") or "weekly"
+    recurrence_value = str(option.get("recurrence_value") or option.get("recurrence_weeks") or "1")
+    if recurrence_type == "monthly_week":
+        ordinal, reverse = monthly_week_position(meeting_date)
+        return (
+            (recurrence_value == "first" and ordinal == 1)
+            or (recurrence_value == "second" and ordinal == 2)
+            or (recurrence_value == "third" and ordinal == 3)
+            or (recurrence_value == "fourth" and ordinal == 4)
+            or (recurrence_value == "penultimate" and reverse == 2)
+            or (recurrence_value == "last" and reverse == 1)
+        )
+    recurrence = max(1, min(4, int(option.get("recurrence_weeks") or recurrence_value or 1)))
+    return offset % recurrence == 0
 
 
 def connect():
@@ -401,6 +461,8 @@ def init_db():
                 title TEXT NOT NULL,
                 default_detail TEXT,
                 recurrence_weeks INTEGER NOT NULL DEFAULT 1,
+                recurrence_type TEXT NOT NULL DEFAULT 'weekly',
+                recurrence_value TEXT NOT NULL DEFAULT '1',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1
             );
@@ -520,6 +582,11 @@ def init_db():
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
         ensure_column(conn, "meeting_items", "minutes", "TEXT")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "meeting_topic_options", "recurrence_type", "TEXT NOT NULL DEFAULT 'weekly'")
+        ensure_column(conn, "meeting_topic_options", "recurrence_value", "TEXT NOT NULL DEFAULT '1'")
+        conn.execute("UPDATE meeting_topic_options SET recurrence_type='weekly' WHERE recurrence_type IS NULL OR recurrence_type=''")
+        conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
+        conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
         seed_meeting_topics(conn)
         seed_link_categories(conn)
         seed_system_settings(conn)
@@ -796,6 +863,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"shifts": self.list_shifts(query)}
             if method == "POST":
                 return self.create_shift()
+        if len(parts) == 3 and parts[:2] == ["api", "shifts"] and method == "DELETE":
+            return self.delete_shift(int(parts[2]))
         if path == "/api/dashboards/shifts" and method == "GET":
             return self.shift_dashboard(query)
 
@@ -873,7 +942,7 @@ class Handler(BaseHTTPRequestHandler):
     def list_users(self):
         self.require_admin()
         with connect() as conn:
-            return rows_to_list(conn.execute("SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id").fetchall())
+            return rows_to_list(conn.execute("SELECT id, username, display_name, role, active, created_at FROM users WHERE active=1 ORDER BY id").fetchall())
 
     def create_user(self):
         admin = self.require_admin()
@@ -1238,8 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
                     meeting_id = cursor.lastrowid
                     created_meetings += 1
                 for option in options:
-                    recurrence = max(1, min(4, int(option.get("recurrence_weeks") or 1)))
-                    if offset % recurrence != 0:
+                    if not recurrence_matches(option, offset, meeting_date):
                         continue
                     exists = conn.execute(
                         "SELECT id FROM meeting_items WHERE meeting_id=? AND option_id=?",
@@ -1309,13 +1377,13 @@ class Handler(BaseHTTPRequestHandler):
     def create_meeting_topic_option(self):
         self.require_admin()
         data = read_json(self)
-        recurrence = max(1, min(4, int(data.get("recurrence_weeks") or 1)))
+        recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
         with connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO meeting_topic_options(type_id, title, default_detail, recurrence_weeks, sort_order, active) VALUES(?,?,?,?,?,1)",
-                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", recurrence, int(data.get("sort_order") or 0)),
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active) VALUES(?,?,?,?,?,?,?,1)",
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0)),
             )
-            write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_weeks": recurrence}, self.client_address[0])
+            write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_type": recurrence_type, "recurrence_value": recurrence_value}, self.client_address[0])
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
 
     def update_meeting_topic_option(self, option_id):
@@ -1327,9 +1395,10 @@ class Handler(BaseHTTPRequestHandler):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(data[key])
-        if "recurrence_weeks" in data:
-            fields.append("recurrence_weeks=?")
-            values.append(max(1, min(4, int(data.get("recurrence_weeks") or 1))))
+        if any(key in data for key in ("recurrence_rule", "recurrence_type", "recurrence_value", "recurrence_weeks")):
+            recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
+            fields.extend(["recurrence_weeks=?", "recurrence_type=?", "recurrence_value=?"])
+            values.extend([recurrence_weeks, recurrence_type, recurrence_value])
         if not fields:
             raise AppError(400, "没有可更新字段")
         values.append(option_id)
@@ -1585,14 +1654,34 @@ class Handler(BaseHTTPRequestHandler):
     def create_shift(self):
         admin = self.require_admin()
         data = read_json(self)
+        dates = data.get("shift_dates")
+        if isinstance(dates, str):
+            dates = [item.strip() for item in dates.replace("\n", ",").split(",") if item.strip()]
+        if not dates:
+            start = data.get("shift_start_date") or data.get("shift_date") or today_iso()
+            end = data.get("shift_end_date") or start
+            dates = date_range(start, end)
         with connect() as conn:
             default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
-            cursor = conn.execute(
-                "INSERT INTO shifts(machine_id, user_id, shift_type, shift_date, hours, note, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), data.get("shift_date") or today_iso(), float(data.get("hours") or default_hours), data.get("note") or "", admin["id"], now_iso()),
-            )
-            write_audit(conn, admin, "shift.create", "shift", cursor.lastrowid, "排班已保存", {"shift_date": data.get("shift_date") or today_iso(), "user_id": data.get("user_id")}, self.client_address[0])
+            created_ids = []
+            for shift_date in dates:
+                cursor = conn.execute(
+                    "INSERT INTO shifts(machine_id, user_id, shift_type, shift_date, hours, note, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), shift_date, float(data.get("hours") or default_hours), data.get("note") or "", admin["id"], now_iso()),
+                )
+                created_ids.append(cursor.lastrowid)
+            write_audit(conn, admin, "shift.create", "shift", created_ids[0] if len(created_ids) == 1 else None, "排班已保存", {"dates": dates, "count": len(created_ids), "user_id": data.get("user_id")}, self.client_address[0])
         return {"message": "排班已保存", "shifts": self.list_shifts({})}
+
+    def delete_shift(self, shift_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            shift = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+            if not shift:
+                raise AppError(404, "排班不存在")
+            conn.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
+            write_audit(conn, admin, "shift.delete", "shift", shift_id, "排班已删除", {"shift_date": shift["shift_date"], "user_id": shift["user_id"]}, self.client_address[0])
+        return {"message": "排班已删除", "shifts": self.list_shifts({})}
 
     def shift_dashboard(self, query):
         where, params = date_filter(query, "s.shift_date")

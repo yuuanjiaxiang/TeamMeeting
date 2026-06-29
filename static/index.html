@@ -19,6 +19,16 @@
         <nav id="nav"></nav>
         <div class="user-box">
           <div id="currentUser">未登录</div>
+          <label class="theme-switcher">
+            <span>UI 风格</span>
+            <select id="themeSelect">
+              <option value="feishu">飞书轻办公</option>
+              <option value="yuque">语雀文档</option>
+              <option value="linear">Linear 工程</option>
+              <option value="dingtalk">钉钉后台</option>
+            </select>
+          </label>
+          <button id="viewModeBtn" class="ghost hidden" type="button">切换用户视图</button>
           <button id="logoutBtn" class="ghost">退出登录</button>
         </div>
       </aside>
@@ -45,8 +55,10 @@
               <p id="pageDesc">先看人，再看事。成员档案、职责和团队对话都在这里。</p>
             </div>
             <div class="toolbar" id="pageToolbar">
-              <input id="fromDate" type="date" />
-              <input id="toDate" type="date" />
+              <div class="period-controls" id="periodControls">
+                <label>开始<input id="fromDate" type="date" /></label>
+                <label>结束<input id="toDate" type="date" /></label>
+              </div>
               <button id="refreshBtn" class="secondary">刷新</button>
             </div>
           </header>
@@ -92,11 +104,11 @@
           </section>
 
           <section id="meetings" class="page">
-            <section class="panel">
+            <section class="panel meeting-calendar-panel">
               <div class="panel-title">
                 <div>
                   <h2>例会议题沙盘</h2>
-                  <p>管理员维护预设议题并按周生成，成员在当周会议中补充自定义议题和会议纪要。</p>
+                  <p>先选会议，再处理议题、纪要、签到和邮件。</p>
                 </div>
                 <div class="month-switch">
                   <button id="prevMeetingMonthBtn" class="secondary" type="button">上月</button>
@@ -107,30 +119,53 @@
               <div id="meetingCalendar" class="calendar meeting-calendar"></div>
             </section>
 
-            <section class="panel admin-only">
-              <h2>生成周例会</h2>
-              <form id="meetingForm" class="form-row">
-                <input name="meeting_date" type="date" />
-                <input name="title" placeholder="会议标题，默认周例会" />
-                <input name="summary" placeholder="会议摘要" />
-                <button>创建单场会议</button>
-              </form>
-              <form id="meetingGenerateForm" class="form-row meeting-generate-form">
-                <input name="start_date" type="date" />
-                <select name="weeks">
-                  <option value="4">生成未来 4 周</option>
-                  <option value="8">生成未来 8 周</option>
-                  <option value="12">生成未来 12 周</option>
-                  <option value="26">生成未来 26 周</option>
-                </select>
-                <input name="title" placeholder="批量会议标题，默认周例会" />
-                <input name="summary" placeholder="批量会议摘要" />
-                <button>按预设批量生成</button>
-              </form>
+            <section class="meeting-workbench">
+              <aside class="panel meeting-list-panel">
+                <div class="panel-title">
+                  <div>
+                    <h2>本月会议</h2>
+                    <p>点击会议查看详情。</p>
+                  </div>
+                </div>
+                <div id="meetingList" class="meeting-list"></div>
+              </aside>
+
+              <section class="panel meeting-detail-panel">
+                <div id="meetingDetail" class="meeting-detail"></div>
+              </section>
             </section>
 
-            <div class="split admin-only">
-              <section class="panel">
+            <section class="panel admin-only meeting-admin-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>会议管理</h2>
+                  <p>管理员维护会议生成规则和预设议题；日常参会人员不需要进入这里。</p>
+                </div>
+              </div>
+              <div class="meeting-admin-grid">
+                <div class="admin-block">
+                  <h3>生成周例会</h3>
+                  <form id="meetingForm" class="form-grid compact">
+                    <input name="meeting_date" type="date" />
+                    <input name="title" placeholder="会议标题，默认周例会" />
+                    <input name="summary" placeholder="会议摘要" />
+                    <button>创建单场会议</button>
+                  </form>
+                  <form id="meetingGenerateForm" class="form-grid compact meeting-generate-form">
+                    <input name="start_date" type="date" />
+                    <select name="weeks">
+                      <option value="4">生成未来 4 周</option>
+                      <option value="8">生成未来 8 周</option>
+                      <option value="12">生成未来 12 周</option>
+                      <option value="26">生成未来 26 周</option>
+                    </select>
+                    <input name="title" placeholder="批量会议标题，默认周例会" />
+                    <input name="summary" placeholder="批量会议摘要" />
+                    <button>按预设批量生成</button>
+                  </form>
+                </div>
+
+                <div class="admin-block">
                 <h2>议题类型</h2>
                 <form id="topicTypeForm" class="form-row slim">
                   <input name="name" placeholder="例如：质量风险" required />
@@ -138,35 +173,33 @@
                   <button>新增类型</button>
                 </form>
                 <div id="topicTypeList" class="chip-list"></div>
-              </section>
-              <section class="panel">
+                </div>
+
+                <div class="admin-block">
                 <h2>预设议题</h2>
                 <form id="topicOptionForm" class="form-grid compact">
                   <select name="type_id" data-topic-types required></select>
                   <input name="title" placeholder="例如：本周阻塞问题" required />
-                  <select name="recurrence_weeks">
-                    <option value="1">每 1 周</option>
-                    <option value="2">每 2 周</option>
-                    <option value="3">每 3 周</option>
-                    <option value="4">每 4 周</option>
+                  <select name="recurrence_rule">
+                    <option value="weekly:1">每 1 周</option>
+                    <option value="weekly:2">每 2 周</option>
+                    <option value="weekly:3">每 3 周</option>
+                    <option value="weekly:4">每 4 周</option>
+                    <option value="monthly_week:first">每月第 1 周</option>
+                    <option value="monthly_week:second">每月第 2 周</option>
+                    <option value="monthly_week:third">每月第 3 周</option>
+                    <option value="monthly_week:fourth">每月第 4 周</option>
+                    <option value="monthly_week:penultimate">每月倒数第 2 周</option>
+                    <option value="monthly_week:last">每月最后 1 周</option>
                   </select>
                   <textarea name="default_detail" placeholder="默认说明，可留空"></textarea>
                   <button>新增选项</button>
                 </form>
-              </section>
-            </div>
-
-            <section class="panel admin-only">
-              <div class="panel-title">
-                <div>
-                  <h2>预设议题清单</h2>
-                  <p>修改周期后，后续批量生成会按新的周期执行。</p>
                 </div>
               </div>
+              <h3>预设议题清单</h3>
               <div id="topicPresetList" class="table"></div>
             </section>
-
-            <section id="meetingList" class="meeting-board"></section>
           </section>
 
           <section id="shifts" class="page">
@@ -205,10 +238,11 @@
                   <select name="machine_id" data-machines required></select>
                   <select name="user_id" data-users required></select>
                   <select name="shift_type"><option value="day">白班</option><option value="night">夜班</option></select>
-                  <input name="shift_date" type="date" required />
+                  <label>开始日期<input name="shift_start_date" type="date" required /></label>
+                  <label>结束日期<input name="shift_end_date" type="date" /></label>
                   <input name="hours" type="number" step="0.5" value="12" />
                   <input name="note" placeholder="备注" />
-                  <button class="admin-only">添加排班</button>
+                  <button class="admin-only">批量添加排班</button>
                 </form>
                 <h3>工时统计</h3>
                 <div id="shiftStats" class="rank-list"></div>
@@ -217,18 +251,14 @@
           </section>
 
           <section id="rules" class="page">
-            <section class="panel admin-only">
-              <h2>发布红黑榜规则</h2>
-              <form id="ruleForm" class="form-grid compact">
-                <select name="kind"><option value="red">红榜</option><option value="black">黑榜</option></select>
-                <textarea name="content" placeholder="规则说明、适用场景、加减分口径" required></textarea>
-                <button>发布规则</button>
-              </form>
-            </section>
-            <div class="split">
+            <div class="split admin-only">
               <section class="panel">
-                <h2>规则列表</h2>
-                <div id="ruleList" class="item-list"></div>
+                <h2>发布红黑榜规则</h2>
+                <form id="ruleForm" class="form-grid compact">
+                  <select name="kind"><option value="red">红榜</option><option value="black">黑榜</option></select>
+                  <textarea name="content" placeholder="规则说明、适用场景、加减分口径" required></textarea>
+                  <button>发布规则</button>
+                </form>
               </section>
               <section class="panel admin-only">
                 <h2>记录个人积分</h2>
@@ -243,6 +273,10 @@
                 </form>
               </section>
             </div>
+            <section class="panel">
+              <h2>规则列表</h2>
+              <div id="ruleList" class="rule-columns"></div>
+            </section>
             <section class="panel">
               <h2>积分明细</h2>
               <div id="scoreList" class="table"></div>
