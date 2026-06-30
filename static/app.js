@@ -1,3 +1,5 @@
+const uiThemeVersion = "miro-v1";
+
 const state = {
   user: null,
   permissions: {},
@@ -20,7 +22,10 @@ const state = {
   selectedMeetingDate: iso(new Date()),
   selectedMeetingId: null,
   viewMode: safeStorageGet("teamLoopViewMode", "admin"),
-  uiTheme: safeStorageGet("teamLoopUiTheme", "yuque"),
+  showLogin: false,
+  uiTheme: safeStorageGet("teamLoopThemeVersion", "") === uiThemeVersion
+    ? safeStorageGet("teamLoopUiTheme", "miro")
+    : "miro",
 };
 
 const pages = [
@@ -38,7 +43,8 @@ const pages = [
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules", "thanks"]);
-const uiThemes = new Set(["feishu", "yuque", "linear", "dingtalk"]);
+const guestPages = new Set(["members", "shifts", "rules", "thanks", "links"]);
+const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 
 function safeStorageGet(key, fallback) {
   try {
@@ -57,15 +63,17 @@ function safeStorageSet(key, value) {
 }
 
 function applyUiTheme() {
-  const theme = uiThemes.has(state.uiTheme) ? state.uiTheme : "yuque";
+  const theme = uiThemes.has(state.uiTheme) ? state.uiTheme : "miro";
   state.uiTheme = theme;
   document.body.dataset.theme = theme;
+  safeStorageSet("teamLoopThemeVersion", uiThemeVersion);
+  safeStorageSet("teamLoopUiTheme", theme);
   const select = $("#themeSelect");
   if (select) select.value = theme;
 }
 
 function setUiTheme(theme) {
-  state.uiTheme = uiThemes.has(theme) ? theme : "yuque";
+  state.uiTheme = uiThemes.has(theme) ? theme : "miro";
   safeStorageSet("teamLoopUiTheme", state.uiTheme);
   applyUiTheme();
 }
@@ -76,6 +84,16 @@ function isAdminAccount() {
 
 function isAdminView() {
   return isAdminAccount() && state.viewMode !== "user";
+}
+
+function isGuest() {
+  return !state.user;
+}
+
+function canAccessPage(id) {
+  if (isGuest()) return guestPages.has(id);
+  if (!isAdminView() && ["users", "system"].includes(id)) return false;
+  return true;
 }
 
 function setViewMode(mode) {
@@ -216,30 +234,47 @@ function renderPageToolbar(id = state.currentPage) {
 
 function applyAuthView() {
   if (state.user && !isAdminAccount()) setViewMode("user");
-  $("#loginView").classList.toggle("hidden", Boolean(state.user));
-  $("#appView").classList.toggle("hidden", !state.user);
+  const guest = isGuest();
+  const showLogin = guest && state.showLogin;
+  $("#loginView").classList.toggle("hidden", !showLogin);
+  $("#appView").classList.toggle("hidden", showLogin);
   const roleText = state.user?.role === "admin" ? "管理员" : "普通用户";
   const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
-  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "未登录";
+  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
+  $("#logoutBtn")?.classList.toggle("hidden", guest);
+  $("#loginEntryBtn")?.classList.toggle("hidden", !guest || showLogin);
   const viewModeBtn = $("#viewModeBtn");
   if (viewModeBtn) {
     viewModeBtn.classList.toggle("hidden", !isAdminAccount());
     viewModeBtn.textContent = isAdminView() ? "切换用户视图" : "切换管理视图";
   }
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
-  renderPageToolbar();
-  renderNav();
+  $("#teamChatForm")?.classList.toggle("hidden", guest);
+  $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest);
+  $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest);
+  if (!canAccessPage(state.currentPage)) {
+    switchPage("members");
+  } else {
+    renderPageToolbar();
+    renderNav();
+  }
 }
 
 function renderNav() {
   $("#nav").innerHTML = pages
-    .filter(([id]) => !["users", "system"].includes(id) || isAdminView())
+    .filter(([id]) => canAccessPage(id))
     .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
     .join("");
 }
 
 function switchPage(id) {
-  if (!isAdminView() && ["users", "system"].includes(id)) id = "members";
+  if (!canAccessPage(id)) id = "members";
+  if (isGuest()) {
+    state.showLogin = false;
+    $("#loginView")?.classList.add("hidden");
+    $("#appView")?.classList.remove("hidden");
+    $("#loginEntryBtn")?.classList.remove("hidden");
+  }
   state.currentPage = id;
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
   const meta = pages.find((page) => page[0] === id);
@@ -250,18 +285,21 @@ function switchPage(id) {
 }
 
 async function loadReferenceData() {
-  const [members, rules, machines, topics, linkCategories] = await Promise.all([
+  const [members, rules, machines, linkCategories] = await Promise.all([
     api("/api/members"),
     api("/api/rules"),
     api("/api/machines"),
-    api("/api/meeting-topics"),
     api("/api/link-categories"),
   ]);
   state.members = members.members;
   state.rules = rules.rules;
   state.machines = machines.machines;
-  state.topics = topics.types;
   state.linkCategories = linkCategories.categories;
+  if (isGuest()) {
+    state.topics = [];
+  } else {
+    state.topics = (await api("/api/meeting-topics")).types;
+  }
   if (isAdminView()) {
     state.users = (await api("/api/users")).users;
   } else {
@@ -782,6 +820,72 @@ async function loadLinks() {
   renderLinks();
 }
 
+function splitKeywords(value = "") {
+  return String(value)
+    .split(/[,\uff0c、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function inferLinkKeywords(data = {}) {
+  const source = [data.title, data.url, data.description, data.category].filter(Boolean).join(" ");
+  const lower = source.toLowerCase();
+  const machines = [];
+  state.machines.forEach((machine) => {
+    const name = machine.name || "";
+    if (name && lower.includes(name.toLowerCase()) && !machines.includes(name)) machines.push(name);
+  });
+  const machineMatches = source.match(/TOPTB|机台\s*[A-Z]|老化测试台/g) || [];
+  machineMatches.forEach((item) => {
+    const normalized = item.replace(/\s+/g, " ");
+    if (!machines.includes(normalized)) machines.push(normalized);
+  });
+
+  const rules = [
+    ["会议", "会议"], ["例会", "会议"], ["纪要", "纪要"], ["模板", "模板"],
+    ["看板", "看板"], ["dashboard", "看板"], ["数据", "数据"], ["交接", "交接"],
+    ["报修", "报修"], ["工单", "工单"], ["sop", "SOP"], ["标准", "SOP"],
+    ["复盘", "复盘"], ["质量", "质量"], ["点检", "点检"], ["白板", "白板"],
+    ["miro", "白板"], ["备份", "备份"], ["审计", "审计"], ["排班", "排班"],
+    ["红黑榜", "红黑榜"], ["thank", "Thank You"], ["工具", "工具"], ["文档", "文档"],
+    ["流程", "流程"], ["系统", "系统"],
+  ];
+  const tags = [];
+  rules.forEach(([needle, tag]) => {
+    if (lower.includes(needle.toLowerCase()) && !tags.includes(tag)) tags.push(tag);
+  });
+  splitKeywords(data.category).forEach((item) => {
+    if (tags.length < 4 && !tags.includes(item)) tags.push(item);
+  });
+  return {
+    machine_scope: machines.slice(0, 4),
+    process_tags: tags.slice(0, 5),
+  };
+}
+
+function applyLinkKeywordSuggestion(form, force = false) {
+  if (!form) return;
+  const raw = Object.fromEntries(new FormData(form).entries());
+  const suggestion = inferLinkKeywords(raw);
+  const machineInput = form.elements.machine_scope;
+  const tagInput = form.elements.process_tags;
+  if (machineInput && (force || !machineInput.value.trim() || machineInput.dataset.autoSuggested === "1")) {
+    machineInput.value = suggestion.machine_scope.join(", ");
+    machineInput.dataset.autoSuggested = suggestion.machine_scope.length ? "1" : "";
+  }
+  if (tagInput && (force || !tagInput.value.trim() || tagInput.dataset.autoSuggested === "1")) {
+    tagInput.value = suggestion.process_tags.join(", ");
+    tagInput.dataset.autoSuggested = suggestion.process_tags.length ? "1" : "";
+  }
+}
+
+function prepareLinkPayload(data) {
+  const suggestion = inferLinkKeywords(data);
+  if (!data.machine_scope && suggestion.machine_scope.length) data.machine_scope = suggestion.machine_scope.join(", ");
+  if (!data.process_tags && suggestion.process_tags.length) data.process_tags = suggestion.process_tags.join(", ");
+  return data;
+}
+
 function renderLinks() {
   const category = $("#linkCategoryFilter")?.value || "";
   const status = $("#linkStatusFilter")?.value || "";
@@ -804,34 +908,39 @@ function renderLinks() {
     ].filter(Boolean).join(" ").toLowerCase();
     return hitCategory && hitStatus && (!keyword || text.includes(keyword));
   });
-  const qualityHeader = isAdminView() ? "<th>质量管理</th>" : "";
+  const manageHeader = isAdminView() ? "<th>管理</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
-    <table>
-      <thead><tr><th>名称</th><th>质量</th><th>分类</th><th>适用范围</th><th>地址</th><th>点击</th><th>归档人</th>${qualityHeader}</tr></thead>
+    <table class="link-list-table">
+      <thead><tr><th>名称</th><th>适用范围</th><th>地址</th><th>点击</th><th>归档人</th>${manageHeader}</tr></thead>
       <tbody>
-        ${filtered.map((link) => `
+        ${filtered.map((link) => {
+          const scope = [...(link.machine_scope || []), ...(link.process_tags || [])];
+          const scopeText = scope.join(", ") || "-";
+          const addressText = [link.url, link.description].filter(Boolean).join(" · ");
+          return `
           <tr class="${Number(link.invalid) === 1 ? "link-invalid" : ""}">
             <td>
-              <strong>${escapeHtml(link.title)}</strong>
-              ${Number(link.pinned) === 1 ? '<span class="pill">置顶</span>' : ""}
+              <div class="link-single-line link-name-line" title="${escapeHtml(link.title)}">
+                <strong>${escapeHtml(link.title)}</strong>
+                ${Number(link.pinned) === 1 ? '<span class="pill">置顶</span>' : ""}
+                ${Number(link.invalid) === 1 ? '<span class="pill warn">失效</span>' : ""}
+              </div>
             </td>
             <td>
-              <span class="pill ${Number(link.invalid) === 1 ? "warn" : "success"}">${Number(link.invalid) === 1 ? "失效" : "可用"}</span>
-              ${link.quality_note ? `<p>${escapeHtml(link.quality_note)}</p>` : ""}
-            </td>
-            <td><span class="pill">${escapeHtml(link.category)}</span></td>
-            <td>
-              <div class="tags">${(link.machine_scope || []).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("")}</div>
-              <div class="tags">${(link.process_tags || []).map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("")}</div>
+              <div class="link-scope-tags" title="${escapeHtml(scopeText)}">
+                ${scope.length ? scope.map((item) => `<span class="tag">${escapeHtml(item)}</span>`).join("") : '<span class="link-empty">-</span>'}
+              </div>
             </td>
             <td>
-              ${Number(link.invalid) === 1
-                ? `<span class="link-url disabled">${escapeHtml(link.url)}</span>`
-                : `<a class="link-url" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>`}
-              ${link.description ? `<p>${escapeHtml(link.description)}</p>` : ""}
+              <div class="link-single-line" title="${escapeHtml(addressText)}">
+                ${Number(link.invalid) === 1
+                  ? `<span class="link-url disabled">${escapeHtml(link.url)}</span>`
+                  : `<a class="link-url" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>`}
+                ${link.description ? `<span class="link-description"> · ${escapeHtml(link.description)}</span>` : ""}
+              </div>
             </td>
-            <td>${Number(link.click_count || 0)} 次${link.last_clicked_at ? `<br><small>${escapeHtml(link.last_clicked_at)}</small>` : ""}</td>
-            <td>${escapeHtml(link.creator || "-")}</td>
+            <td><span title="${escapeHtml(link.last_clicked_at || "")}">${Number(link.click_count || 0)} 次</span></td>
+            <td><div class="link-single-line" title="${escapeHtml(link.creator || "-")}">${escapeHtml(link.creator || "-")}</div></td>
             ${isAdminView() ? `
               <td>
                 <form class="link-quality-form" data-link-id="${link.id}">
@@ -849,7 +958,8 @@ function renderLinks() {
                   <button>保存</button>
                 </form>
               </td>` : ""}
-          </tr>`).join("")}
+          </tr>`;
+        }).join("")}
       </tbody>
     </table>` : "<p>没有匹配的链接</p>";
 }
@@ -868,7 +978,9 @@ function renderCalendar() {
   const title = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
   $("#shiftMonthTitle").textContent = title;
   $("#shiftMonthTitle2").textContent = title;
-  $("#selectedShiftDateTitle").textContent = isAdminView() ? `编辑排班 · ${state.selectedShiftDate}` : "我的本月排班";
+  $("#selectedShiftDateTitle").textContent = isAdminView()
+    ? `编辑排班 · ${state.selectedShiftDate}`
+    : (state.user ? "我的本月排班" : "本月排班");
   const shiftStartInput = $('input[name="shift_start_date"]');
   const shiftEndInput = $('input[name="shift_end_date"]');
   if (shiftStartInput) shiftStartInput.value = state.selectedShiftDate;
@@ -918,19 +1030,21 @@ async function loadThanks() {
 }
 
 async function refreshAll() {
-  if (!state.user) return;
   await loadReferenceData();
-  await Promise.all([
-    loadDashboard(),
-    loadUsers(),
-    loadRulesAndScores(),
-    loadMembers(),
-    loadMeetings(),
-    loadLinks(),
-    loadShifts(),
-    loadThanks(),
-    loadSystemAdmin(),
-  ]);
+  const loaders = [
+    loadRulesAndScores,
+    loadMembers,
+    loadLinks,
+    loadShifts,
+    loadThanks,
+  ];
+  if (!isGuest()) {
+    loaders.push(loadDashboard, loadMeetings);
+  }
+  if (isAdminView()) {
+    loaders.push(loadUsers, loadSystemAdmin);
+  }
+  await Promise.all(loaders.map((loader) => loader()));
   applyAuthView();
 }
 
@@ -1018,10 +1132,9 @@ function filledText(value) {
   return String(value || "").trim();
 }
 
-function memberPersona(member, skills = [], machines = []) {
+function memberPersona(member, skills = []) {
   const rows = [
     ["技能", skills.map(escapeHtml).join(" / ")],
-    ["负责机台", machines.map(escapeHtml).join(" / ")],
     ["擅长问题", escapeHtml(filledText(member.expertise))],
     ["备用负责人", escapeHtml(filledText(member.backup_owner))],
     ["联系方式", escapeHtml(filledText(member.contact))],
@@ -1038,7 +1151,6 @@ function renderMemberCard(member) {
   const tagPlaceholder = isAdminView() ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
   const responsibilityPlaceholder = isAdminView() ? "成员职责范围" : "我的职责范围";
   const skills = member.skills || [];
-  const machines = member.machine_scope || [];
   const tags = member.tags || [];
   const responsibilities = filledText(member.responsibilities);
   const comment = filledText(member.comment);
@@ -1054,7 +1166,7 @@ function renderMemberCard(member) {
           <p><strong>职责：</strong>${responsibilities ? escapeHtml(responsibilities) : "待补充"}</p>
           ${comment ? `<p>${escapeHtml(comment)}</p>` : ""}
         </div>
-        ${memberPersona(member, skills, machines)}
+        ${memberPersona(member, skills)}
         ${canEdit ? `
           <details class="member-editor">
             <summary>编辑资料</summary>
@@ -1066,7 +1178,6 @@ function renderMemberCard(member) {
               <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
               <textarea name="comment" placeholder="个人备注">${escapeHtml(member.comment || "")}</textarea>
               <input name="skills" value="${escapeHtml(skills.join(", "))}" placeholder="技能标签，用逗号分隔">
-              <input name="machine_scope" value="${escapeHtml(machines.join(", "))}" placeholder="负责机台，用逗号分隔">
               <input name="expertise" value="${escapeHtml(member.expertise || "")}" placeholder="擅长问题类型">
               <input name="backup_owner" value="${escapeHtml(member.backup_owner || "")}" placeholder="备用负责人">
               <input name="contact" value="${escapeHtml(member.contact || "")}" placeholder="联系方式">
@@ -1118,6 +1229,7 @@ function bindEvents() {
       const data = await api("/api/login", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
       state.user = data.user;
       state.permissions = data.permissions;
+      state.showLogin = false;
       applyAuthView();
       await refreshAll();
     } catch (error) {
@@ -1129,7 +1241,21 @@ function bindEvents() {
     await api("/api/logout", { method: "POST", body: "{}" });
     state.user = null;
     state.permissions = {};
+    state.showLogin = false;
     applyAuthView();
+    await refreshAll();
+  });
+
+  $("#loginEntryBtn")?.addEventListener("click", () => {
+    state.showLogin = true;
+    applyAuthView();
+  });
+
+  $("#guestBrowseBtn")?.addEventListener("click", async () => {
+    state.showLogin = false;
+    applyAuthView();
+    switchPage("members");
+    await refreshAll();
   });
 
   $("#nav").addEventListener("click", (event) => {
@@ -1166,7 +1292,7 @@ function bindEvents() {
   bindForm("#meetingGenerateForm", (data) => api("/api/meetings/bulk-generate", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicOptionForm", (data) => api("/api/meeting-topic-options", { method: "POST", body: JSON.stringify(data) }));
-  bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(prepareLinkPayload(data)) }));
   bindForm("#linkCategoryForm", (data) => api("/api/link-categories", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#machineForm", (data) => api("/api/machines", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
@@ -1178,6 +1304,22 @@ function bindEvents() {
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
   $("#linkStatusFilter").addEventListener("change", renderLinks);
   $("#linkKeywordSearch").addEventListener("input", renderLinks);
+  const linkForm = $("#linkForm");
+  if (linkForm) {
+    ["title", "url", "description"].forEach((name) => {
+      linkForm.elements[name]?.addEventListener("input", () => applyLinkKeywordSuggestion(linkForm));
+    });
+    linkForm.elements.category?.addEventListener("change", () => applyLinkKeywordSuggestion(linkForm));
+    ["machine_scope", "process_tags"].forEach((name) => {
+      linkForm.elements[name]?.addEventListener("input", () => {
+        linkForm.elements[name].dataset.autoSuggested = "0";
+      });
+    });
+    $("#inferLinkScopeBtn")?.addEventListener("click", () => {
+      applyLinkKeywordSuggestion(linkForm, true);
+      toast("已根据链接内容提炼关键词");
+    });
+  }
 
   const memberForm = $("#memberForm");
   if (memberForm) {
@@ -1328,9 +1470,13 @@ async function boot() {
     state.permissions = data.permissions;
     applyAuthView();
     switchPage("members");
-    if (state.user) await refreshAll();
+    await refreshAll();
   } catch {
+    state.user = null;
+    state.permissions = {};
+    state.showLogin = false;
     applyAuthView();
+    await refreshAll();
   }
 }
 

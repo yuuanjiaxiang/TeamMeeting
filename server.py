@@ -701,7 +701,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def send_link_redirect(self, link_id):
-        self.current_user()
+        self.current_user(required=False)
         with connect() as conn:
             link = conn.execute("SELECT id, title, url, invalid FROM links WHERE id=?", (link_id,)).fetchone()
             if not link:
@@ -762,6 +762,24 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(403, "仅管理员可操作")
         return user
 
+    def is_public_read_api(self, method, path):
+        if method != "GET":
+            return False
+        return path in {
+            "/api/members",
+            "/api/team-posts",
+            "/api/rules",
+            "/api/scores",
+            "/api/dashboards/red-black",
+            "/api/machines",
+            "/api/shifts",
+            "/api/dashboards/shifts",
+            "/api/thank-you",
+            "/api/dashboards/thank-you",
+            "/api/links",
+            "/api/link-categories",
+        }
+
     def route_api(self, method, path, query):
         if path == "/api/login" and method == "POST":
             return self.login()
@@ -771,7 +789,7 @@ class Handler(BaseHTTPRequestHandler):
             user = self.current_user(required=False)
             return {"user": user, "permissions": permissions_for(user)}
 
-        user = self.current_user()
+        user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
 
         if path == "/api/users":

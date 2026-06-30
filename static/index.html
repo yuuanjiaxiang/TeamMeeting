@@ -22,6 +22,7 @@
           <label class="theme-switcher">
             <span>UI 风格</span>
             <select id="themeSelect">
+              <option value="miro">Miro 白板协作</option>
               <option value="feishu">飞书轻办公</option>
               <option value="yuque">语雀文档</option>
               <option value="linear">Linear 工程</option>
@@ -29,6 +30,7 @@
             </select>
           </label>
           <button id="viewModeBtn" class="ghost hidden" type="button">切换用户视图</button>
+          <button id="loginEntryBtn" class="ghost hidden" type="button">登录</button>
           <button id="logoutBtn" class="ghost">退出登录</button>
         </div>
       </aside>
@@ -44,6 +46,7 @@
               <label>密码<input name="password" value="admin123" type="password" autocomplete="current-password" /></label>
               <button type="submit">登录</button>
             </form>
+            <button id="guestBrowseBtn" class="secondary" type="button">访客浏览</button>
             <small>默认账号：admin/admin123，user/user123</small>
           </div>
         </section>
@@ -274,7 +277,7 @@
               </section>
             </div>
             <section class="panel">
-              <h2>规则列表</h2>
+              <h2>红黑榜细则</h2>
               <div id="ruleList" class="rule-columns"></div>
             </section>
             <section class="panel">
@@ -313,8 +316,9 @@
                 <input name="url" placeholder="https://..." required />
                 <select name="category" data-link-categories required></select>
                 <input name="description" placeholder="说明" />
-                <input name="machine_scope" placeholder="适用机台，逗号分隔" />
-                <input name="process_tags" placeholder="流程/标签，逗号分隔" />
+                <input name="machine_scope" placeholder="适用机台，自动提炼后可手动改" />
+                <input name="process_tags" placeholder="关键词，自动提炼后可手动改" />
+                <button id="inferLinkScopeBtn" class="secondary" type="button">自动提炼</button>
                 <button>保存链接</button>
               </form>
             </section>
