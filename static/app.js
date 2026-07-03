@@ -1528,7 +1528,11 @@ function renderTeamReactions(post) {
 
 function closeReactionPopover() {
   const popover = $("#teamReactionPopover");
-  if (popover) popover.classList.add("hidden");
+  if (popover) {
+    popover.classList.add("hidden");
+    popover.style.left = "";
+    popover.style.top = "";
+  }
   activeReactionPostId = null;
 }
 
@@ -1567,8 +1571,6 @@ function ensureReactionPopover() {
 }
 
 function openReactionPopover(button) {
-  const wrap = button.closest(".chat-reaction-wrap");
-  if (!wrap) return;
   const popover = ensureReactionPopover();
   const isSameOpen = activeReactionPostId === button.dataset.postId && !popover.classList.contains("hidden");
   if (isSameOpen) {
@@ -1577,8 +1579,18 @@ function openReactionPopover(button) {
   }
   activeReactionPostId = button.dataset.postId;
   popover.dataset.postId = activeReactionPostId;
-  wrap.appendChild(popover);
+  document.body.appendChild(popover);
   popover.classList.remove("hidden");
+  const buttonRect = button.getBoundingClientRect();
+  const popoverWidth = popover.offsetWidth || Math.min(360, window.innerWidth - 24);
+  const popoverHeight = popover.offsetHeight || Math.min(390, window.innerHeight - 24);
+  const left = Math.max(8, Math.min(buttonRect.left, window.innerWidth - popoverWidth - 8));
+  const preferBottom = buttonRect.bottom + 8;
+  const top = preferBottom + popoverHeight <= window.innerHeight
+    ? preferBottom
+    : Math.max(8, buttonRect.top - popoverHeight - 8);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
 }
 
 function renderTeamReplies(post) {
@@ -1911,6 +1923,9 @@ function bindEvents() {
     if (chatReaction) {
       const postId = chatReaction.dataset.postId || activeReactionPostId;
       sendTeamReaction(postId, chatReaction.dataset.reaction).catch((error) => toast(error.message));
+      return;
+    }
+    if (event.target.closest("#teamReactionPopover")) {
       return;
     }
     if (!event.target.closest(".chat-reaction-wrap")) {

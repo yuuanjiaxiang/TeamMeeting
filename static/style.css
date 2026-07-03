@@ -103,6 +103,7 @@ input,
 select,
 textarea {
   width: 100%;
+  min-width: 0;
   min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -207,6 +208,7 @@ body.modal-open {
   display: grid;
   grid-template-columns: 228px 1fr;
   min-height: 100vh;
+  min-width: 0;
 }
 
 .sidebar {
@@ -323,6 +325,7 @@ main {
   max-width: 1480px;
   margin: 0 auto;
   padding: 24px 26px 34px;
+  min-width: 0;
 }
 
 .topbar {
@@ -392,11 +395,13 @@ main {
 
 .page {
   display: none;
+  min-width: 0;
 }
 
 .page.active {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .panel {
@@ -405,6 +410,7 @@ main {
   border-radius: 8px;
   padding: 16px;
   box-shadow: var(--shadow-soft);
+  min-width: 0;
 }
 
 .panel h2 {
@@ -424,6 +430,7 @@ main {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 12px;
+  min-width: 0;
 }
 
 .split {
@@ -957,10 +964,8 @@ th {
 }
 
 .chat-reaction-picker {
-  position: absolute;
-  z-index: 10;
-  left: 0;
-  top: calc(100% + 6px);
+  position: fixed;
+  z-index: 80;
   display: grid;
   gap: 8px;
   width: min(360px, calc(100vw - 60px));
@@ -1568,6 +1573,9 @@ th {
 
 .chip-list {
   margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .chip {
@@ -1579,6 +1587,8 @@ th {
   padding: 6px 10px;
   background: #fff;
   margin: 0 6px 6px 0;
+  max-width: 100%;
+  width: fit-content;
 }
 
 .chip-delete {
@@ -2993,36 +3003,83 @@ body[data-theme="dingtalk"] .meeting-workbench {
 }
 
 @media (max-width: 1180px) {
-  .app-shell {
+  .app-shell,
+  body[data-theme] .app-shell {
     grid-template-columns: 1fr;
   }
 
-  .sidebar {
-    position: static;
+  .sidebar,
+  body[data-theme] .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
     height: auto;
+    margin: 0;
+    border-radius: 0;
+    display: grid;
+    grid-template-columns: minmax(180px, auto) minmax(0, 1fr) minmax(180px, auto);
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    overflow: visible;
   }
 
-  nav {
+  nav,
+  body[data-theme] nav {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    min-width: 0;
+  }
+
+  .brand,
+  body[data-theme] .brand {
+    padding: 0;
+    min-width: 0;
+  }
+
+  .brand > div:last-child {
+    min-width: 0;
+  }
+
+  .brand strong,
+  .brand span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .user-box,
+  body[data-theme] .user-box {
+    margin-top: 0;
+    padding: 0;
+    border-top: 0;
+    min-width: 0;
+    align-self: stretch;
+    align-content: center;
   }
 
   body[data-theme="dingtalk"] .sidebar {
     position: sticky;
-    display: flex;
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: minmax(180px, auto) minmax(0, 1fr) minmax(180px, auto);
     height: auto;
   }
 
   body[data-theme="dingtalk"] nav {
-    display: flex;
-    flex-direction: row;
-    grid-template-columns: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   }
 
   body[data-theme="dingtalk"] .user-box {
     min-width: 0;
     flex-wrap: wrap;
+  }
+
+  .content,
+  body[data-theme] .content {
+    width: 100%;
+    max-width: none;
+    padding: 20px;
   }
 
   .split,
@@ -3038,17 +3095,37 @@ body[data-theme="dingtalk"] .meeting-workbench {
   .topic-board,
   .preset-row,
   .link-toolbar,
-  .settings-grid {
+  .settings-grid,
+  .attendance-row,
+  body[data-theme] .split,
+  body[data-theme] .member-layout,
+  body[data-theme] .shift-layout,
+  body[data-theme] .rule-columns,
+  body[data-theme] .meeting-workbench,
+  body[data-theme] .meeting-detail-grid,
+  body[data-theme] .meeting-admin-grid,
+  body[data-theme] .meeting-actions,
+  body[data-theme] .metrics,
+  body[data-theme] .link-grid,
+  body[data-theme] .topic-board,
+  body[data-theme] .preset-row,
+  body[data-theme] .link-toolbar,
+  body[data-theme] .settings-grid,
+  body[data-theme] .attendance-row {
     grid-template-columns: 1fr;
   }
 
-  .user-inline-form {
+  .user-inline-form,
+  body[data-theme] .user-inline-form {
     grid-template-columns: 1fr;
   }
 
   .topbar,
   .form-row,
-  .form-row.slim {
+  .form-row.slim,
+  body[data-theme] .topbar,
+  body[data-theme] .form-row,
+  body[data-theme] .form-row.slim {
     display: grid;
     grid-template-columns: 1fr;
   }
@@ -3073,7 +3150,8 @@ body[data-theme="dingtalk"] .meeting-workbench {
     border-bottom: 1px solid var(--line);
   }
 
-  .meeting-list-panel {
+  .meeting-list-panel,
+  body[data-theme] .meeting-list-panel {
     position: static;
   }
 
@@ -3092,13 +3170,17 @@ body[data-theme="dingtalk"] .meeting-workbench {
 }
 
 @media (max-width: 720px) {
-  .content {
+  .content,
+  body[data-theme] .content {
     padding: 14px;
   }
 
   nav,
+  body[data-theme] nav,
   .toolbar,
+  body[data-theme] .toolbar,
   .period-controls,
+  body[data-theme] .period-controls,
   .form-grid.compact,
   .chat-form,
   .attendance-row,
@@ -3110,20 +3192,86 @@ body[data-theme="dingtalk"] .meeting-workbench {
     padding: 12px;
   }
 
+  .sidebar,
+  body[data-theme] .sidebar,
   body[data-theme="dingtalk"] .sidebar {
+    display: grid;
+    grid-template-columns: 1fr;
     align-items: flex-start;
-    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px;
   }
 
+  nav,
+  body[data-theme] nav,
   body[data-theme="dingtalk"] nav {
     width: 100%;
     display: flex;
+    flex-direction: row;
     overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+    overscroll-behavior-x: contain;
   }
 
+  .nav-item,
+  body[data-theme] .nav-item {
+    width: auto;
+    min-width: 96px;
+    flex: 0 0 auto;
+    justify-content: center;
+    white-space: nowrap;
+    padding-inline: 12px;
+  }
+
+  .nav-item span,
+  body[data-theme] .nav-item span {
+    width: auto;
+  }
+
+  .user-box,
+  body[data-theme] .user-box,
   body[data-theme="dingtalk"] .user-box {
     width: 100%;
-    justify-content: flex-start;
+    justify-content: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .topbar,
+  .panel-title,
+  .meeting-detail-head,
+  .meeting-meta,
+  body[data-theme] .topbar,
+  body[data-theme] .panel-title,
+  body[data-theme] .meeting-detail-head,
+  body[data-theme] .meeting-meta {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .topbar h1,
+  .login-panel h1,
+  body[data-theme] .topbar h1,
+  body[data-theme] .login-panel h1 {
+    font-size: 28px;
+  }
+
+  .toolbar,
+  .period-controls,
+  .month-switch,
+  .calendar-head,
+  .meeting-meta-actions,
+  body[data-theme] .toolbar,
+  body[data-theme] .period-controls,
+  body[data-theme] .month-switch,
+  body[data-theme] .calendar-head,
+  body[data-theme] .meeting-meta-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: stretch;
   }
 
   .toolbar,
@@ -3135,8 +3283,12 @@ body[data-theme="dingtalk"] .meeting-workbench {
     min-width: 760px;
   }
 
-  .calendar-panel {
+  .calendar-panel,
+  .meeting-calendar-panel,
+  .table {
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
 
   .chat-title {
@@ -3147,5 +3299,40 @@ body[data-theme="dingtalk"] .meeting-workbench {
 
   .team-chat-list {
     height: 300px;
+  }
+
+  .attendance-status-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .attendance-donation {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .donation-received {
+    justify-content: center;
+  }
+
+  .link-list-table,
+  .link-list-table.has-manage {
+    min-width: 760px;
+  }
+
+  .link-quality-form {
+    min-width: 640px;
+  }
+
+  .modal-card {
+    max-height: calc(100vh - 24px);
+  }
+
+  .chat-reaction-picker {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .team-emoji-picker {
+    height: min(300px, calc(100vh - 132px));
   }
 }
