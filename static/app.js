@@ -1,3 +1,6 @@
+import "/vendor/emoji-picker-element/index.js";
+import zhCnEmojiI18n from "/vendor/emoji-picker-element/i18n/zh_CN.js";
+
 const uiThemeVersion = "miro-v1";
 
 const state = {
@@ -45,6 +48,9 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules", "thanks"]);
 const guestPages = new Set(["members", "shifts", "rules", "thanks", "links"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
+const teamReactionOptions = ["+1", "👍", "收到", "辛苦了", "已跟进"];
+const emojiDataSource = "/vendor/emoji-picker-element-data/zh/emojibase/data.json";
+let activeReactionPostId = null;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -117,6 +123,23 @@ function iso(date) {
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function shortDate(value) {
+  if (!value) return "";
+  const date = new Date(String(value).replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  const prefix = sameYear ? "" : `${date.getFullYear()}年`;
+  return `${prefix}${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function shortDateTime(value) {
+  if (!value) return "";
+  const date = new Date(String(value).replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return String(value).replace("T", " ").slice(0, 16);
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${shortDate(value)} ${time}`;
 }
 
 function mondayOf(value) {
@@ -326,6 +349,11 @@ function populateSelects() {
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
   $$("[data-thank-users]").forEach((select) => { select.innerHTML = thankOptions; });
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
+  $$("[data-owner-users]").forEach((select) => {
+    const current = select.value;
+    select.innerHTML = renderUserOptions(current);
+    select.value = activeUsers.some((user) => Number(user.id) === Number(current)) ? current : "";
+  });
   $$("[data-link-categories]").forEach((select) => { select.innerHTML = linkCategoryOptions || '<option value="通用">通用</option>'; });
   const linkFilter = $("#linkCategoryFilter");
   if (linkFilter) {
@@ -555,6 +583,23 @@ function renderPresetTypeOptions(selectedId) {
   return state.topics.map((topic) => `<option value="${topic.id}" ${Number(selectedId) === Number(topic.id) ? "selected" : ""}>${escapeHtml(topic.name)}</option>`).join("");
 }
 
+function meetingTopicTypes(meeting) {
+  return meeting?.topic_types || [];
+}
+
+function topicOptionsForMeeting(meeting, selectedId = null) {
+  const topics = meetingTopicTypes(meeting);
+  return topics.map((topic) => `<option value="${topic.id}" ${Number(selectedId) === Number(topic.id) ? "selected" : ""}>${escapeHtml(topic.name)}</option>`).join("");
+}
+
+function renderUserOptions(selectedId, placeholder = "负责人") {
+  const options = state.users
+    .filter((user) => user.active !== 0)
+    .map((user) => `<option value="${user.id}" ${Number(selectedId) === Number(user.id) ? "selected" : ""}>${escapeHtml(user.display_name)}</option>`)
+    .join("");
+  return `<option value="">${placeholder}</option>${options}`;
+}
+
 function renderTopicPresetList() {
   const rows = state.topics.flatMap((topic) => (topic.options || []).map((option) => ({ ...option, typeName: topic.name })));
   const list = $("#topicPresetList");
@@ -566,6 +611,7 @@ function renderTopicPresetList() {
           <select name="type_id">${renderPresetTypeOptions(option.type_id)}</select>
           <input name="title" value="${escapeHtml(option.title)}" placeholder="议题名称" required>
           <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
+          <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人")}</select>
           <input name="default_detail" value="${escapeHtml(option.default_detail || "")}" placeholder="默认说明">
           <button>保存</button>
           <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
@@ -573,26 +619,32 @@ function renderTopicPresetList() {
     </div>` : "<p>暂无预设议题</p>";
 }
 
-function renderPresetTopicForm(meetingId) {
-  const firstTopic = state.topics[0];
-  const options = firstTopic?.options || [];
+function renderPresetTopicForm(meeting) {
+  const topics = meetingTopicTypes(meeting);
+  const firstTopic = topics[0];
+  const sourceTopic = state.topics.find((topic) => Number(topic.id) === Number(firstTopic?.id));
+  const options = sourceTopic?.options || [];
+  if (!topics.length) return "<p>请先在本场会议主题里选择至少一个主题。</p>";
   return `
-    <form class="form-grid compact topic-item-form" data-meeting-id="${meetingId}">
-      <select name="type_id" data-meeting-topic-select required>${state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("")}</select>
+    <form class="form-grid compact topic-item-form" data-meeting-id="${meeting.id}">
+      <select name="type_id" data-meeting-topic-select required>${topicOptionsForMeeting(meeting)}</select>
       <select name="option_id" data-meeting-option-select><option value="">自定义议题</option>${options.map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}</select>
       <input name="title" placeholder="自定义标题，选择预设时可留空" />
-      <select name="owner_id"><option value="">负责人</option>${state.users.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("")}</select>
+      <select name="owner_id">${renderUserOptions(null)}</select>
       <input name="due_date" type="date" />
       <textarea name="detail" placeholder="议题说明、背景、结论或行动要求"></textarea>
       <button>添加到本次例会</button>
     </form>`;
 }
 
-function renderCustomTopicForm(meetingId) {
+function renderCustomTopicForm(meeting) {
+  const topics = meetingTopicTypes(meeting);
+  if (!topics.length) return "<p>本场会议尚未设置主题，暂不能添加议题。</p>";
   return `
-    <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meetingId}">
-      <select name="type_id" required>${state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("")}</select>
+    <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meeting.id}">
+      <select name="type_id" required>${topicOptionsForMeeting(meeting)}</select>
       <input name="title" placeholder="自定义议题标题" required />
+      <select name="owner_id">${renderUserOptions(null)}</select>
       <textarea name="detail" placeholder="补充议题背景、希望讨论的问题或建议结论"></textarea>
       <button>提交自定义议题</button>
     </form>`;
@@ -604,20 +656,32 @@ function renderMeetingItem(item) {
     item.created_by_name ? `提交：${item.created_by_name}` : "",
     item.due_date ? `截止：${item.due_date}` : "",
   ].filter(Boolean).join(" · ");
+  const thankYouTopic = isThankYouTopic(item);
   return `<div class="topic-item">
     <strong>${escapeHtml(item.title)}</strong>
     ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
     ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
-    <form class="minute-form" data-item-id="${item.id}">
+    ${thankYouTopic ? `
+      <div class="topic-auto-summary">
+        Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
+      </div>` : `
+      <form class="minute-form" data-item-id="${item.id}">
+      <select name="owner_id">${renderUserOptions(item.owner_id)}</select>
       <textarea name="minutes" placeholder="输入本议题会议纪要">${escapeHtml(item.minutes || "")}</textarea>
+      <textarea name="open_issues" placeholder="本议题遗留问题">${escapeHtml(item.open_issues || "")}</textarea>
+      <textarea name="next_steps" placeholder="下一步行动或处理计划">${escapeHtml(item.next_steps || "")}</textarea>
       <button>保存纪要</button>
-    </form>
+    </form>`}
   </div>`;
 }
 
 function renderTopicBoard(meeting) {
   const typed = new Set();
-  const columns = state.topics.map((topic) => {
+  const topics = meetingTopicTypes(meeting);
+  if (!topics.length && !meeting.items.length) {
+    return `<div class="topic-board-empty">本场会议尚未设置主题。</div>`;
+  }
+  const columns = topics.map((topic) => {
     const items = meeting.items.filter((item) => Number(item.type_id) === Number(topic.id) || item.section === topic.name);
     items.forEach((item) => typed.add(item.id));
     return `<section class="topic-column">
@@ -638,62 +702,329 @@ function renderTopicBoard(meeting) {
 function renderAttendance(meeting) {
   const map = new Map((meeting.attendance || []).map((item) => [Number(item.user_id), item]));
   if (!state.users.length) return "<p>暂无成员账号</p>";
+  const statuses = [
+    ["present", "出席"],
+    ["leave", "请假"],
+    ["late", "迟到"],
+    ["absent", "缺席"],
+  ];
   return `<div class="attendance-grid">${state.users.filter((user) => user.active !== 0).map((user) => {
     const record = map.get(Number(user.id)) || {};
     const status = record.status || "present";
+    const needsDonation = status === "late" || status === "absent";
     return `<form class="attendance-row" data-meeting-id="${meeting.id}">
       <strong>${escapeHtml(user.display_name)}</strong>
       <input type="hidden" name="user_id" value="${user.id}">
-      <select name="status">
-        <option value="present" ${status === "present" ? "selected" : ""}>出席</option>
-        <option value="leave" ${status === "leave" ? "selected" : ""}>请假</option>
-        <option value="absent" ${status === "absent" ? "selected" : ""}>缺席</option>
-        <option value="late" ${status === "late" ? "selected" : ""}>迟到</option>
-      </select>
-      <label><input type="checkbox" name="donation_required" ${record.donation_required ? "checked" : ""}>乐捐</label>
-      <label><input type="checkbox" name="donation_done" ${record.donation_done ? "checked" : ""}>完成</label>
-      <input name="note" value="${escapeHtml(record.note || "")}" placeholder="备注">
-      <button class="admin-only">保存</button>
+      <input type="hidden" name="status" value="${status}">
+      <div class="attendance-status-group" role="group" aria-label="${escapeHtml(user.display_name)}签到状态">
+        ${statuses.map(([value, label]) => `<button type="button" class="attendance-status-btn ${status === value ? "active" : ""} ${value}" data-attendance-status="${value}">${label}</button>`).join("")}
+      </div>
+      <div class="attendance-donation ${needsDonation ? "" : "hidden"}">
+        <label>金额<input name="donation_amount" type="number" min="0" step="1" value="${Number(record.donation_amount || 0) || ""}" placeholder="乐捐金额"></label>
+        <label class="donation-received"><input name="donation_done" type="checkbox" ${record.donation_done ? "checked" : ""}> 已收到</label>
+      </div>
+      <span class="attendance-save-state" aria-live="polite"></span>
     </form>`;
   }).join("")}</div>`;
 }
 
-function buildMeetingEmailHref(meeting) {
-  const statusMap = { present: "出席", leave: "请假", absent: "缺席", late: "迟到" };
-  const lines = [
-    "各位好，",
-    "",
-    `以下是 ${meeting.meeting_date} ${meeting.title} 的会议纪要，请查收。`,
-    "",
-    "一、会议概览",
-    `会议摘要：${meeting.summary || "无"}`,
-    `发起人：${meeting.creator || "未记录"}`,
-    "",
-    "二、议题与纪要",
-  ];
-  if (meeting.items.length) {
-    meeting.items.forEach((item, index) => {
-      lines.push(`${index + 1}. 【${item.type_name || item.section || "议题"}】${item.title}`);
-      if (item.detail) lines.push(`背景：${item.detail}`);
-      lines.push(`纪要：${item.minutes || "待补充"}`);
-      if (item.owner_name || item.due_date) {
-        lines.push(`负责人/截止：${[item.owner_name, item.due_date].filter(Boolean).join(" / ") || "无"}`);
+function buildAttendanceDashboard(meetings = []) {
+  const activeUsers = state.users.filter((user) => user.active !== 0);
+  const totalMeetings = meetings.length;
+  return activeUsers.map((user) => {
+    const stats = {
+      user,
+      total: totalMeetings,
+      present: 0,
+      late: 0,
+      leave: 0,
+      absent: 0,
+      unsigned: 0,
+      donationRequired: 0,
+      donationReceived: 0,
+      donationPending: 0,
+    };
+    meetings.forEach((meeting) => {
+      const record = (meeting.attendance || []).find((item) => Number(item.user_id) === Number(user.id));
+      if (!record) {
+        stats.unsigned += 1;
+        return;
       }
-      lines.push("");
+      if (record.donation_required) {
+        const amount = Number(record.donation_amount || 0);
+        stats.donationRequired += amount;
+        if (record.donation_done) {
+          stats.donationReceived += amount;
+        } else {
+          stats.donationPending += amount;
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(stats, record.status)) {
+        stats[record.status] += 1;
+      } else {
+        stats.unsigned += 1;
+      }
     });
-  } else {
-    lines.push("暂无议题。", "");
+    stats.attended = stats.present + stats.late;
+    stats.rate = totalMeetings ? Math.round((stats.attended / totalMeetings) * 100) : 0;
+    return stats;
+  }).sort((a, b) => b.rate - a.rate || b.attended - a.attended || String(a.user.display_name).localeCompare(String(b.user.display_name), "zh-CN"));
+}
+
+function renderAttendanceDashboard(meetings = []) {
+  const rows = buildAttendanceDashboard(meetings);
+  if (!meetings.length) return "<p>本月暂无会议，暂不能统计出勤。</p>";
+  if (!rows.length) return "<p>暂无成员账号。</p>";
+  return `<div class="attendance-board">
+    ${rows.map((row) => `
+      <div class="attendance-board-row">
+        <div class="attendance-person">
+          <strong>${escapeHtml(row.user.display_name)}</strong>
+          <span>${row.total} 场会议</span>
+        </div>
+        <div class="attendance-rate">
+          <strong>${row.rate}%</strong>
+          <span>出勤率</span>
+        </div>
+        <div class="attendance-bar" title="出席 ${row.present}，迟到 ${row.late}，请假 ${row.leave}，缺席 ${row.absent}，未签到 ${row.unsigned}">
+          <span style="width:${row.total ? (row.present / row.total) * 100 : 0}%" class="present"></span>
+          <span style="width:${row.total ? (row.late / row.total) * 100 : 0}%" class="late"></span>
+          <span style="width:${row.total ? (row.leave / row.total) * 100 : 0}%" class="leave"></span>
+          <span style="width:${row.total ? (row.absent / row.total) * 100 : 0}%" class="absent"></span>
+          <span style="width:${row.total ? (row.unsigned / row.total) * 100 : 0}%" class="unsigned"></span>
+        </div>
+        <div class="attendance-counts">
+          <span>出席 ${row.present}</span>
+          <span>迟到 ${row.late}</span>
+          <span>请假 ${row.leave}</span>
+          <span>缺席 ${row.absent}</span>
+          <span>未签到 ${row.unsigned}</span>
+          <span class="${row.donationPending ? "warn" : ""}">乐捐 ${row.donationReceived}/${row.donationRequired}</span>
+        </div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function updateAttendanceDonationVisibility(form) {
+  const status = form.elements.status?.value || "present";
+  const needsDonation = status === "late" || status === "absent";
+  const donation = form.querySelector(".attendance-donation");
+  donation?.classList.toggle("hidden", !needsDonation);
+  if (!needsDonation) {
+    if (form.elements.donation_amount) form.elements.donation_amount.value = "";
+    if (form.elements.donation_done) form.elements.donation_done.checked = false;
   }
-  lines.push("三、参会情况");
-  if (meeting.attendance?.length) {
-    meeting.attendance.forEach((item) => {
-      lines.push(`${item.display_name}：${statusMap[item.status] || item.status}${item.donation_required ? "，需乐捐" : ""}${item.donation_done ? "，已完成" : ""}`);
-    });
-  } else {
-    lines.push("暂无签到记录。");
+}
+
+function attendancePayload(form) {
+  const status = form.elements.status?.value || "present";
+  const needsDonation = status === "late" || status === "absent";
+  return {
+    user_id: form.elements.user_id.value,
+    status,
+    donation_amount: needsDonation ? form.elements.donation_amount?.value || 0 : 0,
+    donation_done: needsDonation ? Boolean(form.elements.donation_done?.checked) : false,
+  };
+}
+
+async function saveAttendanceForm(form) {
+  const stateEl = form.querySelector(".attendance-save-state");
+  if (stateEl) stateEl.textContent = "保存中";
+  const response = await api(`/api/meetings/${form.dataset.meetingId}/attendance`, {
+    method: "POST",
+    body: JSON.stringify(attendancePayload(form)),
+  });
+  state.meetings = response.meetings || state.meetings;
+  const current = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  if (current) {
+    renderMeetingList(state.meetings);
+    renderMeetingDetail(current);
   }
-  const subject = `【周例会纪要】${meeting.meeting_date} ${meeting.title}`;
-  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join("\r\n"))}`;
+  toast("签到已更新");
+}
+
+function meetingMinutesSubject(meeting) {
+  return `【周例会纪要】${meeting.meeting_date} ${meeting.title}`;
+}
+
+function tableCell(value, fallback = "无") {
+  const text = String(value || fallback).trim() || fallback;
+  return text.replace(/\|/g, "｜").replace(/\r?\n+/g, "；");
+}
+
+function groupAttendance(meeting) {
+  const statusMap = { present: "出席", leave: "请假", absent: "缺席", late: "迟到" };
+  const groups = { present: [], leave: [], absent: [], late: [] };
+  (meeting.attendance || []).forEach((item) => {
+    const key = groups[item.status] ? item.status : "present";
+    groups[key].push(item.display_name);
+  });
+  return {
+    present: groups.present.join("、") || "暂无签到记录",
+    exceptions: ["leave", "absent", "late"]
+      .filter((key) => groups[key].length)
+      .map((key) => `${statusMap[key]}：${groups[key].join("、")}`)
+      .join("；") || "无",
+  };
+}
+
+function thankYouSummary(thankData = {}) {
+  const votes = thankData.votes || [];
+  const stars = thankData.stars || [];
+  return {
+    minutes: votes.length
+      ? `本周共收到 ${votes.length} 条 Thank You，主要记录团队成员之间的具体协助事项。`
+      : "本周暂无 Thank You 记录。",
+    stars: stars.length
+      ? stars.map((item) => `${item.display_name} ${Number(item.thanks || 0)} 次`).join("；")
+      : "暂无",
+    details: votes.length
+      ? votes.map((vote, index) => `${index + 1}. ${vote.voter_name} 感谢 ${vote.receiver_name}：${vote.evidence}`).join("；")
+      : "暂无明细",
+  };
+}
+
+function markdownTable(rows) {
+  return [
+    "| 项目 | 内容 |",
+    "|---|---|",
+    ...rows.map(([label, value]) => `| ${tableCell(label)} | ${tableCell(value)} |`),
+  ].join("\r\n");
+}
+
+function buildMeetingMinutesText(meeting, thankData = {}) {
+  const attendance = groupAttendance(meeting);
+  const lines = [
+    meetingMinutesSubject(meeting),
+    "",
+    markdownTable([
+      ["会议名称", meeting.title],
+      ["会议时间", meeting.meeting_date],
+      ["与会人", attendance.present],
+      ["请假/缺席/迟到", attendance.exceptions],
+      ["主持人", meeting.creator || "未记录"],
+      ["会议摘要", meeting.summary || "无"],
+    ]),
+    "",
+    "一、议题纪要",
+    "",
+  ];
+  if (!meeting.items.length) {
+    lines.push("暂无议题。");
+    return lines.join("\r\n");
+  }
+  meeting.items.forEach((item, index) => {
+    const topicName = item.type_name || item.section || "议题";
+    lines.push(`${index + 1}. ${topicName} - ${item.title}`);
+    if (isThankYouTopic(item)) {
+      const summary = thankYouSummary(thankData);
+      lines.push(markdownTable([
+        ["议题类型", "Thank You"],
+        ["议题内容", item.title],
+        ["会议纪要", summary.minutes],
+        ["本周之星", summary.stars],
+        ["明细", summary.details],
+        ["遗留问题", "无需人工记录，如需跟进请转为普通议题。"],
+      ]));
+    } else {
+      lines.push(markdownTable([
+        ["议题类型", topicName],
+        ["议题内容", item.title],
+        ["责任人", item.owner_name || "未指定"],
+        ["会议纪要", item.minutes || "待补充"],
+        ["遗留问题", item.open_issues || "无"],
+        ["下一步", item.next_steps || "无"],
+        ["截止时间", item.due_date || "无"],
+      ]));
+    }
+    lines.push("");
+  });
+  return lines.join("\r\n");
+}
+
+function htmlCell(value, fallback = "无") {
+  return escapeHtml(String(value || fallback).trim() || fallback).replace(/\r?\n/g, "<br>");
+}
+
+function htmlTable(rows) {
+  return `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:14px;">
+    <tbody>${rows.map(([label, value]) => `<tr><th style="width:120px;background:#f6f8fa;text-align:left;">${htmlCell(label)}</th><td>${htmlCell(value)}</td></tr>`).join("")}</tbody>
+  </table>`;
+}
+
+function buildMeetingMinutesHtml(meeting, thankData = {}) {
+  const attendance = groupAttendance(meeting);
+  const sections = meeting.items.length ? meeting.items.map((item, index) => {
+    const topicName = item.type_name || item.section || "议题";
+    if (isThankYouTopic(item)) {
+      const summary = thankYouSummary(thankData);
+      return `<h3>${index + 1}. ${htmlCell(topicName)} - ${htmlCell(item.title)}</h3>${htmlTable([
+        ["议题类型", "Thank You"],
+        ["议题内容", item.title],
+        ["会议纪要", summary.minutes],
+        ["本周之星", summary.stars],
+        ["明细", summary.details],
+        ["遗留问题", "无需人工记录，如需跟进请转为普通议题。"],
+      ])}`;
+    }
+    return `<h3>${index + 1}. ${htmlCell(topicName)} - ${htmlCell(item.title)}</h3>${htmlTable([
+      ["议题类型", topicName],
+      ["议题内容", item.title],
+      ["责任人", item.owner_name || "未指定"],
+      ["会议纪要", item.minutes || "待补充"],
+      ["遗留问题", item.open_issues || "无"],
+      ["下一步", item.next_steps || "无"],
+      ["截止时间", item.due_date || "无"],
+    ])}`;
+  }).join("") : "<p>暂无议题。</p>";
+  return `<article style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#172033;">
+    <h2>${htmlCell(meetingMinutesSubject(meeting))}</h2>
+    ${htmlTable([
+      ["会议名称", meeting.title],
+      ["会议时间", meeting.meeting_date],
+      ["与会人", attendance.present],
+      ["请假/缺席/迟到", attendance.exceptions],
+      ["主持人", meeting.creator || "未记录"],
+      ["会议摘要", meeting.summary || "无"],
+    ])}
+    <h2>一、议题纪要</h2>
+    ${sections}
+  </article>`;
+}
+
+async function copyMeetingMinutes(html, text) {
+  if (!navigator.clipboard) return false;
+  try {
+    if (window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([text], { type: "text/plain" }),
+      })]);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function openMeetingEmail(meetingId) {
+  const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingId));
+  if (!meeting) throw new Error("请先选择会议");
+  const weekStart = mondayOf(meeting.meeting_date);
+  const needsThankYou = meeting.items.some(isThankYouTopic);
+  const thankData = needsThankYou
+    ? {
+        votes: (await api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`)).votes,
+        stars: (await api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`)).stars,
+      }
+    : { votes: [], stars: [] };
+  const text = buildMeetingMinutesText(meeting, thankData);
+  const html = buildMeetingMinutesHtml(meeting, thankData);
+  const copied = await copyMeetingMinutes(html, text);
+  window.location.href = `mailto:?subject=${encodeURIComponent(meetingMinutesSubject(meeting))}&body=${encodeURIComponent(text)}`;
+  toast(copied ? "已复制表格纪要并打开邮件草稿" : "已打开邮件草稿");
 }
 
 function renderMeetingCalendar(meetings) {
@@ -735,8 +1066,25 @@ function renderMeetingList(meetings) {
     <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
       <span>${escapeHtml(meeting.meeting_date)}</span>
       <strong>${escapeHtml(meeting.title)}</strong>
-      <small>${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
+      <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
     </button>`).join("") : "<p>本月暂无会议。</p>";
+}
+
+function renderMeetingTopicScopeForm(meeting) {
+  const selected = new Set((meeting.topic_type_ids || []).map((id) => Number(id)));
+  if (!state.topics.length) return "<p>请先在下方维护可用的议题类型。</p>";
+  return `
+    <form class="meeting-topic-scope-form" data-meeting-id="${meeting.id}">
+      <div class="topic-scope-grid">
+        ${state.topics.map((topic) => `
+          <label class="topic-scope-option">
+            <input type="checkbox" name="topic_type_ids" value="${topic.id}" ${selected.has(Number(topic.id)) ? "checked" : ""}>
+            <span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>
+            <span>${escapeHtml(topic.name)}</span>
+          </label>`).join("")}
+      </div>
+      <button>保存本场会议主题</button>
+    </form>`;
 }
 
 function renderMeetingDetail(meeting) {
@@ -758,7 +1106,7 @@ function renderMeetingDetail(meeting) {
       </div>
       <div class="meeting-meta-actions">
         <span class="pill">${escapeHtml(meeting.creator || "")}</span>
-        <a class="button-link" href="${escapeHtml(buildMeetingEmailHref(meeting))}">生成会议邮件</a>
+        <button class="button-link meeting-email-btn" type="button" data-meeting-id="${meeting.id}">生成会议邮件</button>
       </div>
     </div>
 
@@ -768,6 +1116,21 @@ function renderMeetingDetail(meeting) {
       <div><span>未补纪要</span><strong>${meeting.items.filter((item) => !item.minutes).length}</strong></div>
     </div>
 
+    <section class="detail-section attendance-board-section">
+      <div class="section-headline">
+        <h3>本月参会看板</h3>
+        <span>${state.meetings.length} 场会议</span>
+      </div>
+      ${renderAttendanceDashboard(state.meetings)}
+    </section>
+
+    <section class="detail-section">
+      <h3>本场会议主题</h3>
+      <p>每场会议单独配置主题，议题看板只展示本场会议选中的主题。</p>
+      <div class="admin-only">${renderMeetingTopicScopeForm(meeting)}</div>
+      ${!isAdminView() && meetingTopicTypes(meeting).length ? `<div class="chip-list">${meetingTopicTypes(meeting).map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</span>`).join("")}</div>` : ""}
+    </section>
+
     <section class="detail-section">
       <h3>议题与纪要</h3>
       ${renderTopicBoard(meeting)}
@@ -776,11 +1139,11 @@ function renderMeetingDetail(meeting) {
     <div class="meeting-detail-grid">
       <section class="detail-card">
         <h3>成员自定义议题</h3>
-        ${renderCustomTopicForm(meeting.id)}
+        ${renderCustomTopicForm(meeting)}
       </section>
       <section class="detail-card admin-only">
         <h3>管理员添加预设议题</h3>
-        ${renderPresetTopicForm(meeting.id)}
+        ${renderPresetTopicForm(meeting)}
       </section>
       <section class="detail-card">
         <h3>参会签到</h3>
@@ -804,14 +1167,26 @@ async function loadMeetings() {
   renderMeetingList(state.meetings);
   renderMeetingDetail(selectedMeeting);
   renderTopicPresetList();
-  $("#topicTypeList").innerHTML = state.topics.map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)} · ${topic.options.length} 项</span>`).join("");
+  $("#topicTypeList").innerHTML = state.topics.length
+    ? state.topics.map((topic) => `
+      <span class="chip topic-type-chip">
+        <span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>
+        ${escapeHtml(topic.name)} · ${topic.options.length} 项
+        <button class="chip-delete topic-type-delete-btn" type="button" data-topic-type-id="${topic.id}" data-topic-type-name="${escapeHtml(topic.name)}">×</button>
+      </span>`).join("")
+    : "<p>暂无议题类型</p>";
   populateSelects();
 }
 
 function renderAttendanceReadonly(meeting) {
   if (!meeting.attendance || !meeting.attendance.length) return "<p>管理员尚未签到</p>";
   const statusMap = { present: "出席", leave: "请假", absent: "缺席", late: "迟到" };
-  return `<div class="item-list">${meeting.attendance.map((item) => `<div class="item"><strong>${escapeHtml(item.display_name)}</strong><p>${statusMap[item.status] || item.status} ${item.donation_required ? " · 需乐捐" : ""} ${item.donation_done ? " · 已完成" : ""}</p></div>`).join("")}</div>`;
+  return `<div class="item-list">${meeting.attendance.map((item) => {
+    const donation = item.donation_required
+      ? ` · 乐捐 ${Number(item.donation_amount || 0)} · ${item.donation_done ? "已收到" : "未收到"}`
+      : "";
+    return `<div class="item"><strong>${escapeHtml(item.display_name)}</strong><p>${statusMap[item.status] || item.status}${donation}</p></div>`;
+  }).join("")}</div>`;
 }
 
 async function loadLinks() {
@@ -886,6 +1261,16 @@ function prepareLinkPayload(data) {
   return data;
 }
 
+function compareLinksForDisplay(a, b) {
+  const invalidDelta = Number(a.invalid === 1) - Number(b.invalid === 1);
+  if (invalidDelta) return invalidDelta;
+  const pinnedDelta = Number(b.pinned === 1) - Number(a.pinned === 1);
+  if (pinnedDelta) return pinnedDelta;
+  const clickDelta = Number(b.click_count || 0) - Number(a.click_count || 0);
+  if (clickDelta) return clickDelta;
+  return String(a.title || "").localeCompare(String(b.title || ""), "zh-CN");
+}
+
 function renderLinks() {
   const category = $("#linkCategoryFilter")?.value || "";
   const status = $("#linkStatusFilter")?.value || "";
@@ -901,17 +1286,16 @@ function renderLinks() {
       link.url,
       link.description,
       link.category,
-      link.creator,
       link.quality_note,
       ...(link.machine_scope || []),
       ...(link.process_tags || []),
     ].filter(Boolean).join(" ").toLowerCase();
     return hitCategory && hitStatus && (!keyword || text.includes(keyword));
-  });
+  }).sort(compareLinksForDisplay);
   const manageHeader = isAdminView() ? "<th>管理</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
-    <table class="link-list-table">
-      <thead><tr><th>名称</th><th>适用范围</th><th>地址</th><th>点击</th><th>归档人</th>${manageHeader}</tr></thead>
+    <table class="link-list-table ${isAdminView() ? "has-manage" : ""}">
+      <thead><tr><th>名称</th><th>适用范围</th><th>地址</th><th>点击</th>${manageHeader}</tr></thead>
       <tbody>
         ${filtered.map((link) => {
           const scope = [...(link.machine_scope || []), ...(link.process_tags || [])];
@@ -940,7 +1324,6 @@ function renderLinks() {
               </div>
             </td>
             <td><span title="${escapeHtml(link.last_clicked_at || "")}">${Number(link.click_count || 0)} 次</span></td>
-            <td><div class="link-single-line" title="${escapeHtml(link.creator || "-")}">${escapeHtml(link.creator || "-")}</div></td>
             ${isAdminView() ? `
               <td>
                 <form class="link-quality-form" data-link-id="${link.id}">
@@ -962,6 +1345,22 @@ function renderLinks() {
         }).join("")}
       </tbody>
     </table>` : "<p>没有匹配的链接</p>";
+}
+
+function renderShiftLine(shift) {
+  const isNight = shift.shift_type === "night";
+  const isMine = Number(shift.user_id) === Number(state.user?.id);
+  const typeText = isNight ? "夜" : "白";
+  const fullText = `${typeText}班 · ${shift.machine_name || ""} · ${shift.display_name || ""}`;
+  const adminAction = isAdminView();
+  return `<div class="shift-line ${isNight ? "night" : ""} ${isMine ? "mine" : ""} ${adminAction ? "has-action" : ""}" title="${escapeHtml(fullText)}">
+    <span class="shift-line-main">
+      <span class="shift-type">${typeText}</span>
+      <span class="shift-machine">${escapeHtml(shift.machine_name)}</span>
+      <span class="shift-user">${escapeHtml(shift.display_name)}</span>
+    </span>
+    ${adminAction ? `<button class="shift-delete-btn" type="button" data-shift-id="${shift.id}" title="删除排班">×</button>` : ""}
+  </div>`;
 }
 
 function renderCalendar() {
@@ -996,10 +1395,7 @@ function renderCalendar() {
     const hasMine = shifts.some((shift) => Number(shift.user_id) === Number(state.user?.id));
     cells.push(`<div class="day-cell shift-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""} ${hasMine ? "has-mine" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${shifts.map((shift) => `<div class="shift-line ${shift.shift_type === "night" ? "night" : ""} ${Number(shift.user_id) === Number(state.user?.id) ? "mine" : ""}">
-        <span>${shift.shift_type === "day" ? "白" : "夜"} · ${escapeHtml(shift.machine_name)} · ${escapeHtml(shift.display_name)}</span>
-        ${isAdminView() ? `<button class="shift-delete-btn" type="button" data-shift-id="${shift.id}" title="删除排班">×</button>` : ""}
-      </div>`).join("")}
+      ${shifts.map(renderShiftLine).join("")}
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
@@ -1025,7 +1421,7 @@ async function loadThanks() {
     <div class="item">
       <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
       <p>${escapeHtml(vote.evidence)}</p>
-      <p>${vote.week_start} · ${vote.created_at}</p>
+      <p class="thank-date-line">周次 ${escapeHtml(shortDate(vote.week_start))} · 送出 ${escapeHtml(shortDateTime(vote.created_at))}</p>
     </div>`).join("") : "<p>暂无感谢记录</p>";
 }
 
@@ -1078,31 +1474,28 @@ async function submitAvatarForm(form) {
   const file = form.elements.avatar_file?.files?.[0];
   const avatar = await fileToDataUrl(file);
   if (avatar) data.avatar_url = avatar;
-  if (!data.avatar_url) throw new Error("请选择图片或输入头像 URL");
+  if (!data.avatar_url) throw new Error("请选择本地头像图片");
   await api(`/api/members/${form.dataset.memberId}`, { method: "PATCH", body: JSON.stringify({ avatar_url: data.avatar_url }) });
 }
 
 async function submitProfileForm(form) {
   const data = formData(form);
+  const file = form.elements.avatar_file?.files?.[0];
+  const avatar = await fileToDataUrl(file);
+  const payload = {
+    title: data.title || "",
+    tags: data.tags || "",
+    responsibilities: data.responsibilities || "",
+    comment: data.comment || "",
+    skills: data.skills || "",
+    machine_scope: data.machine_scope || "",
+    expertise: data.expertise || "",
+  };
+  if (avatar) payload.avatar_url = avatar;
   await api(`/api/members/${form.dataset.memberId}`, {
     method: "PATCH",
-    body: JSON.stringify({
-      name: data.name || "",
-      title: data.title || "",
-      tags: data.tags || "",
-      responsibilities: data.responsibilities || "",
-      comment: data.comment || "",
-      skills: data.skills || "",
-      machine_scope: data.machine_scope || "",
-      expertise: data.expertise || "",
-      backup_owner: data.backup_owner || "",
-      contact: data.contact || "",
-    }),
+    body: JSON.stringify(payload),
   });
-  if (Number(form.dataset.userId) === Number(state.user?.id) && data.name) {
-    state.user.display_name = data.name;
-    applyAuthView();
-  }
 }
 
 async function submitUserEditForm(form) {
@@ -1116,16 +1509,112 @@ async function submitUserEditForm(form) {
   }
 }
 
-function renderTeamChat(posts) {
+function renderTeamReactions(post) {
+  const reactions = post.reactions || [];
+  const renderCount = (item) => `${escapeHtml(item.reaction)} <span>+${Number(item.count || 0)}</span>`;
+  if (isGuest()) {
+    if (!reactions.length) return "";
+    return `<div class="chat-reactions readonly">
+      ${reactions.map((item) => `<span class="chat-reaction-count">${renderCount(item)}</span>`).join("")}
+    </div>`;
+  }
+  return `<div class="chat-reactions chat-reaction-wrap">
+    <div class="chat-reaction-summary">
+      ${reactions.length ? reactions.map((item) => `<button type="button" class="chat-reaction-chip ${item.mine ? "active" : ""}" data-post-id="${post.id}" data-reaction="${escapeHtml(item.reaction)}">${renderCount(item)}</button>`).join("") : ""}
+      <button type="button" class="chat-reaction-picker-toggle" data-post-id="${post.id}">＋回应</button>
+    </div>
+  </div>`;
+}
+
+function closeReactionPopover() {
+  const popover = $("#teamReactionPopover");
+  if (popover) popover.classList.add("hidden");
+  activeReactionPostId = null;
+}
+
+async function sendTeamReaction(postId, reaction) {
+  if (!postId || !reaction) return;
+  const data = await api(`/api/team-posts/${postId}/reactions`, {
+    method: "POST",
+    body: JSON.stringify({ reaction }),
+  });
+  closeReactionPopover();
+  renderTeamChat(data.posts, true);
+  toast("回应已更新");
+}
+
+function ensureReactionPopover() {
+  let popover = $("#teamReactionPopover");
+  if (popover) return popover;
+  popover = document.createElement("div");
+  popover.id = "teamReactionPopover";
+  popover.className = "chat-reaction-picker hidden";
+  popover.innerHTML = `
+    <div class="chat-reaction-quick">
+      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}">${escapeHtml(reaction)}</button>`).join("")}
+    </div>
+    <emoji-picker class="team-emoji-picker" locale="zh" data-source="${emojiDataSource}"></emoji-picker>`;
+  const picker = popover.querySelector("emoji-picker");
+  picker.i18n = zhCnEmojiI18n;
+  picker.locale = "zh";
+  picker.dataSource = emojiDataSource;
+  picker.addEventListener("emoji-click", (event) => {
+    const reaction = event.detail?.unicode || event.detail?.emoji?.unicode;
+    sendTeamReaction(activeReactionPostId, reaction).catch((error) => toast(error.message));
+  });
+  document.body.appendChild(popover);
+  return popover;
+}
+
+function openReactionPopover(button) {
+  const wrap = button.closest(".chat-reaction-wrap");
+  if (!wrap) return;
+  const popover = ensureReactionPopover();
+  const isSameOpen = activeReactionPostId === button.dataset.postId && !popover.classList.contains("hidden");
+  if (isSameOpen) {
+    closeReactionPopover();
+    return;
+  }
+  activeReactionPostId = button.dataset.postId;
+  popover.dataset.postId = activeReactionPostId;
+  wrap.appendChild(popover);
+  popover.classList.remove("hidden");
+}
+
+function renderTeamReplies(post) {
+  const replies = post.replies || [];
+  if (!replies.length) return "";
+  return `<div class="chat-replies">
+    ${replies.map((reply) => `
+      <div class="chat-reply">
+        <p>${escapeHtml(reply.content)}</p>
+        <small>${escapeHtml(reply.display_name)} · ${escapeHtml(reply.created_at || "")}</small>
+      </div>`).join("")}
+  </div>`;
+}
+
+function renderTeamChat(posts, preserveScroll = false) {
   const list = $("#teamChatList");
   if (!list) return;
-  list.innerHTML = posts.length ? posts.map((post) => `
-    <div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}">
+  const previousTop = list.scrollTop;
+  const items = posts || [];
+  list.innerHTML = items.length ? items.map((post) => `
+    <div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}" data-post-id="${post.id}">
       <span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span>
       <p>${escapeHtml(post.content)}</p>
-      <small>${escapeHtml(post.display_name)} · ${post.created_at}</small>
+      <small>${escapeHtml(post.display_name)} · ${escapeHtml(post.created_at || "")}</small>
+      ${renderTeamReactions(post)}
+      ${renderTeamReplies(post)}
+      ${isGuest() ? "" : `
+        <div class="chat-reply-tools">
+          <button type="button" class="chat-reply-toggle" data-post-id="${post.id}">回复</button>
+          <form class="chat-reply-form hidden" data-post-id="${post.id}">
+            <input name="content" placeholder="盖楼回复这一条" maxlength="300" required>
+            <button>发送</button>
+          </form>
+        </div>`}
     </div>`).join("") : "<p>还没有团队对话，来开个头。</p>";
-  list.scrollTop = list.scrollHeight;
+  list.scrollTop = preserveScroll ? previousTop : list.scrollHeight;
 }
 
 function filledText(value) {
@@ -1136,8 +1625,6 @@ function memberPersona(member, skills = []) {
   const rows = [
     ["技能", skills.map(escapeHtml).join(" / ")],
     ["擅长问题", escapeHtml(filledText(member.expertise))],
-    ["备用负责人", escapeHtml(filledText(member.backup_owner))],
-    ["联系方式", escapeHtml(filledText(member.contact))],
   ].filter(([, value]) => value);
   if (!rows.length) return "";
   return `<div class="member-persona">
@@ -1145,21 +1632,73 @@ function memberPersona(member, skills = []) {
   </div>`;
 }
 
+function renderAvatar(member) {
+  return member.avatar_url
+    ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">`
+    : `<div class="avatar">${escapeHtml((member.name || "?").slice(0, 1))}</div>`;
+}
+
+function renderAvatarPreview(member) {
+  return member.avatar_url ? `<img src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : escapeHtml((member.name || "?").slice(0, 1));
+}
+
+function setMemberAvatarPreview(src = "", fallback = "?") {
+  const preview = $("#memberEditAvatarPreview");
+  if (!preview) return;
+  preview.innerHTML = src ? `<img src="${escapeHtml(src)}" alt="">` : escapeHtml((fallback || "?").slice(0, 1));
+  preview.classList.toggle("has-image", Boolean(src));
+}
+
+function closeMemberEditModal() {
+  const modal = $("#memberEditModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function openMemberEditModal(memberId) {
+  const member = state.members.find((item) => Number(item.id) === Number(memberId));
+  const modal = $("#memberEditModal");
+  const form = $("#memberEditForm");
+  if (!member || !modal || !form) return;
+  const skills = member.skills || [];
+  const tags = member.tags || [];
+  form.dataset.memberId = member.id;
+  form.dataset.userId = member.user_id || "";
+  form.reset();
+  form.elements.title.value = member.title || "";
+  form.elements.tags.value = tags.join(", ");
+  form.elements.responsibilities.value = member.responsibilities || "";
+  form.elements.comment.value = member.comment || "";
+  form.elements.skills.value = skills.join(", ");
+  form.elements.expertise.value = member.expertise || "";
+  $("#memberEditName").textContent = member.name || "成员";
+  $("#memberEditAccount").textContent = member.account ? `账号 ${member.account}` : "未绑定账号";
+  $("#memberEditAvatarPreview").innerHTML = renderAvatarPreview(member);
+  $("#memberEditAvatarPreview").classList.toggle("has-image", Boolean(member.avatar_url));
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.title.focus();
+}
+
 function renderMemberCard(member) {
   const canEdit = isAdminView() || member.user_id === state.user?.id;
-  const profileEditTitle = isAdminView() ? "管理员编辑成员资料" : "编辑我的成员资料";
-  const tagPlaceholder = isAdminView() ? "成员标签，用逗号分隔" : "我的标签，用逗号分隔";
-  const responsibilityPlaceholder = isAdminView() ? "成员职责范围" : "我的职责范围";
   const skills = member.skills || [];
   const tags = member.tags || [];
   const responsibilities = filledText(member.responsibilities);
   const comment = filledText(member.comment);
+  const account = filledText(member.account);
   return `
     <article class="member-card profile-only">
       <section class="member-profile">
         <div class="member-head">
-          ${member.avatar_url ? `<img class="avatar" src="${escapeHtml(member.avatar_url)}" alt="${escapeHtml(member.name)}">` : `<div class="avatar">${escapeHtml(member.name.slice(0, 1))}</div>`}
-          <div><h3>${escapeHtml(member.name)}</h3><p>${escapeHtml(member.title || "")}</p></div>
+          ${renderAvatar(member)}
+          <div>
+            <h3>${escapeHtml(member.name)}${account ? `<span class="member-account">账号 ${escapeHtml(account)}</span>` : ""}</h3>
+            <p>${escapeHtml(member.title || "")}</p>
+          </div>
         </div>
         ${tags.length ? `<div class="tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
         <div class="member-brief">
@@ -1168,27 +1707,7 @@ function renderMemberCard(member) {
         </div>
         ${memberPersona(member, skills)}
         ${canEdit ? `
-          <details class="member-editor">
-            <summary>编辑资料</summary>
-            <form class="profile-edit-form" data-member-id="${member.id}" data-user-id="${member.user_id || ""}">
-              <strong>${profileEditTitle}</strong>
-              <input name="name" value="${escapeHtml(member.name || "")}" placeholder="姓名" required>
-              <input name="title" value="${escapeHtml(member.title || "")}" placeholder="岗位 / 角色">
-              <input name="tags" value="${escapeHtml(tags.join(", "))}" placeholder="${tagPlaceholder}">
-              <textarea name="responsibilities" placeholder="${responsibilityPlaceholder}">${escapeHtml(member.responsibilities || "")}</textarea>
-              <textarea name="comment" placeholder="个人备注">${escapeHtml(member.comment || "")}</textarea>
-              <input name="skills" value="${escapeHtml(skills.join(", "))}" placeholder="技能标签，用逗号分隔">
-              <input name="expertise" value="${escapeHtml(member.expertise || "")}" placeholder="擅长问题类型">
-              <input name="backup_owner" value="${escapeHtml(member.backup_owner || "")}" placeholder="备用负责人">
-              <input name="contact" value="${escapeHtml(member.contact || "")}" placeholder="联系方式">
-              <button>保存成员资料</button>
-            </form>
-            <form class="avatar-tools avatar-form" data-member-id="${member.id}">
-              <input name="avatar_url" placeholder="头像 URL">
-              <input name="avatar_file" type="file" accept="image/*">
-              <button>更换头像</button>
-            </form>
-          </details>` : ""}
+          <button class="secondary member-edit-btn" type="button" data-member-id="${member.id}">编辑资料</button>` : ""}
       </section>
     </article>`;
 }
@@ -1209,6 +1728,30 @@ function updateOptionSelect(typeSelect) {
   if (!optionSelect) return;
   const topic = state.topics.find((item) => Number(item.id) === Number(typeSelect.value));
   optionSelect.innerHTML = `<option value="">自定义议题</option>${(topic?.options || []).map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}`;
+}
+
+function updateTopicOptionDefaults(optionSelect) {
+  const form = optionSelect.closest("form");
+  const optionId = Number(optionSelect.value);
+  const option = state.topics.flatMap((topic) => topic.options || []).find((item) => Number(item.id) === optionId);
+  if (!form || !option) return;
+  if (form.elements.title && !form.elements.title.value.trim()) {
+    form.elements.title.value = option.title || "";
+  }
+  if (form.elements.detail && !form.elements.detail.value.trim()) {
+    form.elements.detail.value = option.default_detail || "";
+  }
+  if (form.elements.owner_id && option.owner_id && !form.elements.owner_id.value) {
+    form.elements.owner_id.value = String(option.owner_id);
+  }
+}
+
+function isThankYouTopic(item = {}) {
+  const text = [item.type_name, item.section, item.title, item.option_title]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return text.includes("thank you") || text.includes("thankyou") || text.includes("感谢");
 }
 
 function moveMonth(delta) {
@@ -1336,7 +1879,51 @@ function bindEvents() {
     });
   }
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMemberEditModal();
+  });
+
   document.body.addEventListener("click", (event) => {
+    const memberEditButton = event.target.closest(".member-edit-btn");
+    if (memberEditButton) {
+      openMemberEditModal(memberEditButton.dataset.memberId);
+      return;
+    }
+    if (event.target.closest("[data-member-modal-close]") || event.target === $("#memberEditModal")) {
+      closeMemberEditModal();
+      return;
+    }
+    const attendanceStatus = event.target.closest(".attendance-status-btn");
+    if (attendanceStatus) {
+      const form = attendanceStatus.closest(".attendance-row");
+      form.elements.status.value = attendanceStatus.dataset.attendanceStatus;
+      $$(".attendance-status-btn", form).forEach((button) => button.classList.toggle("active", button === attendanceStatus));
+      updateAttendanceDonationVisibility(form);
+      saveAttendanceForm(form).catch((error) => toast(error.message));
+      return;
+    }
+    const reactionToggle = event.target.closest(".chat-reaction-picker-toggle");
+    if (reactionToggle) {
+      openReactionPopover(reactionToggle);
+      return;
+    }
+    const chatReaction = event.target.closest(".chat-reaction-option, .chat-reaction-chip");
+    if (chatReaction) {
+      const postId = chatReaction.dataset.postId || activeReactionPostId;
+      sendTeamReaction(postId, chatReaction.dataset.reaction).catch((error) => toast(error.message));
+      return;
+    }
+    if (!event.target.closest(".chat-reaction-wrap")) {
+      closeReactionPopover();
+    }
+    const chatReplyToggle = event.target.closest(".chat-reply-toggle");
+    if (chatReplyToggle) {
+      const bubble = chatReplyToggle.closest(".chat-bubble");
+      const form = bubble?.querySelector(".chat-reply-form");
+      form?.classList.toggle("hidden");
+      form?.elements.content?.focus();
+      return;
+    }
     const deleteButton = event.target.closest(".user-delete-btn");
     if (deleteButton) {
       const name = deleteButton.dataset.userName || "该用户";
@@ -1354,6 +1941,21 @@ function bindEvents() {
         .then(refreshAll)
         .then(() => toast("预设议题已删除"))
         .catch((error) => toast(error.message));
+      return;
+    }
+    const topicTypeDelete = event.target.closest(".topic-type-delete-btn");
+    if (topicTypeDelete) {
+      const name = topicTypeDelete.dataset.topicTypeName || "该议题类型";
+      if (!window.confirm(`确定删除 ${name} 吗？该类型下的预设议题会一并停用，历史会议记录会保留。`)) return;
+      api(`/api/meeting-topic-types/${topicTypeDelete.dataset.topicTypeId}`, { method: "DELETE" })
+        .then(refreshAll)
+        .then(() => toast("议题类型已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const meetingEmail = event.target.closest(".meeting-email-btn");
+    if (meetingEmail) {
+      openMeetingEmail(meetingEmail.dataset.meetingId).catch((error) => toast(error.message));
       return;
     }
     const meetingSelect = event.target.closest(".meeting-select-btn");
@@ -1396,12 +1998,35 @@ function bindEvents() {
   });
 
   document.body.addEventListener("change", (event) => {
-    if (event.target.matches("[data-meeting-topic-select]")) updateOptionSelect(event.target);
-    if (event.target.matches('select[name="status"]')) {
-      const form = event.target.closest(".attendance-row");
-      const required = form?.elements.donation_required;
-      if (required) required.checked = event.target.value === "late";
+    if (event.target.matches('#memberEditForm input[name="avatar_file"]')) {
+      const file = event.target.files?.[0];
+      const member = state.members.find((item) => Number(item.id) === Number($("#memberEditForm")?.dataset.memberId));
+      if (!file) {
+        setMemberAvatarPreview(member?.avatar_url || "", member?.name || "?");
+        return;
+      }
+      fileToDataUrl(file)
+        .then((src) => setMemberAvatarPreview(src, member?.name || "?"))
+        .catch((error) => toast(error.message));
     }
+    if (event.target.matches('.attendance-donation input[name="donation_done"]')) {
+      const form = event.target.closest(".attendance-row");
+      saveAttendanceForm(form).catch((error) => toast(error.message));
+      return;
+    }
+    if (event.target.matches("[data-meeting-topic-select]")) updateOptionSelect(event.target);
+    if (event.target.matches("[data-meeting-option-select]")) updateTopicOptionDefaults(event.target);
+  });
+
+  document.body.addEventListener("input", (event) => {
+    if (!event.target.matches('.attendance-donation input[name="donation_amount"]')) return;
+    const form = event.target.closest(".attendance-row");
+    const stateEl = form?.querySelector(".attendance-save-state");
+    if (stateEl) stateEl.textContent = "待保存";
+    clearTimeout(form.__attendanceTimer);
+    form.__attendanceTimer = setTimeout(() => {
+      saveAttendanceForm(form).catch((error) => toast(error.message));
+    }, 650);
   });
 
   document.body.addEventListener("submit", async (event) => {
@@ -1410,13 +2035,20 @@ function bindEvents() {
     const profileForm = event.target.closest(".profile-edit-form");
     const userEditForm = event.target.closest(".user-edit-form");
     const topicForm = event.target.closest(".topic-item-form");
-    const attendanceForm = event.target.closest(".attendance-row");
+    const meetingTopicScopeForm = event.target.closest(".meeting-topic-scope-form");
     const minuteForm = event.target.closest(".minute-form");
     const presetForm = event.target.closest(".preset-form");
     const linkQualityForm = event.target.closest(".link-quality-form");
-    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !attendanceForm && !minuteForm && !presetForm && !linkQualityForm) return;
+    const chatReplyForm = event.target.closest(".chat-reply-form");
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm) return;
     event.preventDefault();
     try {
+      if (chatReplyForm) {
+        const data = await api(`/api/team-posts/${chatReplyForm.dataset.postId}/replies`, { method: "POST", body: JSON.stringify(formData(chatReplyForm)) });
+        renderTeamChat(data.posts, true);
+        toast("已回复");
+        return;
+      }
       if (userEditForm) {
         await submitUserEditForm(userEditForm);
         await refreshAll();
@@ -1431,15 +2063,17 @@ function bindEvents() {
       }
       if (profileForm) {
         await submitProfileForm(profileForm);
+        closeMemberEditModal();
       }
       if (topicForm) {
         await api(`/api/meetings/${topicForm.dataset.meetingId}/items`, { method: "POST", body: JSON.stringify(formData(topicForm)) });
       }
-      if (attendanceForm) {
-        const data = formData(attendanceForm);
-        data.donation_required = attendanceForm.elements.donation_required.checked;
-        data.donation_done = attendanceForm.elements.donation_done.checked;
-        await api(`/api/meetings/${attendanceForm.dataset.meetingId}/attendance`, { method: "POST", body: JSON.stringify(data) });
+      if (meetingTopicScopeForm) {
+        const topicTypeIds = new FormData(meetingTopicScopeForm).getAll("topic_type_ids");
+        await api(`/api/meetings/${meetingTopicScopeForm.dataset.meetingId}/topics`, {
+          method: "PATCH",
+          body: JSON.stringify({ topic_type_ids: topicTypeIds }),
+        });
       }
       if (minuteForm) {
         await api(`/api/meeting-items/${minuteForm.dataset.itemId}`, { method: "PATCH", body: JSON.stringify(fullFormData(minuteForm)) });

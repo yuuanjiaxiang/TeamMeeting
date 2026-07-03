@@ -33,6 +33,7 @@ DEFAULT_SETTINGS = [
 ]
 
 MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate", "last"}
+TEAM_REACTIONS = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"]
 
 
 def now_iso():
@@ -107,6 +108,25 @@ def recurrence_matches(option, offset, meeting_date):
         )
     recurrence = max(1, min(4, int(option.get("recurrence_weeks") or recurrence_value or 1)))
     return offset % recurrence == 0
+
+
+def link_meeting_topic(conn, meeting_id, type_id, created_by=None):
+    if not type_id:
+        return
+    topic = conn.execute(
+        "SELECT id, sort_order FROM meeting_topic_types WHERE id=? AND active=1",
+        (type_id,),
+    ).fetchone()
+    if not topic:
+        return
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO meeting_topic_links(
+            meeting_id, type_id, sort_order, created_by, created_at
+        ) VALUES(?,?,?,?,?)
+        """,
+        (meeting_id, topic["id"], topic["sort_order"] or 0, created_by, now_iso()),
+    )
 
 
 def connect():
@@ -399,6 +419,23 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS team_post_replies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL REFERENCES team_posts(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS team_post_reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL REFERENCES team_posts(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                reaction TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(post_id, user_id, reaction)
+            );
+
             CREATE TABLE IF NOT EXISTS red_black_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -460,11 +497,22 @@ def init_db():
                 type_id INTEGER NOT NULL REFERENCES meeting_topic_types(id) ON DELETE CASCADE,
                 title TEXT NOT NULL,
                 default_detail TEXT,
+                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 recurrence_weeks INTEGER NOT NULL DEFAULT 1,
                 recurrence_type TEXT NOT NULL DEFAULT 'weekly',
                 recurrence_value TEXT NOT NULL DEFAULT '1',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS meeting_topic_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                type_id INTEGER NOT NULL REFERENCES meeting_topic_types(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                UNIQUE(meeting_id, type_id)
             );
 
             CREATE TABLE IF NOT EXISTS meeting_attendance (
@@ -473,6 +521,7 @@ def init_db():
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 status TEXT NOT NULL CHECK(status IN ('present', 'leave', 'absent', 'late')),
                 donation_required INTEGER NOT NULL DEFAULT 0,
+                donation_amount REAL NOT NULL DEFAULT 0,
                 donation_done INTEGER NOT NULL DEFAULT 0,
                 note TEXT,
                 updated_by INTEGER NOT NULL REFERENCES users(id),
@@ -581,6 +630,10 @@ def init_db():
         ensure_column(conn, "meeting_items", "type_id", "INTEGER")
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
         ensure_column(conn, "meeting_items", "minutes", "TEXT")
+        ensure_column(conn, "meeting_items", "open_issues", "TEXT")
+        ensure_column(conn, "meeting_items", "next_steps", "TEXT")
+        ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "meeting_topic_options", "recurrence_type", "TEXT NOT NULL DEFAULT 'weekly'")
         ensure_column(conn, "meeting_topic_options", "recurrence_value", "TEXT NOT NULL DEFAULT '1'")
@@ -813,9 +866,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_member_post(int(parts[2]), user)
         if path == "/api/team-posts":
             if method == "GET":
-                return {"posts": self.list_team_posts()}
+                return {"posts": self.list_team_posts(user)}
             if method == "POST":
                 return self.create_team_post(user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "replies" and method == "POST":
+            return self.create_team_post_reply(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
+            return self.toggle_team_post_reaction(int(parts[2]), user)
 
         if path == "/api/rules":
             if method == "GET":
@@ -839,11 +896,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_meeting(user)
         if path == "/api/meetings/bulk-generate" and method == "POST":
             return self.bulk_generate_meetings()
+        if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "topics" and method == "PATCH":
+            return self.update_meeting_topics(int(parts[2]))
         if path == "/api/meeting-topics":
             if method == "GET":
                 return self.list_meeting_topics()
         if path == "/api/meeting-topic-types" and method == "POST":
             return self.create_meeting_topic_type()
+        if len(parts) == 3 and parts[:2] == ["api", "meeting-topic-types"] and method == "DELETE":
+            return self.delete_meeting_topic_type(int(parts[2]))
         if path == "/api/meeting-topic-options" and method == "POST":
             return self.create_meeting_topic_option()
         if len(parts) == 3 and parts[:2] == ["api", "meeting-topic-options"] and method == "PATCH":
@@ -1020,7 +1081,7 @@ class Handler(BaseHTTPRequestHandler):
             members = rows_to_list(
                 conn.execute(
                     """
-                    SELECT m.*, u.display_name AS linked_user
+                    SELECT m.*, u.display_name AS linked_user, u.username AS account
                     FROM members m
                     JOIN users u ON u.id = m.user_id
                     WHERE m.active=1 AND u.active=1
@@ -1106,9 +1167,9 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"message": "已发布", "members": self.list_members()}
 
-    def list_team_posts(self):
+    def list_team_posts(self, user=None):
         with connect() as conn:
-            return rows_to_list(
+            posts = rows_to_list(
                 conn.execute(
                     """
                     SELECT p.*, u.display_name
@@ -1118,6 +1179,53 @@ class Handler(BaseHTTPRequestHandler):
                     """
                 ).fetchall()
             )
+            if not posts:
+                return []
+            post_ids = [post["id"] for post in posts]
+            placeholders = ",".join("?" for _ in post_ids)
+            replies = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT r.*, u.display_name
+                    FROM team_post_replies r
+                    JOIN users u ON u.id = r.user_id
+                    WHERE r.post_id IN ({placeholders})
+                    ORDER BY r.created_at ASC, r.id ASC
+                    """,
+                    post_ids,
+                ).fetchall()
+            )
+            reaction_params = [user["id"] if user else -1, *post_ids]
+            reactions = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT post_id, reaction, COUNT(*) AS count,
+                           SUM(CASE WHEN user_id=? THEN 1 ELSE 0 END) AS mine
+                    FROM team_post_reactions
+                    WHERE post_id IN ({placeholders})
+                    GROUP BY post_id, reaction
+                    """,
+                    reaction_params,
+                ).fetchall()
+            )
+        reply_map = {}
+        for reply in replies:
+            reply_map.setdefault(reply["post_id"], []).append(reply)
+        reaction_rank = {reaction: index for index, reaction in enumerate(TEAM_REACTIONS)}
+        reaction_map = {}
+        for reaction in reactions:
+            reaction_map.setdefault(reaction["post_id"], []).append({
+                "reaction": reaction["reaction"],
+                "count": reaction["count"],
+                "mine": bool(reaction["mine"]),
+            })
+        for post in posts:
+            post["replies"] = reply_map.get(post["id"], [])
+            post["reactions"] = sorted(
+                reaction_map.get(post["id"], []),
+                key=lambda item: (reaction_rank.get(item["reaction"], 99), -int(item["count"] or 0), item["reaction"]),
+            )
+        return posts
 
     def create_team_post(self, user):
         data = read_json(self)
@@ -1130,7 +1238,44 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO team_posts(user_id, kind, content, created_at) VALUES(?,?,?,?)",
                 (user["id"], kind, content, now_iso()),
             )
-        return {"message": "已发布", "posts": self.list_team_posts()}
+        return {"message": "已发布", "posts": self.list_team_posts(user)}
+
+    def create_team_post_reply(self, post_id, user):
+        data = read_json(self)
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise AppError(400, "回复内容不能为空")
+        with connect() as conn:
+            post = conn.execute("SELECT id FROM team_posts WHERE id=?", (post_id,)).fetchone()
+            if not post:
+                raise AppError(404, "对话不存在")
+            conn.execute(
+                "INSERT INTO team_post_replies(post_id, user_id, content, created_at) VALUES(?,?,?,?)",
+                (post_id, user["id"], content, now_iso()),
+            )
+        return {"message": "已回复", "posts": self.list_team_posts(user)}
+
+    def toggle_team_post_reaction(self, post_id, user):
+        data = read_json(self)
+        reaction = str(data.get("reaction") or "+1").strip()
+        if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
+            raise AppError(400, "回应内容不支持")
+        with connect() as conn:
+            post = conn.execute("SELECT id FROM team_posts WHERE id=?", (post_id,)).fetchone()
+            if not post:
+                raise AppError(404, "对话不存在")
+            existing = conn.execute(
+                "SELECT id FROM team_post_reactions WHERE post_id=? AND user_id=? AND reaction=?",
+                (post_id, user["id"], reaction),
+            ).fetchone()
+            if existing:
+                conn.execute("DELETE FROM team_post_reactions WHERE id=?", (existing["id"],))
+            else:
+                conn.execute(
+                    "INSERT INTO team_post_reactions(post_id, user_id, reaction, created_at) VALUES(?,?,?,?)",
+                    (post_id, user["id"], reaction, now_iso()),
+                )
+        return {"message": "已更新回应", "posts": self.list_team_posts(user)}
 
     def list_rules(self, query):
         clauses = ["1=1"]
@@ -1261,15 +1406,48 @@ class Handler(BaseHTTPRequestHandler):
                     """
                 ).fetchall()
             )
+            topic_links = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT l.meeting_id, t.id, t.name, t.color, t.sort_order
+                    FROM meeting_topic_links l
+                    JOIN meeting_topic_types t ON t.id = l.type_id
+                    WHERE t.active=1
+                    ORDER BY l.sort_order, t.sort_order, t.id
+                    """
+                ).fetchall()
+            )
         item_map = {}
         for item in items:
             item_map.setdefault(item["meeting_id"], []).append(item)
         attendance_map = {}
         for record in attendance:
             attendance_map.setdefault(record["meeting_id"], []).append(record)
+        topic_map = {}
+        for topic in topic_links:
+            topic_map.setdefault(topic["meeting_id"], []).append({
+                "id": topic["id"],
+                "name": topic["name"],
+                "color": topic["color"],
+                "sort_order": topic["sort_order"],
+            })
         for meeting in meetings:
-            meeting["items"] = item_map.get(meeting["id"], [])
+            meeting_items = item_map.get(meeting["id"], [])
+            meeting_topics = topic_map.get(meeting["id"], [])
+            seen_topics = {topic["id"] for topic in meeting_topics}
+            for item in meeting_items:
+                if item.get("type_id") and item["type_id"] not in seen_topics:
+                    meeting_topics.append({
+                        "id": item["type_id"],
+                        "name": item.get("type_name") or item.get("section") or "议题",
+                        "color": item.get("type_color") or "#3370ff",
+                        "sort_order": 999,
+                    })
+                    seen_topics.add(item["type_id"])
+            meeting["items"] = meeting_items
             meeting["attendance"] = attendance_map.get(meeting["id"], [])
+            meeting["topic_types"] = meeting_topics
+            meeting["topic_type_ids"] = [topic["id"] for topic in meeting_topics]
         return meetings
 
     def create_meeting(self, user):
@@ -1281,8 +1459,51 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
                 (data.get("meeting_date") or today_iso(), data.get("title") or default_title, data.get("summary") or "", "open", user["id"], now_iso()),
             )
-            write_audit(conn, user, "meeting.create", "meeting", cursor.lastrowid, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
+            meeting_id = cursor.lastrowid
+            for topic_id in data.get("topic_type_ids") or []:
+                link_meeting_topic(conn, meeting_id, topic_id, user["id"])
+            write_audit(conn, user, "meeting.create", "meeting", meeting_id, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
         return {"message": "会议已创建", "meetings": self.list_meetings({})}
+
+    def update_meeting_topics(self, meeting_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        topic_ids = data.get("topic_type_ids") or []
+        if isinstance(topic_ids, str):
+            topic_ids = [item.strip() for item in topic_ids.split(",") if item.strip()]
+        normalized = []
+        for topic_id in topic_ids:
+            try:
+                value = int(topic_id)
+            except (TypeError, ValueError):
+                continue
+            if value not in normalized:
+                normalized.append(value)
+        with connect() as conn:
+            meeting = conn.execute("SELECT id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            active = {
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM meeting_topic_types WHERE active=1 AND id IN ({})".format(",".join("?" for _ in normalized) or "NULL"),
+                    normalized,
+                ).fetchall()
+            } if normalized else set()
+            conn.execute("DELETE FROM meeting_topic_links WHERE meeting_id=?", (meeting_id,))
+            for index, topic_id in enumerate(normalized):
+                if topic_id not in active:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO meeting_topic_links(
+                        meeting_id, type_id, sort_order, created_by, created_at
+                    ) VALUES(?,?,?,?,?)
+                    """,
+                    (meeting_id, topic_id, index, admin["id"], now_iso()),
+                )
+            write_audit(conn, admin, "meeting.topics_update", "meeting", meeting_id, "会议主题已更新", {"topic_type_ids": normalized}, self.client_address[0])
+        return {"message": "会议主题已更新", "meetings": self.list_meetings({})}
 
     def bulk_generate_meetings(self):
         admin = self.require_admin()
@@ -1346,7 +1567,7 @@ class Handler(BaseHTTPRequestHandler):
                             option["title"],
                             option["default_detail"] or "",
                             "",
-                            None,
+                            option["owner_id"],
                             "todo",
                             None,
                             admin["id"],
@@ -1355,6 +1576,7 @@ class Handler(BaseHTTPRequestHandler):
                             option["id"],
                         ),
                     )
+                    link_meeting_topic(conn, meeting_id, option["type_id"], admin["id"])
                     created_items += 1
             write_audit(conn, admin, "meeting.bulk_generate", "meeting", None, "周例会已批量生成", {"weeks": weeks, "created_meetings": created_meetings, "created_items": created_items}, self.client_address[0])
         return {
@@ -1371,7 +1593,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             options = rows_to_list(
                 conn.execute(
-                    "SELECT * FROM meeting_topic_options WHERE active=1 ORDER BY sort_order, id"
+                    """
+                    SELECT o.*, u.display_name AS owner_name
+                    FROM meeting_topic_options o
+                    LEFT JOIN users u ON u.id = o.owner_id
+                    WHERE o.active=1
+                    ORDER BY o.sort_order, o.id
+                    """
                 ).fetchall()
             )
         option_map = {}
@@ -1392,14 +1620,25 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, self.current_user(), "meeting_topic_type.create", "meeting_topic_type", cursor.lastrowid, "议题类型已创建", {"name": data.get("name")}, self.client_address[0])
         return {"message": "议题类型已创建", **self.list_meeting_topics()}
 
+    def delete_meeting_topic_type(self, type_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            topic_type = conn.execute("SELECT id, name FROM meeting_topic_types WHERE id=? AND active=1", (type_id,)).fetchone()
+            if not topic_type:
+                raise AppError(404, "议题类型不存在")
+            conn.execute("UPDATE meeting_topic_types SET active=0 WHERE id=?", (type_id,))
+            conn.execute("UPDATE meeting_topic_options SET active=0 WHERE type_id=?", (type_id,))
+            write_audit(conn, admin, "meeting_topic_type.delete", "meeting_topic_type", type_id, "议题类型已删除", {"name": topic_type["name"]}, self.client_address[0])
+        return {"message": "议题类型已删除", **self.list_meeting_topics()}
+
     def create_meeting_topic_option(self):
         self.require_admin()
         data = read_json(self)
         recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
         with connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO meeting_topic_options(type_id, title, default_detail, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active) VALUES(?,?,?,?,?,?,?,1)",
-                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0)),
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, owner_id, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active) VALUES(?,?,?,?,?,?,?,?,1)",
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", data.get("owner_id") or None, recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0)),
             )
             write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_type": recurrence_type, "recurrence_value": recurrence_value}, self.client_address[0])
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
@@ -1409,10 +1648,10 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
-        for key in ("type_id", "title", "default_detail", "sort_order", "active"):
+        for key in ("type_id", "title", "default_detail", "owner_id", "sort_order", "active"):
             if key in data:
                 fields.append(f"{key}=?")
-                values.append(data[key])
+                values.append(data[key] or None if key == "owner_id" else data[key])
         if any(key in data for key in ("recurrence_rule", "recurrence_type", "recurrence_value", "recurrence_weeks")):
             recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
             fields.extend(["recurrence_weeks=?", "recurrence_type=?", "recurrence_value=?"])
@@ -1457,6 +1696,8 @@ class Handler(BaseHTTPRequestHandler):
                     section = option["type_name"]
                     title = title or option["title"]
                     detail = detail or option["default_detail"] or ""
+                    if not data.get("owner_id"):
+                        data["owner_id"] = option["owner_id"]
             elif type_id:
                 topic_type = conn.execute("SELECT name FROM meeting_topic_types WHERE id=?", (type_id,)).fetchone()
                 if topic_type:
@@ -1467,6 +1708,7 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
             )
+            link_meeting_topic(conn, meeting_id, type_id, user["id"])
             write_audit(conn, user, "meeting_item.create", "meeting_item", cursor.lastrowid, "会议议题已添加", {"meeting_id": meeting_id, "title": title}, self.client_address[0])
         return {"message": "议题已添加", "meetings": self.list_meetings({})}
 
@@ -1475,7 +1717,7 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
-        for key in ("minutes", "detail", "status", "owner_id", "due_date"):
+        for key in ("minutes", "detail", "open_issues", "next_steps", "status", "owner_id", "due_date"):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(data[key] or None if key in ("owner_id", "due_date") else data[key])
@@ -1494,24 +1736,31 @@ class Handler(BaseHTTPRequestHandler):
         admin = self.require_admin()
         data = read_json(self)
         status = data.get("status") or "present"
-        donation_required = 1 if status == "late" or data.get("donation_required") else 0
-        donation_done = 1 if data.get("donation_done") else 0
+        if status not in ("present", "leave", "absent", "late"):
+            raise AppError(400, "参会状态不正确")
+        donation_required = 1 if status in ("late", "absent") else 0
+        try:
+            donation_amount = max(0, float(data.get("donation_amount") or 0)) if donation_required else 0
+        except (TypeError, ValueError):
+            raise AppError(400, "乐捐金额不正确")
+        donation_done = 1 if donation_required and data.get("donation_done") else 0
         with connect() as conn:
             conn.execute(
                 """
-                INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_done, note, updated_by, updated_at)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_amount, donation_done, note, updated_by, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(meeting_id, user_id) DO UPDATE SET
                     status=excluded.status,
                     donation_required=excluded.donation_required,
+                    donation_amount=excluded.donation_amount,
                     donation_done=excluded.donation_done,
                     note=excluded.note,
                     updated_by=excluded.updated_by,
                     updated_at=excluded.updated_at
                 """,
-                (meeting_id, data.get("user_id"), status, donation_required, donation_done, data.get("note") or "", admin["id"], now_iso()),
+                (meeting_id, data.get("user_id"), status, donation_required, donation_amount, donation_done, data.get("note") or "", admin["id"], now_iso()),
             )
-            write_audit(conn, admin, "attendance.upsert", "meeting_attendance", meeting_id, "参会状态已更新", {"meeting_id": meeting_id, "user_id": data.get("user_id"), "status": status}, self.client_address[0])
+            write_audit(conn, admin, "attendance.upsert", "meeting_attendance", meeting_id, "参会状态已更新", {"meeting_id": meeting_id, "user_id": data.get("user_id"), "status": status, "donation_amount": donation_amount}, self.client_address[0])
         return {"message": "参会状态已更新", "meetings": self.list_meetings({})}
 
     def list_links(self):
@@ -1522,7 +1771,7 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT l.*, u.display_name AS creator
                     FROM links l
                     LEFT JOIN users u ON u.id = l.created_by
-                    ORDER BY l.invalid ASC, l.pinned DESC, l.category, l.title
+                    ORDER BY l.invalid ASC, l.pinned DESC, COALESCE(l.click_count, 0) DESC, COALESCE(l.last_clicked_at, '') DESC, l.title
                     """
                 ).fetchall()
             )
