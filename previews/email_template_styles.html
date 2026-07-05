@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>会议纪要邮件模板样例</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #eef2f6;
+      color: #172033;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      line-height: 1.55;
+    }
+    .wrap {
+      width: 980px;
+      margin: 0 auto;
+      padding: 34px 0;
+    }
+    .email {
+      width: 920px;
+      margin: 0 auto 36px;
+      background: #fff;
+      border: 1px solid #d9dfe7;
+      box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
+      padding: 34px;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: 25px; margin-bottom: 18px; }
+    h2 { font-size: 18px; margin: 22px 0 10px; }
+    h3 { font-size: 15px; margin: 0 0 8px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      margin: 8px 0 14px;
+    }
+    th, td {
+      border: 1px solid #d9dfe7;
+      padding: 9px 11px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { width: 135px; background: #f6f8fa; color: #172033; }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin: 12px 0 20px;
+    }
+    .meta-card {
+      border: 1px solid #d9dfe7;
+      padding: 12px;
+      background: #fafbfc;
+    }
+    .meta-card span {
+      display: block;
+      color: #6b7280;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .meta-card strong {
+      font-size: 16px;
+    }
+    .topic {
+      margin: 14px 0;
+      padding: 14px;
+      border: 1px solid #d9dfe7;
+      background: #fff;
+    }
+    .topic-title {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+      font-weight: 700;
+    }
+    .num {
+      width: 26px;
+      height: 26px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 50%;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .tag {
+      display: inline-block;
+      border: 1px solid #d9dfe7;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      margin-right: 6px;
+      background: #fff;
+    }
+    .sample-label {
+      position: absolute;
+      top: 16px;
+      right: 18px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .email { position: relative; }
+
+    .style-a h1 {
+      border-left: 7px solid #c7000b;
+      padding-left: 12px;
+    }
+    .style-a h2 {
+      color: #c7000b;
+      border-bottom: 2px solid #f2d6d8;
+      padding-bottom: 6px;
+    }
+    .style-a .num { background: #ffe9e9; color: #c7000b; }
+    .style-a .topic { border-left: 5px solid #c7000b; }
+    .style-a th { background: #fff3f3; }
+
+    .style-b {
+      box-shadow: none;
+      border: 0;
+      padding: 42px 52px;
+    }
+    .style-b h1 {
+      text-align: center;
+      padding-bottom: 12px;
+      border-bottom: 2px solid #172033;
+    }
+    .style-b h2 {
+      border-bottom: 1px solid #d9dfe7;
+      padding-bottom: 5px;
+    }
+    .style-b .topic {
+      border: 0;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 12px 0 18px;
+    }
+    .style-b .num { background: #172033; color: #fff; }
+    .style-b table { margin-bottom: 8px; }
+
+    .style-c .overview {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 1fr;
+      gap: 10px;
+      margin: 16px 0 20px;
+    }
+    .style-c .overview > div {
+      background: #f8fafc;
+      border: 1px solid #d9dfe7;
+      padding: 14px;
+    }
+    .style-c .overview span { display: block; color: #6b7280; font-size: 12px; }
+    .style-c .overview strong { color: #c7000b; font-size: 24px; }
+    .style-c h1 {
+      background: #fff7f7;
+      border-top: 4px solid #c7000b;
+      padding: 16px;
+      margin: -8px -8px 18px;
+    }
+    .style-c .num { background: #c7000b; color: #fff; }
+    .style-c .topic { border-radius: 2px; }
+    .style-c .risk td, .style-c .risk th { background: #fff7f7; }
+    .style-c th { background: #eef3f8; }
+
+    .style-d {
+      background: #fbfdff;
+      border-color: #cbd7e8;
+    }
+    .style-d h1 {
+      color: #fff;
+      background: #26364a;
+      padding: 18px;
+      margin: -34px -34px 22px;
+    }
+    .style-d h2 { color: #26364a; }
+    .style-d .topic {
+      border-radius: 10px;
+      background: #fff;
+      border-color: #cbd7e8;
+    }
+    .style-d .num { background: #dbeafe; color: #1d4ed8; }
+    .style-d th { background: #eef6ff; }
+    .style-d .thank {
+      background: #f7fbff;
+      border-color: #bfdbfe;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section id="sample-a" class="email style-a">
+      <span class="sample-label">A 华为红线标题版</span>
+      <h1>【会议纪要】2026-07-06 周例会</h1>
+      <h2>一、会议基本信息</h2>
+      <table>
+        <tr><th>会议日期</th><td>2026-07-06</td></tr>
+        <tr><th>与会人</th><td>管理员、张工、李工、王工、陈工</td></tr>
+        <tr><th>主持人</th><td>管理员</td></tr>
+      </table>
+      <h2>二、按议题维度纪要与行动闭环</h2>
+      <div class="topic">
+        <div class="topic-title"><span class="num">1</span>TOPTB 温控波动确认</div>
+        <table>
+          <tr><th>纪要/结论</th><td>夜班温控波动与节拍异常有关，先按 02:30 数据补齐复盘材料。</td></tr>
+          <tr><th>遗留问题</th><td>缺少一张报警截图。</td></tr>
+          <tr><th>下一步行动</th><td>张工当天补齐截图，李工更新质量复盘。</td></tr>
+          <tr><th>责任人</th><td>张工</td></tr>
+          <tr><th>完成时间</th><td>2026-07-07</td></tr>
+        </table>
+      </div>
+      <div class="topic">
+        <div class="topic-title"><span class="num">2</span>本周 Thank You</div>
+        <table>
+          <tr><th>纪要/结论</th><td>本周共收到 6 条 Thank You。</td></tr>
+          <tr><th>本周之星</th><td>张工 3 次；李工 2 次</td></tr>
+          <tr><th>感谢明细</th><td>王工感谢张工补齐夜班数据；陈工感谢李工指导复盘模板。</td></tr>
+        </table>
+      </div>
+      <h2>三、会后跟踪要求</h2>
+      <p>未关闭事项进入下次会议跟踪，责任人按完成时间反馈闭环证据。</p>
+    </section>
+
+    <section id="sample-b" class="email style-b">
+      <span class="sample-label">B 华为公文简洁版</span>
+      <h1>会议纪要</h1>
+      <p><strong>会议名称：</strong>周例会<br><strong>会议日期：</strong>2026-07-06<br><strong>与会人：</strong>管理员、张工、李工、王工、陈工</p>
+      <h2>一、按议题维度纪要与行动闭环</h2>
+      <div class="topic">
+        <div class="topic-title"><span class="num">1</span>TOPTB 温控波动确认</div>
+        <table>
+          <tr><th>纪要/结论</th><td>确认温控波动与节拍异常有关，需补齐夜班数据。</td></tr>
+          <tr><th>下一步行动</th><td>补齐报警截图并更新复盘。</td></tr>
+          <tr><th>责任人</th><td>张工</td></tr>
+          <tr><th>完成时间</th><td>2026-07-07</td></tr>
+        </table>
+      </div>
+      <div class="topic">
+        <div class="topic-title"><span class="num">2</span>本周 Thank You</div>
+        <table>
+          <tr><th>纪要/结论</th><td>本周共收到 6 条 Thank You，张工为本周之星。</td></tr>
+          <tr><th>感谢明细</th><td>王工感谢张工补齐夜班数据；陈工感谢李工指导复盘模板。</td></tr>
+        </table>
+      </div>
+      <h2>二、会后要求</h2>
+      <p>各责任人按完成时间推进闭环，逾期事项在下次会议说明。</p>
+    </section>
+
+    <section id="sample-c" class="email style-c">
+      <span class="sample-label">C 华为项目战情版</span>
+      <h1>【会议纪要】2026-07-06 周例会</h1>
+      <div class="overview">
+        <div><span>会议日期</span><strong>07/06</strong></div>
+        <div><span>与会人</span><strong>5 人</strong></div>
+        <div><span>待闭环</span><strong>3 项</strong></div>
+      </div>
+      <h2>一、按议题维度纪要与行动闭环</h2>
+      <div class="topic">
+        <div class="topic-title"><span class="num">1</span>TOPTB 温控波动确认 <span class="tag">质量风险</span></div>
+        <table>
+          <tr><th>纪要/结论</th><td>温控波动需要纳入本周质量复盘，先完成证据闭环。</td></tr>
+          <tr class="risk"><th>遗留问题</th><td>监控导出权限未确认。</td></tr>
+          <tr><th>下一步行动</th><td>张工补齐截图，王工协助导出监控。</td></tr>
+          <tr><th>责任人</th><td>张工</td></tr>
+          <tr><th>完成时间</th><td>2026-07-07</td></tr>
+        </table>
+      </div>
+      <div class="topic">
+        <div class="topic-title"><span class="num">2</span>本周 Thank You <span class="tag">团队协作</span></div>
+        <table>
+          <tr><th>纪要/结论</th><td>本周共收到 6 条 Thank You。</td></tr>
+          <tr><th>本周之星</th><td>张工 3 次；李工 2 次</td></tr>
+          <tr><th>感谢明细</th><td>王工感谢张工补齐夜班数据；陈工感谢李工指导复盘模板。</td></tr>
+        </table>
+      </div>
+      <h2>二、会后跟踪要求</h2>
+      <p>行动项进入下次例会追踪，风险项需每日反馈一次进展。</p>
+    </section>
+
+    <section id="sample-d" class="email style-d">
+      <span class="sample-label">D 华为蓝灰工程版</span>
+      <h1>【会议纪要】2026-07-06 周例会</h1>
+      <div class="meta-grid">
+        <div class="meta-card"><span>会议日期</span><strong>2026-07-06</strong></div>
+        <div class="meta-card"><span>与会人</span><strong>管理员、张工、李工...</strong></div>
+        <div class="meta-card"><span>主持人</span><strong>管理员</strong></div>
+      </div>
+      <h2>按议题维度纪要与行动闭环</h2>
+      <div class="topic">
+        <div class="topic-title"><span class="num">1</span>TOPTB 温控波动确认 <span class="tag">进行中</span><span class="tag">张工</span><span class="tag">07/07</span></div>
+        <table>
+          <tr><th>纪要/结论</th><td>夜班温控波动与节拍异常有关，需要补齐复盘材料。</td></tr>
+          <tr><th>下一步行动</th><td>补齐报警截图，更新质量复盘。</td></tr>
+        </table>
+      </div>
+      <div class="topic thank">
+        <div class="topic-title"><span class="num">2</span>本周 Thank You <span class="tag">自动汇总</span></div>
+        <table>
+          <tr><th>纪要/结论</th><td>本周共收到 6 条 Thank You，主要集中在夜班数据补齐和复盘模板支持。</td></tr>
+          <tr><th>本周之星</th><td>张工 3 次；李工 2 次</td></tr>
+        </table>
+      </div>
+      <h2>会后跟踪要求</h2>
+      <p>未关闭事项进入下次会议，完成后补充证据。</p>
+    </section>
+  </div>
+</body>
+</html>

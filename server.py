@@ -35,6 +35,29 @@ DEFAULT_SETTINGS = [
 MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate", "last"}
 TEAM_REACTIONS = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"]
 
+MODULE_CATALOG = [
+    {"key": "members", "name": "团队成员", "description": "成员档案、职责画像和团队对话"},
+    {"key": "dashboard", "name": "工作台", "description": "团队关键指标概览"},
+    {"key": "morning", "name": "早例会", "description": "按人追踪当日事项、风险和下一步"},
+    {"key": "meetings", "name": "会议沙盘", "description": "周例会议题、纪要和签到"},
+    {"key": "shifts", "name": "机台排班", "description": "白夜班排班和工时统计"},
+    {"key": "rules", "name": "红黑榜", "description": "红黑榜细则和积分看板"},
+    {"key": "thanks", "name": "Thank You", "description": "团队感谢墙和 Thank You 之星"},
+    {"key": "links", "name": "常用链接", "description": "系统、文档和工具入口"},
+]
+MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
+PUBLIC_MODULES = {"members", "shifts", "rules", "thanks", "links"}
+DEFAULT_USER_TYPES = [
+    ("internal", "内部成员", "项目团队正式成员，默认可查看日常协作模块。", 10, 1),
+    ("partner", "合作方", "合作方或外协人员，默认只开放早例会和常用链接。", 20, 0),
+]
+DEFAULT_TYPE_PERMISSIONS = {
+    "internal": {"members", "dashboard", "morning", "meetings", "shifts", "rules", "thanks", "links"},
+    "partner": {"morning", "links"},
+}
+MORNING_STATUSES = {"todo", "doing", "risk", "done"}
+MORNING_PRIORITIES = {"low", "normal", "high"}
+
 
 def now_iso():
     return dt.datetime.now().replace(microsecond=0).isoformat()
@@ -42,6 +65,10 @@ def now_iso():
 
 def today_iso():
     return dt.date.today().isoformat()
+
+
+def is_past_date(value):
+    return dt.date.fromisoformat(value) < dt.date.today()
 
 
 def week_start(value=None):
@@ -225,6 +252,221 @@ def seed_system_settings(conn):
         )
 
 
+def seed_user_types(conn):
+    for key, name, description, sort_order, locked in DEFAULT_USER_TYPES:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_types(key, name, description, sort_order, locked, active, created_at)
+            VALUES(?,?,?,?,?,1,?)
+            """,
+            (key, name, description, sort_order, locked, now_iso()),
+        )
+        conn.execute(
+            "UPDATE user_types SET name=?, description=?, sort_order=?, locked=?, active=1 WHERE key=?",
+            (name, description, sort_order, locked, key),
+        )
+    for type_key, modules in DEFAULT_TYPE_PERMISSIONS.items():
+        for module_key in modules:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO module_permissions(user_type_key, module_key, can_view, updated_at)
+                VALUES(?,?,1,?)
+                """,
+                (type_key, module_key, now_iso()),
+            )
+
+
+def seed_morning_items(conn):
+    count = conn.execute("SELECT COUNT(*) FROM morning_items").fetchone()[0]
+    if count:
+        return
+    users = conn.execute("SELECT id, display_name FROM users WHERE active=1 ORDER BY id LIMIT 4").fetchall()
+    if not users:
+        return
+    samples = [
+        ("TOPTB 夜班遗留闭环", "确认温控波动截图，上午同步是否需要补充复盘材料。", "doing", "high", "温控趋势需要王工确认", today_iso()),
+        ("质量复盘模板更新", "整理红黑榜引用标准，让周会纪要可以直接复用。", "todo", "normal", "", today_iso()),
+        ("现场报修跟进", "核对机台 A 报修工单状态，确认维修窗口。", "risk", "high", "等待供应商回复备件时间", today_iso()),
+        ("常用链接梳理", "把高频看板和 SOP 链接置顶并补充关键词。", "done", "low", "", today_iso()),
+    ]
+    for index, sample in enumerate(samples):
+        user = users[index % len(users)]
+        cursor = conn.execute(
+            """
+            INSERT INTO morning_items(owner_id, item_date, title, detail, status, priority, blocker, due_date, updated_by, created_at, updated_at, active)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
+            """,
+            (user["id"], sample[5], sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], user["id"], now_iso(), now_iso()),
+        )
+        conn.execute("UPDATE morning_items SET root_id=? WHERE id=?", (cursor.lastrowid, cursor.lastrowid))
+
+
+def seed_morning_history_samples(conn):
+    existing = conn.execute("SELECT COUNT(*) FROM morning_items WHERE title LIKE '样例-%'").fetchone()[0]
+    if existing:
+        return
+    users = conn.execute("SELECT id, display_name FROM users WHERE active=1 ORDER BY id LIMIT 6").fetchall()
+    if not users:
+        return
+    chains = [
+        {
+            "owner": 0,
+            "title": "样例-TOPTB 温控波动复盘",
+            "priority": "high",
+            "entries": [
+                ("2026-06-30", "risk", "夜班出现两次温控上探，先确认报警截图和点检记录。", "需要王工补充趋势截图", "2026-07-01"),
+                ("2026-07-01", "doing", "已拿到报警截图，等待白班复核实际温区影响。", "复核结论未同步", "2026-07-02"),
+                ("2026-07-02", "done", "复核完成，波动来自测试台切换，已写入复盘模板。", "", "2026-07-02"),
+            ],
+        },
+        {
+            "owner": 1,
+            "title": "样例-机台 A 报警截图补齐",
+            "priority": "normal",
+            "entries": [
+                ("2026-07-01", "todo", "需要补齐 3 张报警截图，作为红黑榜事实依据。", "", "2026-07-03"),
+                ("2026-07-02", "risk", "截图缺少夜班 02:30 的一张，先联系夜班补发。", "夜班截图未找到", "2026-07-03"),
+                ("2026-07-03", "doing", "已补到 2 张，剩余 1 张从监控导出。", "监控导出权限待确认", "2026-07-04"),
+                ("2026-07-04", "doing", "继续跟进监控导出权限，今天下班前确认。", "权限审批未完成", "2026-07-04"),
+            ],
+        },
+        {
+            "owner": 2,
+            "title": "样例-SOP 点检表更新",
+            "priority": "normal",
+            "entries": [
+                ("2026-07-02", "todo", "把老化测试台点检步骤补进 SOP 标准库。", "", "2026-07-03"),
+                ("2026-07-03", "done", "SOP 已更新，常用链接里已补充入口。", "", "2026-07-03"),
+            ],
+        },
+        {
+            "owner": 3,
+            "title": "样例-夜班交接问题跟踪",
+            "priority": "high",
+            "entries": [
+                ("2026-07-03", "risk", "夜班交接记录有两处描述不一致，影响异常归因。", "交接口径不一致", "2026-07-04"),
+                ("2026-07-04", "risk", "早会需要统一交接口径，并确定后续记录模板。", "缺少统一模板", "2026-07-04"),
+            ],
+        },
+        {
+            "owner": 4,
+            "title": "样例-供应商备件到货确认",
+            "priority": "high",
+            "entries": [
+                ("2026-07-01", "risk", "机台 B 备用传感器缺货，供应商未给明确到货时间。", "供应商回复不明确", "2026-07-04"),
+                ("2026-07-04", "risk", "今天必须确认到货日期，否则排班要规避机台 B 风险窗口。", "到货日期未锁定", "2026-07-04"),
+            ],
+        },
+        {
+            "owner": 5,
+            "title": "样例-常用链接关键词补充",
+            "priority": "low",
+            "entries": [
+                ("2026-07-04", "todo", "给高频看板和 SOP 链接补充适用范围关键词。", "", "2026-07-05"),
+            ],
+        },
+    ]
+    for chain in chains:
+        root_id = None
+        previous_id = None
+        previous_date = None
+        owner = users[chain["owner"] % len(users)]
+        for item_date, status, detail, blocker, due_date in chain["entries"]:
+            cursor = conn.execute(
+                """
+                INSERT INTO morning_items(
+                    owner_id, item_date, title, detail, status, priority, blocker, due_date,
+                    root_id, carry_from_id, carried_from_date, updated_by, created_at, updated_at, active
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                """,
+                (
+                    owner["id"],
+                    item_date,
+                    chain["title"],
+                    detail,
+                    status,
+                    chain["priority"],
+                    blocker,
+                    due_date,
+                    root_id,
+                    previous_id,
+                    previous_date,
+                    owner["id"],
+                    f"{item_date}T08:30:00",
+                    f"{item_date}T09:00:00",
+                ),
+            )
+            if root_id is None:
+                root_id = cursor.lastrowid
+                conn.execute("UPDATE morning_items SET root_id=? WHERE id=?", (root_id, cursor.lastrowid))
+            previous_id = cursor.lastrowid
+            previous_date = item_date
+
+
+def ensure_morning_carryover(conn, item_date):
+    target_date = dt.date.fromisoformat(item_date)
+    if target_date < dt.date.today():
+        return 0
+    source_items = rows_to_list(
+        conn.execute(
+            """
+            SELECT i.*
+            FROM morning_items i
+            JOIN (
+                SELECT COALESCE(root_id, id) AS chain_id, MAX(item_date) AS max_date
+                FROM morning_items
+                WHERE active=1 AND item_date < ?
+                GROUP BY COALESCE(root_id, id)
+            ) latest
+              ON COALESCE(i.root_id, i.id)=latest.chain_id
+             AND i.item_date=latest.max_date
+            WHERE i.active=1 AND i.status!='done'
+            ORDER BY i.owner_id, i.id
+            """,
+            (item_date,),
+        ).fetchall()
+    )
+    carried_count = 0
+    for item in source_items:
+        root_id = item.get("root_id") or item["id"]
+        exists = conn.execute(
+            """
+            SELECT id
+            FROM morning_items
+            WHERE active=1 AND item_date=? AND COALESCE(root_id, id)=?
+            """,
+            (item_date, root_id),
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            """
+            INSERT INTO morning_items(
+                owner_id, item_date, title, detail, status, priority, blocker, due_date,
+                root_id, carry_from_id, carried_from_date, updated_by, created_at, updated_at, active
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            """,
+            (
+                item["owner_id"],
+                item_date,
+                item["title"],
+                item.get("detail") or "",
+                item["status"],
+                item.get("priority") or "normal",
+                item.get("blocker") or "",
+                item.get("due_date") or item_date,
+                root_id,
+                item["id"],
+                item["item_date"],
+                item.get("updated_by"),
+                now_iso(),
+                now_iso(),
+            ),
+        )
+        carried_count += 1
+    return carried_count
+
+
 def get_setting_value(conn, key, default=None):
     row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
@@ -386,8 +628,27 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+                user_type TEXT NOT NULL DEFAULT 'internal',
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_types (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                locked INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS module_permissions (
+                user_type_key TEXT NOT NULL REFERENCES user_types(key) ON DELETE CASCADE,
+                module_key TEXT NOT NULL,
+                can_view INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_type_key, module_key)
             );
 
             CREATE TABLE IF NOT EXISTS members (
@@ -582,6 +843,25 @@ def init_db():
                 UNIQUE(voter_id, receiver_id, week_start)
             );
 
+            CREATE TABLE IF NOT EXISTS morning_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL REFERENCES users(id),
+                item_date TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT,
+                status TEXT NOT NULL DEFAULT 'todo',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                blocker TEXT,
+                due_date TEXT,
+                root_id INTEGER,
+                carry_from_id INTEGER REFERENCES morning_items(id),
+                carried_from_date TEXT,
+                updated_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS system_settings (
                 key TEXT PRIMARY KEY,
                 label TEXT NOT NULL,
@@ -614,6 +894,7 @@ def init_db():
             );
             """
         )
+        ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'internal'")
         ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "members", "skills", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "members", "machine_scope", "TEXT NOT NULL DEFAULT '[]'")
@@ -637,12 +918,25 @@ def init_db():
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "meeting_topic_options", "recurrence_type", "TEXT NOT NULL DEFAULT 'weekly'")
         ensure_column(conn, "meeting_topic_options", "recurrence_value", "TEXT NOT NULL DEFAULT '1'")
+        ensure_column(conn, "morning_items", "priority", "TEXT NOT NULL DEFAULT 'normal'")
+        ensure_column(conn, "morning_items", "blocker", "TEXT")
+        ensure_column(conn, "morning_items", "due_date", "TEXT")
+        ensure_column(conn, "morning_items", "root_id", "INTEGER")
+        ensure_column(conn, "morning_items", "carry_from_id", "INTEGER")
+        ensure_column(conn, "morning_items", "carried_from_date", "TEXT")
+        ensure_column(conn, "morning_items", "updated_by", "INTEGER")
+        ensure_column(conn, "morning_items", "updated_at", "TEXT")
+        ensure_column(conn, "morning_items", "active", "INTEGER NOT NULL DEFAULT 1")
         conn.execute("UPDATE meeting_topic_options SET recurrence_type='weekly' WHERE recurrence_type IS NULL OR recurrence_type=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
+        conn.execute("UPDATE users SET user_type='internal' WHERE user_type IS NULL OR user_type=''")
+        conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
+        conn.execute("UPDATE morning_items SET root_id=id WHERE root_id IS NULL")
         seed_meeting_topics(conn)
         seed_link_categories(conn)
         seed_system_settings(conn)
+        seed_user_types(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
@@ -671,6 +965,8 @@ def init_db():
                 "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (2, "普通成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
             )
+        seed_morning_items(conn)
+        seed_morning_history_samples(conn)
         sync_members_with_users(conn)
 
 
@@ -754,7 +1050,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def send_link_redirect(self, link_id):
-        self.current_user(required=False)
+        user = self.current_user(required=False)
+        self.require_module(user, "links")
         with connect() as conn:
             link = conn.execute("SELECT id, title, url, invalid FROM links WHERE id=?", (link_id,)).fetchone()
             if not link:
@@ -800,7 +1097,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(401, "请先登录")
             return None
         with connect() as conn:
-            user = conn.execute("SELECT id, username, display_name, role, active, created_at FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+            user = conn.execute(
+                """
+                SELECT u.id, u.username, u.display_name, u.role, u.user_type, t.name AS user_type_name, u.active, u.created_at
+                FROM users u
+                LEFT JOIN user_types t ON t.key = u.user_type
+                WHERE u.id=? AND u.active=1
+                """,
+                (user_id,),
+            ).fetchone()
         if not user:
             if token in SESSIONS:
                 del SESSIONS[token]
@@ -833,6 +1138,50 @@ class Handler(BaseHTTPRequestHandler):
             "/api/link-categories",
         }
 
+    def module_for_path(self, path):
+        if path.startswith("/api/user-types") or path.startswith("/api/users"):
+            return "users"
+        if path.startswith("/api/members") or path.startswith("/api/team-posts"):
+            return "members"
+        if path.startswith("/api/morning-items"):
+            return "morning"
+        if path.startswith("/api/rules") or path.startswith("/api/scores") or path.startswith("/api/dashboards/red-black"):
+            return "rules"
+        if path.startswith("/api/meetings") or path.startswith("/api/meeting-"):
+            return "meetings"
+        if path.startswith("/api/links") or path.startswith("/api/link-categories"):
+            return "links"
+        if path.startswith("/api/machines") or path.startswith("/api/shifts") or path.startswith("/api/dashboards/shifts"):
+            return "shifts"
+        if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
+            return "thanks"
+        if path.startswith("/api/settings") or path.startswith("/api/audit-logs") or path.startswith("/api/backups"):
+            return "system"
+        return None
+
+    def require_module(self, user, module_key):
+        if not module_key:
+            return
+        if module_key in PUBLIC_MODULES and not user:
+            return
+        if not user:
+            raise AppError(401, "请先登录")
+        if user.get("role") == "admin":
+            return
+        if module_key not in MODULE_KEYS:
+            raise AppError(403, "当前账号无权访问该模块")
+        with connect() as conn:
+            row = conn.execute(
+                """
+                SELECT can_view
+                FROM module_permissions
+                WHERE user_type_key=? AND module_key=? AND can_view=1
+                """,
+                (user.get("user_type") or "internal", module_key),
+            ).fetchone()
+        if not row:
+            raise AppError(403, "当前用户类型无权访问该模块")
+
     def route_api(self, method, path, query):
         if path == "/api/login" and method == "POST":
             return self.login()
@@ -844,6 +1193,12 @@ class Handler(BaseHTTPRequestHandler):
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
+        self.require_module(user, self.module_for_path(path))
+
+        if path == "/api/user-types" and method == "GET":
+            return self.list_user_types()
+        if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "permissions" and method == "PATCH":
+            return self.update_user_type_permissions(parts[2])
 
         if path == "/api/users":
             if method == "GET":
@@ -873,6 +1228,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_team_post_reply(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
             return self.toggle_team_post_reaction(int(parts[2]), user)
+
+        if path == "/api/morning-items":
+            if method == "GET":
+                return self.list_morning_items(query)
+            if method == "POST":
+                return self.create_morning_item(user)
+        if len(parts) == 4 and parts[:2] == ["api", "morning-items"] and parts[3] == "history" and method == "GET":
+            return self.list_morning_item_history(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "morning-items"] and method == "PATCH":
+            return self.update_morning_item(int(parts[2]), user)
+        if len(parts) == 3 and parts[:2] == ["api", "morning-items"] and method == "DELETE":
+            return self.delete_morning_item(int(parts[2]), user)
 
         if path == "/api/rules":
             if method == "GET":
@@ -977,12 +1344,20 @@ class Handler(BaseHTTPRequestHandler):
         username = (data.get("username") or "").strip()
         password = data.get("password") or ""
         with connect() as conn:
-            user = conn.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
+            user = conn.execute(
+                """
+                SELECT u.*, t.name AS user_type_name
+                FROM users u
+                LEFT JOIN user_types t ON t.key = u.user_type
+                WHERE u.username=? AND u.active=1
+                """,
+                (username,),
+            ).fetchone()
         if not user or not verify_password(password, user["salt"], user["password_hash"]):
             raise AppError(401, "账号或密码错误")
         token = secrets.token_urlsafe(32)
         SESSIONS[token] = user["id"]
-        safe_user = {key: user[key] for key in ("id", "username", "display_name", "role", "active", "created_at")}
+        safe_user = {key: user[key] for key in ("id", "username", "display_name", "role", "user_type", "user_type_name", "active", "created_at")}
         with connect() as conn:
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
         return {
@@ -1018,22 +1393,81 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
         self.wfile.flush()
 
+    def list_user_types(self):
+        self.require_admin()
+        with connect() as conn:
+            types = rows_to_list(
+                conn.execute(
+                    "SELECT * FROM user_types WHERE active=1 ORDER BY sort_order, key"
+                ).fetchall()
+            )
+            permissions = rows_to_list(
+                conn.execute(
+                    "SELECT user_type_key, module_key, can_view FROM module_permissions WHERE can_view=1"
+                ).fetchall()
+            )
+        permission_map = {}
+        for permission in permissions:
+            permission_map.setdefault(permission["user_type_key"], set()).add(permission["module_key"])
+        for user_type in types:
+            user_type["modules"] = sorted(permission_map.get(user_type["key"], set()))
+        return {"types": types, "modules": MODULE_CATALOG}
+
+    def update_user_type_permissions(self, type_key):
+        admin = self.require_admin()
+        data = read_json(self)
+        modules = data.get("modules") or []
+        if not isinstance(modules, list):
+            raise AppError(400, "模块权限格式不正确")
+        modules = [module for module in modules if module in MODULE_KEYS]
+        with connect() as conn:
+            user_type = conn.execute(
+                "SELECT key, name FROM user_types WHERE key=? AND active=1",
+                (type_key,),
+            ).fetchone()
+            if not user_type:
+                raise AppError(404, "用户类型不存在")
+            conn.execute("DELETE FROM module_permissions WHERE user_type_key=?", (type_key,))
+            for module in modules:
+                conn.execute(
+                    """
+                    INSERT INTO module_permissions(user_type_key, module_key, can_view, updated_at)
+                    VALUES(?,?,1,?)
+                    """,
+                    (type_key, module, now_iso()),
+                )
+            write_audit(conn, admin, "user_type.permissions", "user_type", None, "用户类型权限已更新", {"user_type": type_key, "modules": modules}, self.client_address[0])
+        return {"message": "用户类型权限已更新", **self.list_user_types(), "permissions": permissions_for(admin)}
+
     def list_users(self):
         self.require_admin()
         with connect() as conn:
-            return rows_to_list(conn.execute("SELECT id, username, display_name, role, active, created_at FROM users WHERE active=1 ORDER BY id").fetchall())
+            return rows_to_list(
+                conn.execute(
+                    """
+                    SELECT u.id, u.username, u.display_name, u.role, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name, u.active, u.created_at
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key = u.user_type
+                    WHERE u.active=1
+                    ORDER BY u.id
+                    """
+                ).fetchall()
+            )
 
     def create_user(self):
         admin = self.require_admin()
         data = read_json(self)
         salt, password_hash = make_hash(data.get("password") or "123456")
+        user_type = data.get("user_type") or "internal"
         with connect() as conn:
+            if not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (user_type,)).fetchone():
+                user_type = "internal"
             cursor = conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, active, created_at) VALUES(?,?,?,?,?,?,?)",
-                ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", 1, now_iso()),
+                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, active, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", user_type, 1, now_iso()),
             )
             sync_member_for_user(conn, cursor.lastrowid)
-            write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": data.get("username"), "role": data.get("role") or "user"}, self.client_address[0])
+            write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": data.get("username"), "role": data.get("role") or "user", "user_type": user_type}, self.client_address[0])
         return {"message": "用户已创建", "users": self.list_users()}
 
     def update_user(self, user_id):
@@ -1041,7 +1475,7 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
-        for key in ("display_name", "role", "active"):
+        for key in ("display_name", "role", "active", "user_type"):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(data[key])
@@ -1053,6 +1487,8 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(user_id)
         with connect() as conn:
+            if "user_type" in data and not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (data.get("user_type"),)).fetchone():
+                raise AppError(400, "用户类型不存在")
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
             sync_member_for_user(conn, user_id)
             write_audit(conn, admin, "user.update", "user", user_id, "用户已更新", {"fields": list(data.keys())}, self.client_address[0])
@@ -1276,6 +1712,205 @@ class Handler(BaseHTTPRequestHandler):
                     (post_id, user["id"], reaction, now_iso()),
                 )
         return {"message": "已更新回应", "posts": self.list_team_posts(user)}
+
+    def list_morning_items(self, query):
+        item_date = (query.get("date") or [today_iso()])[0] or today_iso()
+        try:
+            dt.date.fromisoformat(item_date)
+        except ValueError:
+            raise AppError(400, "日期格式不正确")
+        with connect() as conn:
+            carried_count = ensure_morning_carryover(conn, item_date)
+            items = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
+                           updater.display_name AS updated_by_name,
+                           COALESCE(root.item_date, i.item_date) AS start_date
+                    FROM morning_items i
+                    JOIN users owner ON owner.id = i.owner_id
+                    LEFT JOIN users updater ON updater.id = i.updated_by
+                    LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
+                    WHERE i.active=1 AND i.item_date=?
+                    ORDER BY owner.display_name, CASE i.status WHEN 'risk' THEN 0 WHEN 'doing' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, i.updated_at DESC
+                    """,
+                    (item_date,),
+                ).fetchall()
+            )
+            for item in items:
+                start_date = item.get("start_date") or item["item_date"]
+                try:
+                    item["duration_days"] = (dt.date.fromisoformat(item["item_date"]) - dt.date.fromisoformat(start_date)).days + 1
+                except ValueError:
+                    item["duration_days"] = 1
+            users = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT u.id, u.username, u.display_name, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key = u.user_type
+                    WHERE u.active=1
+                    ORDER BY t.sort_order, u.id
+                    """
+                ).fetchall()
+            )
+        return {
+            "date": item_date,
+            "today": today_iso(),
+            "read_only": is_past_date(item_date),
+            "carried_count": carried_count,
+            "items": items,
+            "users": users,
+        }
+
+    def list_morning_item_history(self, item_id):
+        with connect() as conn:
+            current = conn.execute(
+                """
+                SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
+                       updater.display_name AS updated_by_name,
+                       COALESCE(root.item_date, i.item_date) AS start_date
+                FROM morning_items i
+                JOIN users owner ON owner.id = i.owner_id
+                LEFT JOIN users updater ON updater.id = i.updated_by
+                LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
+                WHERE i.id=? AND i.active=1
+                """,
+                (item_id,),
+            ).fetchone()
+            if not current:
+                raise AppError(404, "早例会事项不存在")
+            current_item = dict(current)
+            chain_id = current_item.get("root_id") or current_item["id"]
+            history = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
+                           updater.display_name AS updated_by_name,
+                           COALESCE(root.item_date, i.item_date) AS start_date
+                    FROM morning_items i
+                    JOIN users owner ON owner.id = i.owner_id
+                    LEFT JOIN users updater ON updater.id = i.updated_by
+                    LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
+                    WHERE i.active=1 AND COALESCE(i.root_id, i.id)=?
+                    ORDER BY i.item_date ASC, i.id ASC
+                    """,
+                    (chain_id,),
+                ).fetchall()
+            )
+        start_date = current_item.get("start_date") or current_item["item_date"]
+        try:
+            current_item["duration_days"] = (dt.date.fromisoformat(current_item["item_date"]) - dt.date.fromisoformat(start_date)).days + 1
+        except ValueError:
+            current_item["duration_days"] = 1
+
+        visible_history = []
+        for row in history:
+            has_manual_update = not row.get("carry_from_id") or (
+                row.get("updated_at") and row.get("created_at") and row["updated_at"] != row["created_at"]
+            )
+            if not has_manual_update:
+                continue
+            row_start = row.get("start_date") or row["item_date"]
+            try:
+                row["duration_days"] = (dt.date.fromisoformat(row["item_date"]) - dt.date.fromisoformat(row_start)).days + 1
+            except ValueError:
+                row["duration_days"] = 1
+            visible_history.append(row)
+        return {"item": current_item, "history": visible_history}
+
+    def create_morning_item(self, user):
+        data = read_json(self)
+        title = (data.get("title") or "").strip()
+        if not title:
+            raise AppError(400, "事项标题不能为空")
+        owner_id = int(data.get("owner_id") or user["id"])
+        if user["role"] != "admin" and owner_id != user["id"]:
+            raise AppError(403, "只能登记自己的早例会事项")
+        status = data.get("status") if data.get("status") in MORNING_STATUSES else "todo"
+        priority = data.get("priority") if data.get("priority") in MORNING_PRIORITIES else "normal"
+        item_date = data.get("item_date") or today_iso()
+        try:
+            dt.date.fromisoformat(item_date)
+        except ValueError:
+            raise AppError(400, "日期格式不正确")
+        if is_past_date(item_date):
+            raise AppError(400, "已结束日期不能新增早例会事项")
+        due_date = data.get("due_date") or item_date
+        with connect() as conn:
+            if not conn.execute("SELECT id FROM users WHERE id=? AND active=1", (owner_id,)).fetchone():
+                raise AppError(404, "负责人不存在")
+            cursor = conn.execute(
+                """
+                INSERT INTO morning_items(owner_id, item_date, title, detail, status, priority, blocker, due_date, updated_by, created_at, updated_at, active)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,1)
+                """,
+                (owner_id, item_date, title, data.get("detail") or "", status, priority, data.get("blocker") or "", due_date, user["id"], now_iso(), now_iso()),
+            )
+            conn.execute("UPDATE morning_items SET root_id=? WHERE id=?", (cursor.lastrowid, cursor.lastrowid))
+            write_audit(conn, user, "morning.create", "morning_item", cursor.lastrowid, "早例会事项已创建", {"owner_id": owner_id, "item_date": item_date}, self.client_address[0])
+        return {"message": "早例会事项已创建", **self.list_morning_items({"date": [item_date]})}
+
+    def update_morning_item(self, item_id, user):
+        data = read_json(self)
+        fields = []
+        values = []
+        if "title" in data and not (data.get("title") or "").strip():
+            raise AppError(400, "事项标题不能为空")
+        for date_key in ("item_date", "due_date"):
+            if data.get(date_key):
+                try:
+                    dt.date.fromisoformat(data[date_key])
+                except ValueError:
+                    raise AppError(400, "日期格式不正确")
+                if date_key == "item_date" and is_past_date(data[date_key]):
+                    raise AppError(400, "已结束日期不能修改")
+        for key in ("title", "detail", "blocker", "due_date", "item_date"):
+            if key in data:
+                fields.append(f"{key}=?")
+                values.append((data.get(key) or "").strip() if key == "title" else data.get(key) or "")
+        if "status" in data:
+            if data["status"] not in MORNING_STATUSES:
+                raise AppError(400, "事项状态不正确")
+            fields.append("status=?")
+            values.append(data["status"])
+        if "priority" in data:
+            if data["priority"] not in MORNING_PRIORITIES:
+                raise AppError(400, "优先级不正确")
+            fields.append("priority=?")
+            values.append(data["priority"])
+        if "owner_id" in data and user["role"] == "admin":
+            fields.append("owner_id=?")
+            values.append(int(data["owner_id"]))
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        fields.extend(["updated_by=?", "updated_at=?"])
+        values.extend([user["id"], now_iso(), item_id])
+        with connect() as conn:
+            item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
+            if not item:
+                raise AppError(404, "早例会事项不存在")
+            if is_past_date(item["item_date"]):
+                raise AppError(400, "已结束日期不能修改")
+            if user["role"] != "admin" and item["owner_id"] != user["id"]:
+                raise AppError(403, "只能更新自己的早例会事项")
+            conn.execute(f"UPDATE morning_items SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(conn, user, "morning.update", "morning_item", item_id, "早例会事项已更新", {"fields": list(data.keys())}, self.client_address[0])
+            date_row = conn.execute("SELECT item_date FROM morning_items WHERE id=?", (item_id,)).fetchone()
+        return {"message": "早例会事项已更新", **self.list_morning_items({"date": [date_row["item_date"]]})}
+
+    def delete_morning_item(self, item_id, user):
+        with connect() as conn:
+            item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
+            if not item:
+                raise AppError(404, "早例会事项不存在")
+            if is_past_date(item["item_date"]):
+                raise AppError(400, "已结束日期不能删除")
+            if user["role"] != "admin" and item["owner_id"] != user["id"]:
+                raise AppError(403, "只能删除自己的早例会事项")
+            conn.execute("UPDATE morning_items SET active=0, updated_by=?, updated_at=? WHERE id=?", (user["id"], now_iso(), item_id))
+            write_audit(conn, user, "morning.delete", "morning_item", item_id, "早例会事项已删除", {"item_date": item["item_date"]}, self.client_address[0])
+        return {"message": "早例会事项已删除", **self.list_morning_items({"date": [item["item_date"]]})}
 
     def list_rules(self, query):
         clauses = ["1=1"]
@@ -2168,8 +2803,26 @@ class Handler(BaseHTTPRequestHandler):
 
 def permissions_for(user):
     is_admin = bool(user and user.get("role") == "admin")
+    if not user:
+        modules = sorted(PUBLIC_MODULES)
+    else:
+        with connect() as conn:
+            modules = [
+                row["module_key"]
+                for row in conn.execute(
+                    """
+                    SELECT module_key
+                    FROM module_permissions
+                    WHERE user_type_key=? AND can_view=1
+                    ORDER BY module_key
+                    """,
+                    (user.get("user_type") or "internal",),
+                ).fetchall()
+            ]
     return {
         "isAdmin": is_admin,
+        "userType": user.get("user_type") if user else "guest",
+        "modules": modules,
         "canManageUsers": is_admin,
         "canPublishRules": is_admin,
         "canRecordScores": is_admin,

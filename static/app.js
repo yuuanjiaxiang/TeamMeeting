@@ -14,11 +14,18 @@ const state = {
   linkCategories: [],
   links: [],
   meetings: [],
+  morningItems: [],
+  morningUsers: [],
+  morningReadOnly: false,
+  morningCarriedCount: 0,
+  userTypes: [],
+  moduleCatalog: [],
   settings: [],
   backups: [],
   auditLogs: [],
   shifts: [],
   currentPage: "members",
+  morningDate: iso(new Date()),
   shiftMonth: new Date(),
   selectedShiftDate: iso(new Date()),
   meetingMonth: new Date(),
@@ -34,6 +41,7 @@ const state = {
 const pages = [
   ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队对话都在这里。"],
   ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
+  ["morning", "☀", "早例会", "按人追踪当天事项、风险和下一步。"],
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
   ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
@@ -98,8 +106,19 @@ function isGuest() {
 
 function canAccessPage(id) {
   if (isGuest()) return guestPages.has(id);
-  if (!isAdminView() && ["users", "system"].includes(id)) return false;
-  return true;
+  if (isAdminView()) return true;
+  if (["users", "system"].includes(id)) return false;
+  const modules = state.permissions?.modules;
+  if (!Array.isArray(modules)) return true;
+  return modules.includes(id);
+}
+
+function firstAccessiblePage() {
+  return pages.find(([id]) => canAccessPage(id))?.[0] || (isGuest() ? "members" : "morning");
+}
+
+function canLoadModule(id) {
+  return canAccessPage(id) || isAdminView();
 }
 
 function setViewMode(mode) {
@@ -170,6 +189,8 @@ function setDefaultDates() {
   if (shiftEndDate && !shiftEndDate.value) shiftEndDate.value = state.selectedShiftDate;
   const meetingDate = $('input[name="meeting_date"]');
   if (meetingDate) meetingDate.value = state.selectedMeetingDate;
+  const morningDate = $("#morningDate");
+  if (morningDate && !morningDate.value) morningDate.value = state.morningDate;
   const generateStart = $('input[name="start_date"]');
   if (generateStart) generateStart.value = mondayOf(state.selectedMeetingDate);
 }
@@ -276,7 +297,7 @@ function applyAuthView() {
   $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest);
   $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest);
   if (!canAccessPage(state.currentPage)) {
-    switchPage("members");
+    switchPage(firstAccessiblePage());
   } else {
     renderPageToolbar();
     renderNav();
@@ -291,7 +312,7 @@ function renderNav() {
 }
 
 function switchPage(id) {
-  if (!canAccessPage(id)) id = "members";
+  if (!canAccessPage(id)) id = firstAccessiblePage();
   if (isGuest()) {
     state.showLogin = false;
     $("#loginView")?.classList.add("hidden");
@@ -308,24 +329,43 @@ function switchPage(id) {
 }
 
 async function loadReferenceData() {
-  const [members, rules, machines, linkCategories] = await Promise.all([
-    api("/api/members"),
-    api("/api/rules"),
-    api("/api/machines"),
-    api("/api/link-categories"),
-  ]);
-  state.members = members.members;
-  state.rules = rules.rules;
-  state.machines = machines.machines;
-  state.linkCategories = linkCategories.categories;
-  if (isGuest()) {
-    state.topics = [];
+  const tasks = [];
+  if (canLoadModule("members")) {
+    tasks.push(api("/api/members").then((data) => { state.members = data.members; }));
   } else {
-    state.topics = (await api("/api/meeting-topics")).types;
+    state.members = [];
+  }
+  if (canLoadModule("rules")) {
+    tasks.push(api("/api/rules").then((data) => { state.rules = data.rules; }));
+  } else {
+    state.rules = [];
+  }
+  if (canLoadModule("shifts")) {
+    tasks.push(api("/api/machines").then((data) => { state.machines = data.machines; }));
+  } else {
+    state.machines = [];
+  }
+  if (canLoadModule("links")) {
+    tasks.push(api("/api/link-categories").then((data) => { state.linkCategories = data.categories; }));
+  } else {
+    state.linkCategories = [];
+  }
+  if (!isGuest() && canLoadModule("meetings")) {
+    tasks.push(api("/api/meeting-topics").then((data) => { state.topics = data.types; }));
+  } else {
+    state.topics = [];
   }
   if (isAdminView()) {
-    state.users = (await api("/api/users")).users;
+    tasks.push(api("/api/users").then((data) => { state.users = data.users; }));
+    tasks.push(api("/api/user-types").then((data) => {
+      state.userTypes = data.types;
+      state.moduleCatalog = data.modules;
+    }));
   } else {
+    state.users = [];
+  }
+  await Promise.all(tasks);
+  if (!isAdminView() && state.members.length) {
     state.users = state.members
       .filter((member) => member.user_id)
       .map((member) => ({ id: member.user_id, display_name: member.linked_user || member.name, active: 1, role: "user" }));
@@ -334,7 +374,8 @@ async function loadReferenceData() {
 }
 
 function populateSelects() {
-  const activeUsers = state.users.filter((user) => user.active !== 0);
+  const selectUsers = state.users.length ? state.users : state.morningUsers.map((user) => ({ ...user, active: 1 }));
+  const activeUsers = selectUsers.filter((user) => user.active !== 0);
   const userOptions = activeUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
@@ -342,8 +383,11 @@ function populateSelects() {
   const thankOptions = activeUsers.filter((user) => user.id !== state.user?.id).map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
   const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
+  const userTypeOptions = state.userTypes.map((type) => `<option value="${escapeHtml(type.key)}">${escapeHtml(type.name)}</option>`).join("");
 
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
+  $$("[data-morning-users]").forEach((select) => { select.innerHTML = userOptions; });
+  $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
   $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
   $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
@@ -409,17 +453,352 @@ async function loadDashboard() {
   $("#thanksRank").innerHTML = renderRank(thanks.stars, "thanks", "次");
 }
 
+const morningStatusMeta = {
+  todo: ["待处理", "status-todo"],
+  doing: ["进行中", "status-doing"],
+  risk: ["有风险", "status-risk"],
+  done: ["已完成", "status-done"],
+};
+
+const morningPriorityMeta = {
+  low: "低",
+  normal: "中",
+  high: "高",
+};
+
+const meetingItemStatusMeta = {
+  todo: ["待处理", "status-todo"],
+  doing: ["进行中", "status-doing"],
+  done: ["已完成", "status-done"],
+};
+
+function renderMorningStatusOptions(selected) {
+  return Object.entries(morningStatusMeta)
+    .map(([value, meta]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${meta[0]}</option>`)
+    .join("");
+}
+
+function renderMorningPriorityOptions(selected) {
+  return Object.entries(morningPriorityMeta)
+    .map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`)
+    .join("");
+}
+
+function renderMeetingItemStatusOptions(selected) {
+  return Object.entries(meetingItemStatusMeta)
+    .map(([value, meta]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${meta[0]}</option>`)
+    .join("");
+}
+
+function isMorningDue(item) {
+  return item.status !== "done" && item.due_date && item.due_date <= state.morningDate;
+}
+
+function morningRiskItems(items = state.morningItems) {
+  return items
+    .filter((item) => item.status === "risk" || item.blocker || item.priority === "high" || isMorningDue(item))
+    .sort((a, b) => {
+      const score = (item) => (item.status === "risk" ? 4 : 0) + (item.blocker ? 3 : 0) + (isMorningDue(item) ? 2 : 0) + (item.priority === "high" ? 1 : 0);
+      return score(b) - score(a);
+    });
+}
+
+function renderMorningFocus() {
+  const target = $("#morningFocusList");
+  if (!target) return;
+  const risks = morningRiskItems().slice(0, 4);
+  target.innerHTML = risks.length
+    ? `<strong>今日风险重点</strong>${risks.map((item) => `
+        <span class="morning-focus-chip ${item.status === "risk" ? "is-risk" : ""}">
+          ${escapeHtml(item.owner_name || "未分配")} · ${escapeHtml(item.title)}
+          ${item.blocker ? `｜风险：${escapeHtml(item.blocker)}` : ""}
+        </span>
+      `).join("")}`
+    : `<strong>今日风险重点</strong><span class="morning-focus-chip">暂无明确风险，按清单推进即可</span>`;
+}
+
+function renderMorningSummary() {
+  const totals = { todo: 0, doing: 0, risk: 0, done: 0 };
+  state.morningItems.forEach((item) => { totals[item.status] = (totals[item.status] || 0) + 1; });
+  const total = state.morningItems.length;
+  const activeTotal = state.morningItems.filter((item) => item.status !== "done").length;
+  const dueTotal = state.morningItems.filter(isMorningDue).length;
+  $("#morningStats").innerHTML = `
+    <div class="morning-stat status-total">
+      <span>总事项</span>
+      <strong>${total}</strong>
+    </div>
+    <div class="morning-stat status-active">
+      <span>未完成</span>
+      <strong>${activeTotal}</strong>
+    </div>
+    <div class="morning-stat status-risk">
+      <span>风险</span>
+      <strong>${totals.risk || 0}</strong>
+    </div>
+    <div class="morning-stat status-due">
+      <span>到期/逾期</span>
+      <strong>${dueTotal}</strong>
+    </div>
+    <div class="morning-stat status-carried">
+      <span>自动带入</span>
+      <strong>${state.morningCarriedCount || 0}</strong>
+    </div>`;
+  renderMorningFocus();
+}
+
+function renderMorningBoard() {
+  const board = $("#morningBoard");
+  if (!board) return;
+  const users = state.morningUsers.length ? state.morningUsers : state.users;
+  if (!users.length) {
+    board.innerHTML = "<p>暂无成员数据</p>";
+    return;
+  }
+  let ownerFilter = $("#morningOwnerFilter")?.value || "";
+  const statusFilter = $("#morningStatusFilter")?.value || "";
+  const ownerOptions = `<option value="">全部成员</option>${users.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("")}`;
+  const ownerSelect = $("#morningOwnerFilter");
+  if (ownerSelect) {
+    const current = ownerSelect.value;
+    ownerSelect.innerHTML = ownerOptions;
+    ownerSelect.value = users.some((user) => String(user.id) === String(current)) ? current : "";
+    ownerFilter = ownerSelect.value;
+  }
+  const byOwner = {};
+  const filteredItems = state.morningItems.filter((item) => {
+    if (ownerFilter && String(item.owner_id) !== String(ownerFilter)) return false;
+    if (statusFilter && item.status !== statusFilter) return false;
+    return true;
+  });
+  filteredItems.forEach((item) => {
+    byOwner[item.owner_id] = byOwner[item.owner_id] || [];
+    byOwner[item.owner_id].push(item);
+  });
+  const visibleUsers = users.filter((user) => !ownerFilter || String(user.id) === String(ownerFilter));
+  board.innerHTML = visibleUsers.map((user) => {
+    const items = byOwner[user.id] || [];
+    const personSummary = {
+      active: items.filter((item) => item.status !== "done").length,
+      risk: items.filter((item) => item.status === "risk" || item.blocker).length,
+      done: items.filter((item) => item.status === "done").length,
+    };
+    return `
+      <section class="morning-person-row">
+        <div class="morning-person-head">
+          <div>
+            <strong>${escapeHtml(user.display_name)}</strong>
+            <span>账号 ${escapeHtml(user.username || "")}</span>
+          </div>
+          <div class="morning-person-summary">
+            <span>全部 ${items.length}</span>
+            <span>未完成 ${personSummary.active}</span>
+            <span class="${personSummary.risk ? "is-risk" : ""}">风险 ${personSummary.risk}</span>
+            <span>完成 ${personSummary.done}</span>
+          </div>
+        </div>
+        <div class="morning-list-head">
+          <span>状态</span>
+          <span>事项点</span>
+          <span>今日进展 / 下一步</span>
+          <span>风险 / 到期</span>
+          <span>操作</span>
+        </div>
+        <div class="morning-item-stack">
+          ${items.length ? items.map(renderMorningItem).join("") : `<p class="empty-note">当天暂无匹配事项</p>`}
+        </div>
+      </section>
+    `;
+  }).join("");
+}
+
+function canEditMorningItem(item) {
+  return !state.morningReadOnly && (isAdminView() || Number(item.owner_id) === Number(state.user?.id));
+}
+
+function renderMorningItem(item) {
+  const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+  const canEdit = canEditMorningItem(item);
+  const durationText = `从 ${shortDate(item.start_date || item.item_date)} 开始 · 持续 ${Number(item.duration_days || 1)} 天`;
+  const dueText = item.due_date ? `${isMorningDue(item) ? "到期需处理" : "到期"} ${shortDate(item.due_date)}` : "未设到期";
+  const riskText = item.blocker ? item.blocker : (item.status === "risk" ? "请补充风险说明" : "暂无风险");
+  return `
+    <article class="morning-item-card morning-list-item ${statusClass}" data-morning-history-id="${item.id}">
+      ${canEdit ? `
+        <form class="morning-item-form morning-list-item-form" data-item-id="${item.id}">
+          <div class="morning-status-cell">
+            <div class="morning-badge-stack">
+              <span class="morning-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+              <span class="morning-badge priority-${escapeHtml(item.priority || "normal")}">优先级 ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</span>
+              <span class="morning-badge source">${escapeHtml(durationText)}</span>
+            </div>
+            <select name="status">${renderMorningStatusOptions(item.status)}</select>
+            <select name="priority">${renderMorningPriorityOptions(item.priority)}</select>
+          </div>
+          <input name="title" value="${escapeHtml(item.title)}" placeholder="事项点" required>
+          <textarea name="detail" placeholder="今日进展 / 下一步">${escapeHtml(item.detail || "")}</textarea>
+          <div class="morning-risk-cell">
+            <input name="blocker" value="${escapeHtml(item.blocker || "")}" placeholder="风险说明">
+            <input name="due_date" type="date" value="${escapeHtml(item.due_date || item.item_date)}">
+            <small class="${isMorningDue(item) ? "risk-text" : ""}">${escapeHtml(dueText)}</small>
+          </div>
+          <div class="morning-item-actions">
+            <button type="submit">保存</button>
+            <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
+            <button class="danger morning-delete-btn" type="button" data-item-id="${item.id}">删除</button>
+          </div>
+        </form>
+      ` : `
+        <div class="morning-status-cell">
+          <div class="morning-badge-stack">
+            <span class="morning-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+            <span class="morning-badge priority-${escapeHtml(item.priority || "normal")}">优先级 ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</span>
+            <span class="morning-badge source">${escapeHtml(durationText)}</span>
+          </div>
+        </div>
+        <div>
+          <strong>${escapeHtml(item.title)}</strong>
+          <small>更新 ${escapeHtml(shortDateTime(item.updated_at || item.created_at))}</small>
+        </div>
+        <p>${escapeHtml(item.detail || "暂无进展说明")}</p>
+        <div>
+          <p class="${item.blocker || item.status === "risk" ? "risk-text" : ""}">风险：${escapeHtml(riskText)}</p>
+          <small class="${isMorningDue(item) ? "risk-text" : ""}">${escapeHtml(dueText)}</small>
+        </div>
+        <div class="morning-item-actions">
+          <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
+          <span class="pill">${state.morningReadOnly ? "历史只读" : "只读"}</span>
+        </div>
+      `}
+    </article>
+  `;
+}
+
+function closeMorningHistoryModal() {
+  const modal = $("#morningHistoryModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function renderMorningHistory(data) {
+  const item = data.item || {};
+  const history = data.history || [];
+  const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+  const title = $("#morningHistoryTitle");
+  const subtitle = $("#morningHistorySubtitle");
+  const meta = $("#morningHistoryMeta");
+  const list = $("#morningHistoryList");
+  if (title) title.textContent = item.title || "事项进展";
+  if (subtitle) {
+    subtitle.textContent = `${item.owner_name || "负责人"} · 从 ${shortDate(item.start_date || item.item_date)} 开始 · 持续 ${Number(item.duration_days || 1)} 天`;
+  }
+  if (meta) {
+    meta.innerHTML = `
+      <span class="morning-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+      <span class="morning-badge priority-${escapeHtml(item.priority || "normal")}">优先级 ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</span>
+      <span class="morning-badge source">开始 ${escapeHtml(shortDate(item.start_date || item.item_date))}</span>
+      <span class="morning-badge source">持续 ${Number(item.duration_days || 1)} 天</span>
+    `;
+  }
+  if (!list) return;
+  if (!history.length) {
+    list.innerHTML = `<p class="empty-note">这条事项还没有手动更新记录。自动带入但未更新的日期不会展示。</p>`;
+    return;
+  }
+  list.innerHTML = history.map((row) => {
+    const [rowStatusLabel, rowStatusClass] = morningStatusMeta[row.status] || morningStatusMeta.todo;
+    return `
+      <article class="morning-history-entry ${rowStatusClass}">
+        <div class="morning-history-date">
+          <strong>${escapeHtml(shortDate(row.item_date))}</strong>
+          <span>${escapeHtml(row.updated_by_name || row.owner_name || "成员")} 更新于 ${escapeHtml(shortDateTime(row.updated_at || row.created_at))}</span>
+        </div>
+        <div class="morning-history-content">
+          <span class="morning-badge ${rowStatusClass}">${escapeHtml(rowStatusLabel)}</span>
+          <h3>${escapeHtml(row.title || item.title || "事项")}</h3>
+          <p>${escapeHtml(row.detail || "暂无进展说明")}</p>
+          ${row.blocker ? `<p class="risk-text">风险：${escapeHtml(row.blocker)}</p>` : ""}
+          <small>到期 ${escapeHtml(shortDate(row.due_date || row.item_date))} · 持续第 ${Number(row.duration_days || 1)} 天</small>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+async function openMorningHistory(itemId) {
+  const modal = $("#morningHistoryModal");
+  if (!modal || !itemId) return;
+  $("#morningHistoryTitle").textContent = "事项进展";
+  $("#morningHistorySubtitle").textContent = "正在加载...";
+  $("#morningHistoryMeta").innerHTML = "";
+  $("#morningHistoryList").innerHTML = `<p class="empty-note">正在加载进展记录...</p>`;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  const data = await api(`/api/morning-items/${itemId}/history`);
+  renderMorningHistory(data);
+}
+
+function renderMorning() {
+  const dateInput = $("#morningDate");
+  if (dateInput) dateInput.value = state.morningDate;
+  if (isAdminView()) {
+    $("#morningOwnerField")?.classList.remove("hidden");
+  } else {
+    $("#morningOwnerField")?.classList.add("hidden");
+  }
+  const createPanel = $("#morningCreatePanel");
+  if (createPanel) createPanel.classList.toggle("hidden", state.morningReadOnly);
+  const hint = $("#morningLockHint");
+  if (hint) {
+    hint.classList.toggle("hidden", false);
+    hint.textContent = state.morningReadOnly
+      ? "当前日期已结束，早例会记录已锁定，只能查看不能修改。"
+      : state.morningCarriedCount > 0
+        ? `已自动带入 ${state.morningCarriedCount} 条未完成事项。`
+        : "未完成事项会持续跟踪，进入新一天时自动带入。";
+  }
+  renderMorningSummary();
+  renderMorningBoard();
+  populateSelects();
+}
+
+async function loadMorning() {
+  if (!canLoadModule("morning")) return;
+  const date = $("#morningDate")?.value || state.morningDate || iso(new Date());
+  state.morningDate = date;
+  const data = await api(`/api/morning-items?date=${encodeURIComponent(date)}`);
+  state.morningItems = data.items;
+  state.morningUsers = data.users;
+  state.morningReadOnly = Boolean(data.read_only);
+  state.morningCarriedCount = Number(data.carried_count || 0);
+  renderMorning();
+}
+
 async function loadUsers() {
   if (!isAdminView()) return;
-  const data = await api("/api/users");
+  const [data, typeData] = await Promise.all([
+    api("/api/users"),
+    api("/api/user-types"),
+  ]);
   state.users = data.users;
+  state.userTypes = typeData.types;
+  state.moduleCatalog = typeData.modules;
   $("#userList").innerHTML = renderUserTable(data.users);
+  renderUserTypePermissions();
   populateSelects();
+}
+
+function renderUserTypeOptions(selected) {
+  const options = state.userTypes.length ? state.userTypes : [{ key: "internal", name: "内部成员" }, { key: "partner", name: "合作方" }];
+  return options.map((type) => `<option value="${escapeHtml(type.key)}" ${type.key === selected ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("");
 }
 
 function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
-  return `<table><thead><tr><th>账号</th><th>姓名 / 角色</th><th>密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  return `<table><thead><tr><th>账号</th><th>姓名 / 角色</th><th>用户类型</th><th>密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
       <td>${escapeHtml(user.username)}</td>
       <td>
@@ -431,12 +810,43 @@ function renderUserTable(users) {
           </select>
         </form>
       </td>
+      <td><select form="userEdit${user.id}" name="user_type">${renderUserTypeOptions(user.user_type || "internal")}</select></td>
       <td><input form="userEdit${user.id}" class="user-password-input" name="password" placeholder="不修改则留空"></td>
       <td>
         <button form="userEdit${user.id}" type="submit">保存</button>
         ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
       </td>
     </tr>`).join("")}</tbody></table>`;
+}
+
+function renderUserTypePermissions() {
+  const target = $("#userTypePermissionList");
+  if (!target) return;
+  if (!state.userTypes.length || !state.moduleCatalog.length) {
+    target.innerHTML = "<p>暂无用户类型配置</p>";
+    return;
+  }
+  target.innerHTML = state.userTypes.map((type) => {
+    const selected = new Set(type.modules || []);
+    return `
+      <form class="permission-card user-type-permission-form" data-type-key="${escapeHtml(type.key)}">
+        <div>
+          <strong>${escapeHtml(type.name)}</strong>
+          <p>${escapeHtml(type.description || "")}</p>
+        </div>
+        <div class="permission-grid">
+          ${state.moduleCatalog.map((module) => `
+            <label class="permission-check">
+              <input type="checkbox" name="modules" value="${escapeHtml(module.key)}" ${selected.has(module.key) ? "checked" : ""}>
+              <span>${escapeHtml(module.name)}</span>
+              <small>${escapeHtml(module.description || "")}</small>
+            </label>
+          `).join("")}
+        </div>
+        <button type="submit">保存 ${escapeHtml(type.name)} 权限</button>
+      </form>
+    `;
+  }).join("");
 }
 
 async function loadSystemAdmin() {
@@ -650,6 +1060,21 @@ function renderCustomTopicForm(meeting) {
     </form>`;
 }
 
+function renderMeetingMinuteSummary(item) {
+  const [statusLabel, statusClass] = meetingItemStatusMeta[item.status] || meetingItemStatusMeta.todo;
+  const hasMinuteContent = Boolean(item.minutes || item.open_issues || item.next_steps);
+  return `
+    <div class="minute-summary ${hasMinuteContent ? "" : "is-empty"}">
+      <div class="minute-summary-head">
+        <span class="morning-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+        <span>${hasMinuteContent ? "已记录纪要" : "待记录纪要"}</span>
+      </div>
+      ${item.minutes ? `<p><strong>纪要：</strong>${escapeHtml(item.minutes)}</p>` : `<p>暂无纪要，点击按钮记录本议题讨论结论。</p>`}
+      ${item.open_issues ? `<p><strong>遗留：</strong>${escapeHtml(item.open_issues)}</p>` : ""}
+      ${item.next_steps ? `<p><strong>下一步：</strong>${escapeHtml(item.next_steps)}</p>` : ""}
+    </div>`;
+}
+
 function renderMeetingItem(item) {
   const meta = [
     item.owner_name || "",
@@ -665,14 +1090,57 @@ function renderMeetingItem(item) {
       <div class="topic-auto-summary">
         Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
       </div>` : `
-      <form class="minute-form" data-item-id="${item.id}">
-      <select name="owner_id">${renderUserOptions(item.owner_id)}</select>
-      <textarea name="minutes" placeholder="输入本议题会议纪要">${escapeHtml(item.minutes || "")}</textarea>
-      <textarea name="open_issues" placeholder="本议题遗留问题">${escapeHtml(item.open_issues || "")}</textarea>
-      <textarea name="next_steps" placeholder="下一步行动或处理计划">${escapeHtml(item.next_steps || "")}</textarea>
-      <button>保存纪要</button>
-    </form>`}
+      ${renderMeetingMinuteSummary(item)}
+      <button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "编辑纪要" : "记录纪要"}</button>`}
   </div>`;
+}
+
+function findMeetingItemContext(itemId) {
+  for (const meeting of state.meetings) {
+    const item = (meeting.items || []).find((entry) => Number(entry.id) === Number(itemId));
+    if (item) return { meeting, item };
+  }
+  return { meeting: null, item: null };
+}
+
+function closeMeetingMinuteModal() {
+  const modal = $("#meetingMinuteModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function openMeetingMinuteModal(itemId) {
+  const { meeting, item } = findMeetingItemContext(itemId);
+  const modal = $("#meetingMinuteModal");
+  const form = $("#meetingMinuteForm");
+  if (!meeting || !item || !modal || !form) return;
+  form.dataset.itemId = item.id;
+  form.dataset.meetingId = meeting.id;
+  form.reset();
+  form.elements.owner_id.innerHTML = renderUserOptions(item.owner_id);
+  form.elements.owner_id.value = item.owner_id ? String(item.owner_id) : "";
+  form.elements.status.innerHTML = renderMeetingItemStatusOptions(item.status || "todo");
+  form.elements.status.value = item.status || "todo";
+  form.elements.due_date.value = item.due_date || "";
+  form.elements.minutes.value = item.minutes || "";
+  form.elements.open_issues.value = item.open_issues || "";
+  form.elements.next_steps.value = item.next_steps || "";
+  $("#meetingMinuteTitle").textContent = item.minutes || item.open_issues || item.next_steps ? "编辑会议纪要" : "记录会议纪要";
+  $("#meetingMinuteSubtitle").textContent = `${meeting.meeting_date} · ${meeting.title}`;
+  $("#meetingMinuteContext").innerHTML = `
+    <h3>${escapeHtml(item.title)}</h3>
+    <p>${escapeHtml(item.detail || "暂无议题说明")}</p>
+    <div class="chip-list">
+      <span class="chip">${escapeHtml(item.type_name || item.section || "议题")}</span>
+      ${item.owner_name ? `<span class="chip">责任人 ${escapeHtml(item.owner_name)}</span>` : ""}
+      ${item.due_date ? `<span class="chip">截止 ${escapeHtml(shortDate(item.due_date))}</span>` : ""}
+    </div>`;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.minutes.focus();
 }
 
 function renderTopicBoard(meeting) {
@@ -844,7 +1312,7 @@ async function saveAttendanceForm(form) {
 }
 
 function meetingMinutesSubject(meeting) {
-  return `【周例会纪要】${meeting.meeting_date} ${meeting.title}`;
+  return `【会议纪要】${meeting.meeting_date} ${meeting.title}`;
 }
 
 function tableCell(value, fallback = "无") {
@@ -892,53 +1360,117 @@ function markdownTable(rows) {
   ].join("\r\n");
 }
 
+function markdownMatrix(headers, rows) {
+  return [
+    `| ${headers.map((item) => tableCell(item)).join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...rows.map((row) => `| ${row.map((item) => tableCell(item)).join(" | ")} |`),
+  ].join("\r\n");
+}
+
+function meetingStatusLabel(status) {
+  return meetingItemStatusMeta[status]?.[0] || "待处理";
+}
+
+function meetingMinuteRows(meeting, thankData = {}) {
+  const rows = (meeting.items || []).filter((item) => !isThankYouTopic(item)).map((item, index) => {
+    const topicName = item.type_name || item.section || "议题";
+    return [
+      index + 1,
+      topicName,
+      item.title,
+      item.minutes || "待补充",
+      item.open_issues || "无",
+      item.next_steps || "无",
+      item.owner_name || "未指定",
+      item.due_date || "无",
+      meetingStatusLabel(item.status),
+    ];
+  });
+  const summary = thankYouSummary(thankData);
+  rows.push([
+    rows.length + 1,
+    "Thank You",
+    "本周 Thank You",
+    summary.minutes,
+    summary.stars,
+    summary.details,
+    "系统自动汇总",
+    meeting.meeting_date,
+    "已汇总",
+  ]);
+  return rows;
+}
+
+function hasMeetingMinuteValue(value) {
+  const text = String(value ?? "").trim();
+  return Boolean(text) && !["无", "暂无", "未指定", "待补充", "暂无明细"].includes(text);
+}
+
+function meetingTopicTableRows(row) {
+  const isThankYouRow = row[1] === "Thank You";
+  const rows = isThankYouRow
+    ? [
+        ["议题类型", row[1], true],
+        ["议题/事项", row[2], true],
+        ["纪要/结论", row[3]],
+        ["本周之星", row[4]],
+        ["感谢明细", row[5]],
+        ["来源", row[6]],
+        ["统计日期", row[7]],
+        ["状态", row[8]],
+      ]
+    : [
+        ["议题类型", row[1], true],
+        ["议题/事项", row[2], true],
+        ["纪要/结论", row[3]],
+        ["遗留问题", row[4]],
+        ["下一步行动", row[5]],
+        ["责任人", row[6]],
+        ["完成时间", row[7]],
+        ["状态", row[8]],
+      ];
+  return rows.filter(([, value, required]) => required || hasMeetingMinuteValue(value)).map(([label, value]) => [label, value]);
+}
+
 function buildMeetingMinutesText(meeting, thankData = {}) {
   const attendance = groupAttendance(meeting);
+  const rows = meetingMinuteRows(meeting, thankData);
+  const pendingCount = meetingPendingCount(rows);
+  const attendeeCount = meetingAttendanceCount(meeting);
   const lines = [
     meetingMinutesSubject(meeting),
     "",
+    "战情概览",
+    "",
     markdownTable([
-      ["会议名称", meeting.title],
-      ["会议时间", meeting.meeting_date],
+      ["会议日期", meeting.meeting_date],
+      ["与会人数", `${attendeeCount} 人`],
+      ["待闭环", `${pendingCount} 项`],
       ["与会人", attendance.present],
       ["请假/缺席/迟到", attendance.exceptions],
       ["主持人", meeting.creator || "未记录"],
-      ["会议摘要", meeting.summary || "无"],
+      ...(hasMeetingMinuteValue(meeting.summary) ? [["会议摘要", meeting.summary]] : []),
     ]),
     "",
-    "一、议题纪要",
+    "一、按议题维度纪要与行动闭环",
     "",
   ];
-  if (!meeting.items.length) {
+  if (!rows.length) {
     lines.push("暂无议题。");
     return lines.join("\r\n");
   }
-  meeting.items.forEach((item, index) => {
-    const topicName = item.type_name || item.section || "议题";
-    lines.push(`${index + 1}. ${topicName} - ${item.title}`);
-    if (isThankYouTopic(item)) {
-      const summary = thankYouSummary(thankData);
-      lines.push(markdownTable([
-        ["议题类型", "Thank You"],
-        ["议题内容", item.title],
-        ["会议纪要", summary.minutes],
-        ["本周之星", summary.stars],
-        ["明细", summary.details],
-        ["遗留问题", "无需人工记录，如需跟进请转为普通议题。"],
-      ]));
-    } else {
-      lines.push(markdownTable([
-        ["议题类型", topicName],
-        ["议题内容", item.title],
-        ["责任人", item.owner_name || "未指定"],
-        ["会议纪要", item.minutes || "待补充"],
-        ["遗留问题", item.open_issues || "无"],
-        ["下一步", item.next_steps || "无"],
-        ["截止时间", item.due_date || "无"],
-      ]));
-    }
+  rows.forEach((row) => {
+    lines.push(`议题 ${row[0]}：${row[2]}`);
+    lines.push("");
+    lines.push(markdownTable(meetingTopicTableRows(row)));
     lines.push("");
   });
+  lines.push("二、会后跟踪要求");
+  lines.push("");
+  lines.push("1. 请各责任人按完成时间推进闭环，逾期事项需在下次例会说明原因和调整计划。");
+  lines.push("2. 遗留问题默认进入下次会议跟踪，已关闭事项需补充结论或证据。");
+  lines.push("3. 本纪要以行动闭环为准，如内容有误请在当日内反馈修订。");
   return lines.join("\r\n");
 }
 
@@ -947,48 +1479,91 @@ function htmlCell(value, fallback = "无") {
 }
 
 function htmlTable(rows) {
-  return `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:14px;">
-    <tbody>${rows.map(([label, value]) => `<tr><th style="width:120px;background:#f6f8fa;text-align:left;">${htmlCell(label)}</th><td>${htmlCell(value)}</td></tr>`).join("")}</tbody>
+  return `<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:14px;border-color:#d9dfe7;">
+    <tbody>${rows.map(([label, value]) => `<tr><th style="width:130px;background:#f6f8fa;text-align:left;color:#172033;">${htmlCell(label)}</th><td>${htmlCell(value)}</td></tr>`).join("")}</tbody>
   </table>`;
+}
+
+function htmlMatrixTable(headers, rows) {
+  return `<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:13px;border-color:#d9dfe7;">
+    <thead><tr>${headers.map((item) => `<th style="background:#eef3f8;color:#172033;text-align:left;">${htmlCell(item)}</th>`).join("")}</tr></thead>
+    <tbody>${rows.map((row) => `<tr>${row.map((item, index) => `<td style="${index === 0 ? "text-align:center;" : ""}vertical-align:top;">${htmlCell(item)}</td>`).join("")}</tr>`).join("")}</tbody>
+  </table>`;
+}
+
+function meetingAttendanceCount(meeting) {
+  const present = (meeting.attendance || []).filter((item) => item.status === "present").length;
+  if (present) return present;
+  const names = groupAttendance(meeting).present;
+  return names && names !== "暂无签到记录" ? names.split("、").filter(Boolean).length : 0;
+}
+
+function meetingPendingCount(rows) {
+  return rows.filter((row) => !["已完成", "已汇总"].includes(row[8])).length;
+}
+
+function htmlTopicTable(rows) {
+  return `<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:14px;border-color:#d9dfe7;">
+    <tbody>${rows.map(([label, value]) => {
+      const warn = ["遗留问题", "风险"].includes(label);
+      return `<tr>
+        <th style="width:130px;background:${warn ? "#fff7f7" : "#eef3f8"};text-align:left;color:#172033;">${htmlCell(label)}</th>
+        <td style="background:${warn ? "#fff7f7" : "#fff"};vertical-align:top;">${htmlCell(value)}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>`;
+}
+
+function htmlTopicSections(rows) {
+  return rows.map((row) => `
+    <section style="margin:14px 0 16px;padding:14px;border:1px solid #d9dfe7;background:#fff;">
+      <h3 style="margin:0 0 10px;font-size:15px;color:#172033;">
+        <span style="display:inline-block;min-width:26px;height:26px;line-height:26px;text-align:center;border-radius:999px;background:#c7000b;color:#fff;margin-right:8px;font-weight:700;">${htmlCell(row[0])}</span>
+        ${htmlCell(row[2])}
+        <span style="display:inline-block;border:1px solid #d9dfe7;border-radius:999px;padding:2px 8px;margin-left:6px;font-size:12px;font-weight:400;background:#fff;">${htmlCell(row[1])}</span>
+        ${hasMeetingMinuteValue(row[8]) ? `<span style="display:inline-block;border:1px solid #d9dfe7;border-radius:999px;padding:2px 8px;margin-left:4px;font-size:12px;font-weight:400;background:#fff;">${htmlCell(row[8])}</span>` : ""}
+      </h3>
+      ${htmlTopicTable(meetingTopicTableRows(row))}
+    </section>
+  `).join("");
 }
 
 function buildMeetingMinutesHtml(meeting, thankData = {}) {
   const attendance = groupAttendance(meeting);
-  const sections = meeting.items.length ? meeting.items.map((item, index) => {
-    const topicName = item.type_name || item.section || "议题";
-    if (isThankYouTopic(item)) {
-      const summary = thankYouSummary(thankData);
-      return `<h3>${index + 1}. ${htmlCell(topicName)} - ${htmlCell(item.title)}</h3>${htmlTable([
-        ["议题类型", "Thank You"],
-        ["议题内容", item.title],
-        ["会议纪要", summary.minutes],
-        ["本周之星", summary.stars],
-        ["明细", summary.details],
-        ["遗留问题", "无需人工记录，如需跟进请转为普通议题。"],
-      ])}`;
-    }
-    return `<h3>${index + 1}. ${htmlCell(topicName)} - ${htmlCell(item.title)}</h3>${htmlTable([
-      ["议题类型", topicName],
-      ["议题内容", item.title],
-      ["责任人", item.owner_name || "未指定"],
-      ["会议纪要", item.minutes || "待补充"],
-      ["遗留问题", item.open_issues || "无"],
-      ["下一步", item.next_steps || "无"],
-      ["截止时间", item.due_date || "无"],
-    ])}`;
-  }).join("") : "<p>暂无议题。</p>";
-  return `<article style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#172033;">
-    <h2>${htmlCell(meetingMinutesSubject(meeting))}</h2>
-    ${htmlTable([
-      ["会议名称", meeting.title],
-      ["会议时间", meeting.meeting_date],
-      ["与会人", attendance.present],
-      ["请假/缺席/迟到", attendance.exceptions],
-      ["主持人", meeting.creator || "未记录"],
-      ["会议摘要", meeting.summary || "无"],
-    ])}
-    <h2>一、议题纪要</h2>
-    ${sections}
+  const rows = meetingMinuteRows(meeting, thankData);
+  const pendingCount = meetingPendingCount(rows);
+  const attendeeCount = meetingAttendanceCount(meeting);
+  return `<article style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#172033;line-height:1.6;">
+    <h1 style="margin:0 0 18px;font-size:22px;background:#fff7f7;border-top:4px solid #c7000b;padding:16px;">${htmlCell(meetingMinutesSubject(meeting))}</h1>
+    ${hasMeetingMinuteValue(attendance.present) ? `<p style="margin:0 0 12px;color:#445066;">与会人：${htmlCell(attendance.present)}</p>` : ""}
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:12px 0 18px;">
+      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
+        <span style="display:block;color:#6b7280;font-size:12px;">会议日期</span>
+        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${htmlCell(shortDate(meeting.meeting_date))}</strong>
+      </div>
+      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
+        <span style="display:block;color:#6b7280;font-size:12px;">与会人</span>
+        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${attendeeCount} 人</strong>
+      </div>
+      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
+        <span style="display:block;color:#6b7280;font-size:12px;">待闭环</span>
+        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${pendingCount} 项</strong>
+      </div>
+    </div>
+    ${attendance.exceptions !== "无" || hasMeetingMinuteValue(meeting.summary) ? `
+      <div style="border:1px solid #d9dfe7;background:#fff;padding:12px;margin:0 0 16px;">
+        ${attendance.exceptions !== "无" ? `<p style="margin:0 0 6px;"><strong>请假/缺席/迟到：</strong>${htmlCell(attendance.exceptions)}</p>` : ""}
+        ${hasMeetingMinuteValue(meeting.summary) ? `<p style="margin:0;"><strong>会议摘要：</strong>${htmlCell(meeting.summary)}</p>` : ""}
+      </div>
+    ` : ""}
+    <h2 style="margin:18px 0 8px;font-size:17px;">一、按议题维度纪要与行动闭环</h2>
+    ${rows.length ? htmlTopicSections(rows) : "<p>暂无议题。</p>"}
+    <h2 style="margin:18px 0 8px;font-size:17px;">二、会后跟踪要求</h2>
+    <ol style="margin-top:8px;padding-left:22px;">
+      <li>请各责任人按完成时间推进闭环，逾期事项需在下次例会说明原因和调整计划。</li>
+      <li>遗留问题默认进入下次会议跟踪，已关闭事项需补充结论或证据。</li>
+      <li>本纪要以行动闭环为准，如内容有误请在当日内反馈修订。</li>
+    </ol>
   </article>`;
 }
 
@@ -1013,18 +1588,16 @@ async function openMeetingEmail(meetingId) {
   const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingId));
   if (!meeting) throw new Error("请先选择会议");
   const weekStart = mondayOf(meeting.meeting_date);
-  const needsThankYou = meeting.items.some(isThankYouTopic);
-  const thankData = needsThankYou
-    ? {
-        votes: (await api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`)).votes,
-        stars: (await api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`)).stars,
-      }
-    : { votes: [], stars: [] };
+  const [thankVotes, thankDashboard] = await Promise.all([
+    api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+    api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+  ]);
+  const thankData = { votes: thankVotes.votes, stars: thankDashboard.stars };
   const text = buildMeetingMinutesText(meeting, thankData);
   const html = buildMeetingMinutesHtml(meeting, thankData);
   const copied = await copyMeetingMinutes(html, text);
-  window.location.href = `mailto:?subject=${encodeURIComponent(meetingMinutesSubject(meeting))}&body=${encodeURIComponent(text)}`;
-  toast(copied ? "已复制表格纪要并打开邮件草稿" : "已打开邮件草稿");
+  window.location.href = `mailto:?subject=${encodeURIComponent(meetingMinutesSubject(meeting))}`;
+  toast(copied ? "已复制表格纪要，请在 Outlook 正文中粘贴" : "已打开邮件草稿，纪要复制失败请重试");
 }
 
 function renderMeetingCalendar(meetings) {
@@ -1427,16 +2000,15 @@ async function loadThanks() {
 
 async function refreshAll() {
   await loadReferenceData();
-  const loaders = [
-    loadRulesAndScores,
-    loadMembers,
-    loadLinks,
-    loadShifts,
-    loadThanks,
-  ];
-  if (!isGuest()) {
-    loaders.push(loadDashboard, loadMeetings);
-  }
+  const loaders = [];
+  if (canLoadModule("rules")) loaders.push(loadRulesAndScores);
+  if (canLoadModule("members")) loaders.push(loadMembers);
+  if (canLoadModule("morning")) loaders.push(loadMorning);
+  if (canLoadModule("links")) loaders.push(loadLinks);
+  if (canLoadModule("shifts")) loaders.push(loadShifts);
+  if (canLoadModule("thanks")) loaders.push(loadThanks);
+  if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
+  if (!isGuest() && canLoadModule("meetings")) loaders.push(loadMeetings);
   if (isAdminView()) {
     loaders.push(loadUsers, loadSystemAdmin);
   }
@@ -1505,6 +2077,7 @@ async function submitUserEditForm(form) {
   if (Number(form.dataset.userId) === Number(state.user?.id)) {
     state.user.display_name = data.display_name || state.user.display_name;
     if (data.role) state.user.role = data.role;
+    if (data.user_type) state.user.user_type = data.user_type;
     applyAuthView();
   }
 }
@@ -1826,8 +2399,8 @@ function bindEvents() {
   });
   $("#viewModeBtn").addEventListener("click", async () => {
     setViewMode(isAdminView() ? "user" : "admin");
-    if (!isAdminView() && ["users", "system"].includes(state.currentPage)) {
-      switchPage("members");
+    if (!canAccessPage(state.currentPage)) {
+      switchPage(firstAccessiblePage());
     }
     applyAuthView();
     await refreshAll();
@@ -1845,6 +2418,12 @@ function bindEvents() {
   bindForm("#scoreForm", (data) => api("/api/scores", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#meetingForm", (data) => api("/api/meetings", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#meetingGenerateForm", (data) => api("/api/meetings/bulk-generate", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#morningItemForm", (data) => {
+    if (state.morningReadOnly) throw new Error("历史日期只读，不能新增");
+    const payload = { ...data, item_date: state.morningDate };
+    if (!isAdminView()) delete payload.owner_id;
+    return api("/api/morning-items", { method: "POST", body: JSON.stringify(payload) });
+  });
   bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicOptionForm", (data) => api("/api/meeting-topic-options", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(prepareLinkPayload(data)) }));
@@ -1859,6 +2438,12 @@ function bindEvents() {
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
   $("#linkStatusFilter").addEventListener("change", renderLinks);
   $("#linkKeywordSearch").addEventListener("input", renderLinks);
+  $("#morningDate")?.addEventListener("change", async (event) => {
+    state.morningDate = event.target.value || iso(new Date());
+    await loadMorning().catch((error) => toast(error.message));
+  });
+  $("#morningOwnerFilter")?.addEventListener("change", renderMorningBoard);
+  $("#morningStatusFilter")?.addEventListener("change", renderMorningBoard);
   const linkForm = $("#linkForm");
   if (linkForm) {
     ["title", "url", "description"].forEach((name) => {
@@ -1892,7 +2477,11 @@ function bindEvents() {
   }
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeMemberEditModal();
+    if (event.key === "Escape") {
+      closeMemberEditModal();
+      closeMorningHistoryModal();
+      closeMeetingMinuteModal();
+    }
   });
 
   document.body.addEventListener("click", (event) => {
@@ -1903,6 +2492,35 @@ function bindEvents() {
     }
     if (event.target.closest("[data-member-modal-close]") || event.target === $("#memberEditModal")) {
       closeMemberEditModal();
+      return;
+    }
+    if (event.target.closest("[data-morning-history-close]") || event.target === $("#morningHistoryModal")) {
+      closeMorningHistoryModal();
+      return;
+    }
+    if (event.target.closest("[data-meeting-minute-close]") || event.target === $("#meetingMinuteModal")) {
+      closeMeetingMinuteModal();
+      return;
+    }
+    const meetingMinuteButton = event.target.closest(".meeting-minute-btn");
+    if (meetingMinuteButton) {
+      openMeetingMinuteModal(meetingMinuteButton.dataset.itemId);
+      return;
+    }
+    const morningHistoryButton = event.target.closest(".morning-history-btn");
+    if (morningHistoryButton) {
+      openMorningHistory(morningHistoryButton.dataset.morningHistoryId).catch((error) => {
+        closeMorningHistoryModal();
+        toast(error.message);
+      });
+      return;
+    }
+    const morningHistoryRow = event.target.closest(".morning-list-item[data-morning-history-id]");
+    if (morningHistoryRow && !event.target.closest("button, input, textarea, select, label, form")) {
+      openMorningHistory(morningHistoryRow.dataset.morningHistoryId).catch((error) => {
+        closeMorningHistoryModal();
+        toast(error.message);
+      });
       return;
     }
     const attendanceStatus = event.target.closest(".attendance-status-btn");
@@ -1930,6 +2548,23 @@ function bindEvents() {
     }
     if (!event.target.closest(".chat-reaction-wrap")) {
       closeReactionPopover();
+    }
+    const morningDelete = event.target.closest(".morning-delete-btn");
+    if (morningDelete) {
+      if (state.morningReadOnly) {
+        toast("历史日期只读，不能删除");
+        return;
+      }
+      if (!window.confirm("确定删除这条早例会事项吗？")) return;
+      api(`/api/morning-items/${morningDelete.dataset.itemId}`, { method: "DELETE" })
+        .then((data) => {
+          state.morningItems = data.items || state.morningItems;
+          state.morningUsers = data.users || state.morningUsers;
+          renderMorning();
+          toast("早例会事项已删除");
+        })
+        .catch((error) => toast(error.message));
+      return;
     }
     const chatReplyToggle = event.target.closest(".chat-reply-toggle");
     if (chatReplyToggle) {
@@ -2055,9 +2690,40 @@ function bindEvents() {
     const presetForm = event.target.closest(".preset-form");
     const linkQualityForm = event.target.closest(".link-quality-form");
     const chatReplyForm = event.target.closest(".chat-reply-form");
-    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm) return;
+    const morningItemForm = event.target.closest(".morning-item-form");
+    const permissionForm = event.target.closest(".user-type-permission-form");
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm && !morningItemForm && !permissionForm) return;
     event.preventDefault();
     try {
+      if (permissionForm) {
+        const modules = new FormData(permissionForm).getAll("modules");
+        const data = await api(`/api/user-types/${permissionForm.dataset.typeKey}/permissions`, {
+          method: "PATCH",
+          body: JSON.stringify({ modules }),
+        });
+        state.userTypes = data.types || state.userTypes;
+        state.moduleCatalog = data.modules || state.moduleCatalog;
+        if (data.permissions) state.permissions = data.permissions;
+        renderUserTypePermissions();
+        applyAuthView();
+        toast("用户类型权限已保存");
+        return;
+      }
+      if (morningItemForm) {
+        if (state.morningReadOnly) {
+          toast("历史日期只读，不能修改");
+          return;
+        }
+        const data = await api(`/api/morning-items/${morningItemForm.dataset.itemId}`, {
+          method: "PATCH",
+          body: JSON.stringify(fullFormData(morningItemForm)),
+        });
+        state.morningItems = data.items || state.morningItems;
+        state.morningUsers = data.users || state.morningUsers;
+        renderMorning();
+        toast("早例会事项已保存");
+        return;
+      }
       if (chatReplyForm) {
         const data = await api(`/api/team-posts/${chatReplyForm.dataset.postId}/replies`, { method: "POST", body: JSON.stringify(formData(chatReplyForm)) });
         renderTeamChat(data.posts, true);
@@ -2092,6 +2758,7 @@ function bindEvents() {
       }
       if (minuteForm) {
         await api(`/api/meeting-items/${minuteForm.dataset.itemId}`, { method: "PATCH", body: JSON.stringify(fullFormData(minuteForm)) });
+        closeMeetingMinuteModal();
       }
       if (presetForm) {
         await api(`/api/meeting-topic-options/${presetForm.dataset.optionId}`, { method: "PATCH", body: JSON.stringify(fullFormData(presetForm)) });

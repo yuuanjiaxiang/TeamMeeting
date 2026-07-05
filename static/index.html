@@ -42,12 +42,12 @@
             <h1>团队协同周例会</h1>
             <p>成员、会议、排班、积分和感谢，都收在一个清爽的工作台里。</p>
             <form id="loginForm" class="form-grid">
-              <label>账号<input name="username" value="admin" autocomplete="username" /></label>
-              <label>密码<input name="password" value="admin123" type="password" autocomplete="current-password" /></label>
+              <label>账号<input name="username" autocomplete="username" /></label>
+              <label>密码<input name="password" type="password" autocomplete="current-password" /></label>
               <button type="submit">登录</button>
             </form>
             <button id="guestBrowseBtn" class="secondary" type="button">访客浏览</button>
-            <small>默认账号：admin/admin123，user/user123</small>
+            <small>请使用管理员分配的账号登录。</small>
           </div>
         </section>
 
@@ -99,6 +99,51 @@
             </div>
           </div>
 
+          <div id="morningHistoryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="morningHistoryTitle">
+            <div class="modal-card morning-history-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="morningHistoryTitle">事项进展</h2>
+                  <p id="morningHistorySubtitle">按日期查看这条事项每次实际更新的内容。</p>
+                </div>
+                <button class="modal-close" type="button" data-morning-history-close aria-label="关闭">×</button>
+              </div>
+              <div id="morningHistoryMeta" class="morning-history-meta"></div>
+              <div id="morningHistoryList" class="morning-history-list"></div>
+            </div>
+          </div>
+
+          <div id="meetingMinuteModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="meetingMinuteTitle">
+            <div class="modal-card meeting-minute-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="meetingMinuteTitle">记录会议纪要</h2>
+                  <p id="meetingMinuteSubtitle">按议题补充纪要、遗留问题和下一步动作。</p>
+                </div>
+                <button class="modal-close" type="button" data-meeting-minute-close aria-label="关闭">×</button>
+              </div>
+              <div id="meetingMinuteContext" class="meeting-minute-context"></div>
+              <form id="meetingMinuteForm" class="minute-form meeting-minute-modal-form">
+                <div class="meeting-minute-fields">
+                  <label>责任人<select name="owner_id"></select></label>
+                  <label>状态<select name="status">
+                    <option value="todo">待处理</option>
+                    <option value="doing">进行中</option>
+                    <option value="done">已完成</option>
+                  </select></label>
+                  <label>到期时间<input name="due_date" type="date" /></label>
+                </div>
+                <label>会议纪要<textarea name="minutes" placeholder="记录本议题结论、确认事项或关键讨论过程"></textarea></label>
+                <label>遗留问题<textarea name="open_issues" placeholder="还有哪些未解决问题、风险或待确认信息"></textarea></label>
+                <label>下一步<textarea name="next_steps" placeholder="下一步行动、负责人协同事项或处理计划"></textarea></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-meeting-minute-close>取消</button>
+                  <button type="submit">保存纪要</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="members" class="page active">
             <section class="member-layout" id="memberList"></section>
             <section class="panel team-chat-panel">
@@ -135,6 +180,69 @@
                 <div id="thanksRank" class="rank-list"></div>
               </section>
             </div>
+          </section>
+
+          <section id="morning" class="page">
+            <section class="panel morning-hero">
+              <div class="panel-title">
+                <div>
+                  <h2>早例会看板</h2>
+                  <p>每天开会前先看每个人手里的事情：做什么、风险是什么、下一步是什么。</p>
+                </div>
+                <label class="date-chip">日期<input id="morningDate" type="date" /></label>
+              </div>
+              <div id="morningStats" class="morning-stats"></div>
+              <div id="morningFocusList" class="morning-focus-list"></div>
+              <div id="morningLockHint" class="morning-lock-hint hidden"></div>
+            </section>
+
+            <section class="panel" id="morningCreatePanel">
+              <div class="panel-title">
+                <div>
+                  <h2>登记个人事项点</h2>
+                  <p>一行只写一个点：要推进什么、今天怎么推进、风险是什么。</p>
+                </div>
+              </div>
+              <form id="morningItemForm" class="morning-create-form">
+                <label id="morningOwnerField" class="admin-only">负责人<select name="owner_id" data-morning-users></select></label>
+                <input name="title" placeholder="事项点，例如：TOPTB 夜班温控波动确认" required />
+                <select name="status">
+                  <option value="todo">待处理</option>
+                  <option value="doing">进行中</option>
+                  <option value="risk">有风险</option>
+                  <option value="done">已完成</option>
+                </select>
+                <select name="priority">
+                  <option value="normal">优先级中</option>
+                  <option value="high">优先级高</option>
+                  <option value="low">优先级低</option>
+                </select>
+                <input name="due_date" type="date" />
+                <textarea name="detail" placeholder="今日进展 / 下一步"></textarea>
+                <input name="blocker" placeholder="风险说明，没有可留空" />
+                <button>新增到早例会</button>
+              </form>
+            </section>
+
+            <section class="panel morning-list-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>人员事项清单</h2>
+                  <p>未完成事项会自动带到新一天；历史日期只读，用来复盘当时状态和风险。</p>
+                </div>
+                <div class="morning-list-tools">
+                  <select id="morningOwnerFilter"></select>
+                  <select id="morningStatusFilter">
+                    <option value="">全部状态</option>
+                    <option value="todo">待处理</option>
+                    <option value="doing">进行中</option>
+                    <option value="risk">有风险</option>
+                    <option value="done">已完成</option>
+                  </select>
+                </div>
+              </div>
+              <div id="morningBoard" class="morning-list"></div>
+            </section>
           </section>
 
           <section id="meetings" class="page">
@@ -390,10 +498,20 @@
                 <input name="username" placeholder="账号" required />
                 <input name="display_name" placeholder="姓名" required />
                 <select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+                <select name="user_type" data-user-types></select>
                 <input name="password" placeholder="初始密码，默认 123456" />
                 <button>新增用户</button>
               </form>
               <div id="userList" class="table"></div>
+            </section>
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>用户类型权限</h2>
+                  <p>角色决定能不能管理，用户类型决定普通视图能看见哪些模块。合作方可只开放早例会、常用链接等模块。</p>
+                </div>
+              </div>
+              <div id="userTypePermissionList" class="permission-list"></div>
             </section>
           </section>
 

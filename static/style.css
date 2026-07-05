@@ -475,6 +475,385 @@ main {
   font-size: 26px;
 }
 
+.morning-hero .panel-title {
+  align-items: center;
+}
+
+.date-chip {
+  min-width: 180px;
+}
+
+.morning-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.morning-stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+  box-shadow: var(--shadow-soft);
+}
+
+.morning-stat span {
+  display: block;
+  font-size: 13px;
+}
+
+.morning-stat strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+}
+
+.morning-stat.status-risk,
+.morning-stat.status-due {
+  background: #fff7f7;
+  border-color: #ffd0cc;
+}
+
+.morning-stat.status-carried {
+  background: #f7fbff;
+}
+
+.morning-focus-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.morning-focus-list strong {
+  color: var(--ink);
+}
+
+.morning-focus-chip {
+  display: inline-flex;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.morning-focus-chip.is-risk {
+  border-color: #ffd0cc;
+  background: #fff1f0;
+  color: var(--red);
+  font-weight: 700;
+}
+
+.morning-create-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.4fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr) minmax(140px, 0.7fr);
+  gap: 9px;
+  align-items: end;
+}
+
+.morning-create-form textarea,
+.morning-create-form input[name="blocker"],
+.morning-create-form button {
+  grid-column: span 2;
+}
+
+.morning-lock-hint {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px 12px;
+  color: var(--muted);
+}
+
+.morning-list-panel .panel-title {
+  align-items: center;
+}
+
+.morning-list-tools {
+  display: flex;
+  gap: 8px;
+  min-width: min(420px, 100%);
+}
+
+.morning-list {
+  display: grid;
+  gap: 12px;
+}
+
+.morning-person-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  padding: 14px;
+  box-shadow: var(--shadow-soft);
+  min-width: 0;
+}
+
+.morning-person-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.morning-person-head strong,
+.morning-person-head span {
+  display: block;
+}
+
+.morning-person-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.morning-person-summary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border-radius: 999px;
+  background: #f3f5f9;
+  padding: 0 10px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.morning-person-summary .is-risk {
+  background: #fff1f0;
+  color: var(--red);
+}
+
+.morning-item-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.morning-list-head,
+.morning-list-item,
+.morning-list-item-form {
+  display: grid;
+  grid-template-columns: 150px minmax(170px, 1.1fr) minmax(220px, 1.4fr) minmax(180px, 1fr) 116px;
+  gap: 10px;
+  align-items: start;
+}
+
+.morning-list-head {
+  margin-top: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 10px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.morning-item-card {
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.morning-list-item-form {
+  grid-column: 1 / -1;
+  cursor: default;
+}
+
+.morning-status-cell,
+.morning-risk-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.morning-badge-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.morning-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 24px;
+  border-radius: 999px;
+  background: #f3f5f9;
+  color: var(--ink);
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.morning-badge.status-risk,
+.morning-badge.priority-high {
+  background: #fff1f0;
+  color: var(--red);
+}
+
+.morning-badge.status-doing {
+  background: #fff7e6;
+  color: #a15c00;
+}
+
+.morning-badge.status-done {
+  background: #e9fbf2;
+  color: #087b4f;
+}
+
+.morning-badge.source {
+  background: #eef4ff;
+  color: var(--blue);
+}
+
+.morning-list-item strong,
+.morning-list-item small {
+  display: block;
+}
+
+.morning-list-item p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.morning-item-card.status-risk {
+  border-left-color: var(--red);
+  background: #fff7f7;
+}
+
+.morning-item-card.status-doing {
+  border-left-color: var(--orange);
+}
+
+.morning-item-card.status-done {
+  border-left-color: var(--green);
+  background: #f7fffb;
+}
+
+.morning-item-head,
+.morning-item-actions,
+.morning-inline-fields {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.morning-item-actions button {
+  flex: 1;
+  min-width: 0;
+}
+
+.morning-item-actions .pill {
+  white-space: nowrap;
+}
+
+.morning-item-head {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.morning-item-form {
+  display: grid;
+  gap: 8px;
+}
+
+.morning-inline-fields > * {
+  flex: 1;
+}
+
+.morning-history-modal-card {
+  width: min(760px, 100%);
+}
+
+.morning-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.morning-history-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(520px, calc(100vh - 260px));
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.morning-history-entry {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.morning-history-entry.status-risk {
+  border-left-color: var(--red);
+  background: #fff7f7;
+}
+
+.morning-history-entry.status-doing {
+  border-left-color: var(--orange);
+}
+
+.morning-history-entry.status-done {
+  border-left-color: var(--green);
+  background: #f7fffb;
+}
+
+.morning-history-date {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.morning-history-date strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.morning-history-content {
+  display: grid;
+  gap: 8px;
+}
+
+.morning-history-content h3,
+.morning-history-content p {
+  margin: 0;
+}
+
+.morning-history-content h3 {
+  font-size: 16px;
+}
+
+.risk-text {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.empty-note {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  text-align: center;
+}
+
 .form-row,
 .form-grid {
   display: grid;
@@ -1331,6 +1710,80 @@ th {
   background: #fbfcff;
 }
 
+.meeting-minute-modal-card {
+  width: min(720px, 100%);
+}
+
+.meeting-minute-context {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.meeting-minute-context h3,
+.meeting-minute-context p {
+  margin: 0;
+}
+
+.meeting-minute-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px 160px;
+  gap: 8px;
+}
+
+.meeting-minute-modal-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.meeting-minute-modal-form textarea {
+  min-height: 96px;
+}
+
+.minute-summary {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px;
+}
+
+.minute-summary.is-empty {
+  border-style: dashed;
+  background: #fff;
+}
+
+.minute-summary-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.minute-summary-head span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.minute-summary p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.meeting-minute-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .topic-auto-summary {
   margin-top: 10px;
   border: 1px solid var(--line);
@@ -1916,6 +2369,58 @@ th {
 .link-quality-form button {
   flex: 0 0 58px;
   padding-inline: 10px;
+}
+
+.permission-list {
+  display: grid;
+  gap: 12px;
+}
+
+.permission-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.permission-card p {
+  margin: 4px 0 0;
+}
+
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.permission-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px;
+}
+
+.permission-check input {
+  width: auto;
+  min-height: auto;
+  margin-top: 3px;
+}
+
+.permission-check span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.permission-check small {
+  grid-column: 2;
+  line-height: 1.4;
 }
 
 .user-inline-form {
@@ -3097,6 +3602,14 @@ body[data-theme="dingtalk"] .meeting-workbench {
   .link-toolbar,
   .settings-grid,
   .attendance-row,
+  .morning-board,
+  .morning-list-head,
+  .morning-list-item,
+  .morning-list-item-form,
+  .morning-list-tools,
+  .morning-create-form,
+  .permission-grid,
+  .morning-stats,
   body[data-theme] .split,
   body[data-theme] .member-layout,
   body[data-theme] .shift-layout,
@@ -3111,8 +3624,22 @@ body[data-theme="dingtalk"] .meeting-workbench {
   body[data-theme] .preset-row,
   body[data-theme] .link-toolbar,
   body[data-theme] .settings-grid,
-  body[data-theme] .attendance-row {
+  body[data-theme] .attendance-row,
+  body[data-theme] .morning-board,
+  body[data-theme] .morning-list-head,
+  body[data-theme] .morning-list-item,
+  body[data-theme] .morning-list-item-form,
+  body[data-theme] .morning-list-tools,
+  body[data-theme] .morning-create-form,
+  body[data-theme] .permission-grid,
+  body[data-theme] .morning-stats {
     grid-template-columns: 1fr;
+  }
+
+  .morning-create-form textarea,
+  .morning-create-form input[name="blocker"],
+  .morning-create-form button {
+    grid-column: auto;
   }
 
   .user-inline-form,
@@ -3308,6 +3835,25 @@ body[data-theme="dingtalk"] .meeting-workbench {
   .attendance-donation {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .morning-inline-fields,
+  .morning-item-actions,
+  .morning-item-head,
+  .morning-list-tools,
+  .morning-history-entry,
+  .meeting-minute-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .morning-list-head {
+    display: none;
+  }
+
+  .date-chip {
+    min-width: 0;
   }
 
   .donation-received {
