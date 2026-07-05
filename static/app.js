@@ -153,6 +153,15 @@ function shortDate(value) {
   return `${prefix}${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
+function compactDate(value) {
+  if (!value) return "";
+  const date = new Date(String(value).replace(" ", "T"));
+  if (Number.isNaN(date.getTime())) return String(value).slice(5, 10).replace("-", "/");
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  const prefix = sameYear ? "" : `${date.getFullYear()}/`;
+  return `${prefix}${date.getMonth() + 1}/${date.getDate()}`;
+}
+
 function shortDateTime(value) {
   if (!value) return "";
   const date = new Date(String(value).replace(" ", "T"));
@@ -619,7 +628,7 @@ function canEditMorningItem(item) {
 function renderMorningItem(item) {
   const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
   const canEdit = canEditMorningItem(item);
-  const durationText = `从 ${shortDate(item.start_date || item.item_date)} 开始 · 持续 ${Number(item.duration_days || 1)} 天`;
+  const durationText = `${compactDate(item.start_date || item.item_date)}起 · ${Number(item.duration_days || 1)}天`;
   const dueText = item.due_date ? `${isMorningDue(item) ? "到期需处理" : "到期"} ${shortDate(item.due_date)}` : "未设到期";
   const riskText = item.blocker ? item.blocker : (item.status === "risk" ? "请补充风险说明" : "暂无风险");
   return `
