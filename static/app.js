@@ -295,6 +295,7 @@ function applyAuthView() {
   const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
   $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
   $("#logoutBtn")?.classList.toggle("hidden", guest);
+  $("#passwordBtn")?.classList.toggle("hidden", guest);
   $("#loginEntryBtn")?.classList.toggle("hidden", !guest || showLogin);
   const viewModeBtn = $("#viewModeBtn");
   if (viewModeBtn) {
@@ -2243,6 +2244,26 @@ function setMemberAvatarPreview(src = "", fallback = "?") {
   preview.classList.toggle("has-image", Boolean(src));
 }
 
+function closePasswordModal() {
+  const modal = $("#passwordModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function openPasswordModal() {
+  if (isGuest()) return;
+  const modal = $("#passwordModal");
+  const form = $("#passwordForm");
+  if (!modal || !form) return;
+  form.reset();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.old_password?.focus();
+}
+
 function closeMemberEditModal() {
   const modal = $("#memberEditModal");
   if (!modal) return;
@@ -2388,6 +2409,8 @@ function bindEvents() {
     applyAuthView();
   });
 
+  $("#passwordBtn")?.addEventListener("click", openPasswordModal);
+
   $("#guestBrowseBtn")?.addEventListener("click", async () => {
     state.showLogin = false;
     applyAuthView();
@@ -2487,6 +2510,7 @@ function bindEvents() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      closePasswordModal();
       closeMemberEditModal();
       closeMorningHistoryModal();
       closeMeetingMinuteModal();
@@ -2501,6 +2525,10 @@ function bindEvents() {
     }
     if (event.target.closest("[data-member-modal-close]") || event.target === $("#memberEditModal")) {
       closeMemberEditModal();
+      return;
+    }
+    if (event.target.closest("[data-password-modal-close]") || event.target === $("#passwordModal")) {
+      closePasswordModal();
       return;
     }
     if (event.target.closest("[data-morning-history-close]") || event.target === $("#morningHistoryModal")) {
@@ -2701,9 +2729,20 @@ function bindEvents() {
     const chatReplyForm = event.target.closest(".chat-reply-form");
     const morningItemForm = event.target.closest(".morning-item-form");
     const permissionForm = event.target.closest(".user-type-permission-form");
-    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm && !morningItemForm && !permissionForm) return;
+    const passwordForm = event.target.closest("#passwordForm");
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm && !morningItemForm && !permissionForm && !passwordForm) return;
     event.preventDefault();
     try {
+      if (passwordForm) {
+        const data = fullFormData(passwordForm);
+        if ((data.new_password || "").length < 6) throw new Error("新密码至少 6 位");
+        if (data.new_password !== data.confirm_password) throw new Error("两次输入的新密码不一致");
+        await api("/api/me/password", { method: "PATCH", body: JSON.stringify(data) });
+        closePasswordModal();
+        passwordForm.reset();
+        toast("密码已更新");
+        return;
+      }
       if (permissionForm) {
         const modules = new FormData(permissionForm).getAll("modules");
         const data = await api(`/api/user-types/${permissionForm.dataset.typeKey}/permissions`, {

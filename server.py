@@ -1195,6 +1195,9 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.strip("/").split("/")
         self.require_module(user, self.module_for_path(path))
 
+        if path == "/api/me/password" and method == "PATCH":
+            return self.change_own_password(user)
+
         if path == "/api/user-types" and method == "GET":
             return self.list_user_types()
         if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "permissions" and method == "PATCH":
@@ -1376,6 +1379,34 @@ class Handler(BaseHTTPRequestHandler):
             "message": "已退出",
             "_headers": {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"},
         }
+
+    def change_own_password(self, user):
+        data = read_json(self)
+        old_password = data.get("old_password") or ""
+        new_password = data.get("new_password") or ""
+        confirm_password = data.get("confirm_password") or ""
+        if not old_password:
+            raise AppError(400, "请输入当前密码")
+        if len(new_password) < 6:
+            raise AppError(400, "新密码至少 6 位")
+        if new_password != confirm_password:
+            raise AppError(400, "两次输入的新密码不一致")
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT id, salt, password_hash FROM users WHERE id=? AND active=1",
+                (user["id"],),
+            ).fetchone()
+            if not row:
+                raise AppError(404, "当前用户不存在")
+            if not verify_password(old_password, row["salt"], row["password_hash"]):
+                raise AppError(400, "当前密码不正确")
+            salt, password_hash = make_hash(new_password)
+            conn.execute(
+                "UPDATE users SET salt=?, password_hash=? WHERE id=?",
+                (salt, password_hash, user["id"]),
+            )
+            write_audit(conn, user, "user.password", "user", user["id"], "用户修改了自己的密码", {}, self.client_address[0])
+        return {"message": "密码已更新"}
 
     def send_json(self, data, status=200, headers=None):
         headers = headers or {}

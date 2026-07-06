@@ -1455,6 +1455,20 @@ th {
   font-weight: 700;
 }
 
+.password-modal-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.password-modal-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .meeting-card {
   background: var(--panel);
   border: 1px solid var(--line);
