@@ -412,18 +412,22 @@ def ensure_morning_carryover(conn, item_date):
             """
             SELECT i.*
             FROM morning_items i
-            JOIN (
-                SELECT COALESCE(root_id, id) AS chain_id, MAX(item_date) AS max_date
-                FROM morning_items
-                WHERE active=1 AND item_date < ?
-                GROUP BY COALESCE(root_id, id)
-            ) latest
-              ON COALESCE(i.root_id, i.id)=latest.chain_id
-             AND i.item_date=latest.max_date
-            WHERE i.active=1 AND i.status!='done'
+            WHERE i.item_date < ?
+              AND i.active=1
+              AND i.status!='done'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM morning_items newer
+                  WHERE COALESCE(newer.root_id, newer.id)=COALESCE(i.root_id, i.id)
+                    AND newer.item_date < ?
+                    AND (
+                        newer.item_date > i.item_date
+                        OR (newer.item_date = i.item_date AND newer.id > i.id)
+                    )
+              )
             ORDER BY i.owner_id, i.id
             """,
-            (item_date,),
+            (item_date, item_date),
         ).fetchall()
     )
     carried_count = 0
@@ -433,7 +437,7 @@ def ensure_morning_carryover(conn, item_date):
             """
             SELECT id
             FROM morning_items
-            WHERE active=1 AND item_date=? AND COALESCE(root_id, id)=?
+            WHERE item_date=? AND COALESCE(root_id, id)=?
             """,
             (item_date, root_id),
         ).fetchone()
@@ -1183,6 +1187,8 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(403, "当前用户类型无权访问该模块")
 
     def route_api(self, method, path, query):
+        if path.startswith("/api/thank-you/") and method == "DELETE":
+            return self.delete_thank_you(int(path.rstrip("/").rsplit("/", 1)[-1]))
         if path == "/api/login" and method == "POST":
             return self.login()
         if path == "/api/logout" and method == "POST":
@@ -1193,6 +1199,15 @@ class Handler(BaseHTTPRequestHandler):
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
+
+        if path == "/api/team-posts":
+            if method == "POST":
+                return self.create_team_post(user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "replies" and method == "POST":
+            return self.create_team_post_reply(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
+            return self.toggle_team_post_reaction(int(parts[2]), user)
+
         self.require_module(user, self.module_for_path(path))
 
         if path == "/api/me/password" and method == "PATCH":
@@ -1322,6 +1337,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"votes": self.list_thank_you(query)}
             if method == "POST":
                 return self.create_thank_you(user)
+        if len(parts) == 3 and parts[:2] == ["api", "thank-you"] and method == "DELETE":
+            return self.delete_thank_you(int(parts[2]))
         if path == "/api/dashboards/thank-you" and method == "GET":
             return self.thank_you_dashboard(query)
 
@@ -1939,8 +1956,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "已结束日期不能删除")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
                 raise AppError(403, "只能删除自己的早例会事项")
-            conn.execute("UPDATE morning_items SET active=0, updated_by=?, updated_at=? WHERE id=?", (user["id"], now_iso(), item_id))
-            write_audit(conn, user, "morning.delete", "morning_item", item_id, "早例会事项已删除", {"item_date": item["item_date"]}, self.client_address[0])
+            chain_id = item["root_id"] or item["id"]
+            updated_at = now_iso()
+            cursor = conn.execute(
+                """
+                UPDATE morning_items
+                SET active=0, updated_by=?, updated_at=?
+                WHERE active=1
+                  AND item_date>=?
+                  AND COALESCE(root_id, id)=?
+                """,
+                (user["id"], updated_at, item["item_date"], chain_id),
+            )
+            write_audit(
+                conn,
+                user,
+                "morning.delete",
+                "morning_item",
+                item_id,
+                "早例会事项已删除",
+                {"item_date": item["item_date"], "chain_id": chain_id, "affected": cursor.rowcount},
+                self.client_address[0],
+            )
         return {"message": "早例会事项已删除", **self.list_morning_items({"date": [item["item_date"]]})}
 
     def list_rules(self, query):
@@ -2666,8 +2703,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_thank_you(self, user):
         data = read_json(self)
-        receiver_id = int(data.get("receiver_id"))
-        if receiver_id == user["id"]:
+        raw_receiver_ids = data.get("receiver_ids")
+        if raw_receiver_ids is None:
+            raw_receiver_ids = [data.get("receiver_id")]
+        if not isinstance(raw_receiver_ids, list):
+            raw_receiver_ids = [raw_receiver_ids]
+        receiver_ids = []
+        for raw_id in raw_receiver_ids:
+            try:
+                receiver_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if receiver_id not in receiver_ids:
+                receiver_ids.append(receiver_id)
+        if not receiver_ids:
+            raise AppError(400, "请选择感谢对象")
+        if user["id"] in receiver_ids:
             raise AppError(400, "不能给自己点赞")
         start = week_start(data.get("week_start") or today_iso())
         evidence = (data.get("evidence") or "").strip()
@@ -2676,14 +2727,75 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             weekly_limit = get_int_setting(conn, "thank_you_weekly_limit", 3, minimum=1, maximum=20)
             count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
-            if count >= weekly_limit:
-                raise AppError(400, f"本周最多点赞 {weekly_limit} 人")
-            conn.execute(
-                "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
-                (user["id"], receiver_id, start, evidence, now_iso()),
+            remaining = weekly_limit - count
+            if remaining <= 0 or len(receiver_ids) > remaining:
+                raise AppError(400, f"本周最多点赞 {weekly_limit} 人，当前还可感谢 {max(remaining, 0)} 人")
+            placeholders = ",".join("?" for _ in receiver_ids)
+            active_receivers = rows_to_list(
+                conn.execute(
+                    f"SELECT id, display_name FROM users WHERE active=1 AND id IN ({placeholders})",
+                    receiver_ids,
+                ).fetchall()
             )
-            write_audit(conn, user, "thank_you.create", "thank_you", receiver_id, "Thank You 已送达", {"receiver_id": receiver_id, "week_start": start}, self.client_address[0])
+            active_receiver_ids = {row["id"] for row in active_receivers}
+            if len(active_receiver_ids) != len(receiver_ids):
+                raise AppError(400, "感谢对象不存在或已停用")
+            existing = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT v.receiver_id, u.display_name
+                    FROM thank_you_votes v
+                    JOIN users u ON u.id = v.receiver_id
+                    WHERE v.voter_id=? AND v.week_start=? AND v.receiver_id IN ({placeholders})
+                    """,
+                    [user["id"], start, *receiver_ids],
+                ).fetchall()
+            )
+            if existing:
+                names = "、".join(row["display_name"] for row in existing)
+                raise AppError(400, f"本周已经感谢过：{names}")
+            created_at = now_iso()
+            for receiver_id in receiver_ids:
+                conn.execute(
+                    "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
+                    (user["id"], receiver_id, start, evidence, created_at),
+                )
+            write_audit(conn, user, "thank_you.create", "thank_you", None, "Thank You 已送达", {"receiver_ids": receiver_ids, "week_start": start}, self.client_address[0])
         return {"message": "Thank You 已送达", "votes": self.list_thank_you({"from": [start], "to": [start]})}
+
+    def delete_thank_you(self, vote_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            vote = conn.execute(
+                """
+                SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name
+                FROM thank_you_votes v
+                JOIN users giver ON giver.id = v.voter_id
+                JOIN users receiver ON receiver.id = v.receiver_id
+                WHERE v.id=?
+                """,
+                (vote_id,),
+            ).fetchone()
+            if not vote:
+                raise AppError(404, "感谢记录不存在")
+            conn.execute("DELETE FROM thank_you_votes WHERE id=?", (vote_id,))
+            write_audit(
+                conn,
+                admin,
+                "thank_you.delete",
+                "thank_you",
+                vote_id,
+                "Thank You 记录已删除",
+                {
+                    "voter_id": vote["voter_id"],
+                    "receiver_id": vote["receiver_id"],
+                    "week_start": vote["week_start"],
+                    "voter_name": vote["voter_name"],
+                    "receiver_name": vote["receiver_name"],
+                },
+                self.client_address[0],
+            )
+        return {"message": "感谢记录已删除"}
 
     def thank_you_dashboard(self, query):
         where, params = date_filter(query, "v.week_start")

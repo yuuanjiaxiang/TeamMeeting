@@ -59,6 +59,7 @@ const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "收到", "辛苦了", "已跟进"];
 const emojiDataSource = "/vendor/emoji-picker-element-data/zh/emojibase/data.json";
 let activeReactionPostId = null;
+let activePageRefreshId = 0;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -390,7 +391,8 @@ function populateSelects() {
   const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
-  const thankOptions = activeUsers.filter((user) => user.id !== state.user?.id).map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const thankUsers = activeUsers.filter((user) => user.id !== state.user?.id);
+  const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
   const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
   const userTypeOptions = state.userTypes.map((type) => `<option value="${escapeHtml(type.key)}">${escapeHtml(type.name)}</option>`).join("");
@@ -402,6 +404,17 @@ function populateSelects() {
   $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
   $$("[data-thank-users]").forEach((select) => { select.innerHTML = thankOptions; });
+  $$("[data-thank-users-checklist]").forEach((box) => {
+    const form = box.closest("form");
+    const selected = form ? new Set(new FormData(form).getAll("receiver_ids").map(String)) : new Set();
+    box.innerHTML = thankUsers.length
+      ? thankUsers.map((user) => `
+        <label class="check-chip">
+          <input type="checkbox" name="receiver_ids" value="${user.id}" ${selected.has(String(user.id)) ? "checked" : ""}>
+          <span>${escapeHtml(user.display_name)}</span>
+        </label>`).join("")
+      : '<p class="empty-note">暂无可感谢成员</p>';
+  });
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
   $$("[data-owner-users]").forEach((select) => {
     const current = select.value;
@@ -2001,11 +2014,53 @@ async function loadThanks() {
   ]);
   $("#thankStars").innerHTML = renderRank(dashboard.stars, "thanks", "次");
   $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
-    <div class="item">
-      <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
+    <div class="item thank-item">
+      <div class="thank-item-head">
+        <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
+        ${isAdminView() ? `<button class="danger thank-delete-btn" type="button" data-vote-id="${vote.id}" data-vote-title="${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}">删除</button>` : ""}
+      </div>
       <p>${escapeHtml(vote.evidence)}</p>
       <p class="thank-date-line">周次 ${escapeHtml(shortDate(vote.week_start))} · 送出 ${escapeHtml(shortDateTime(vote.created_at))}</p>
     </div>`).join("") : "<p>暂无感谢记录</p>";
+}
+
+function thankFormPayload(form) {
+  const data = fullFormData(form);
+  const receiverIds = new FormData(form).getAll("receiver_ids").filter(Boolean);
+  if (!receiverIds.length) throw new Error("请选择至少 1 位感谢对象");
+  return {
+    receiver_ids: receiverIds,
+    week_start: data.week_start,
+    evidence: data.evidence,
+  };
+}
+
+function canLoadPageData(id) {
+  if (id === "dashboard" || id === "meetings") return !isGuest() && canLoadModule(id);
+  if (id === "users" || id === "system") return isAdminView();
+  return canLoadModule(id);
+}
+
+async function refreshPageData(id = state.currentPage) {
+  const requestId = ++activePageRefreshId;
+  await loadReferenceData();
+  if (requestId !== activePageRefreshId) return;
+  if (!canLoadPageData(id)) return;
+  const loaders = {
+    members: loadMembers,
+    dashboard: loadDashboard,
+    morning: loadMorning,
+    meetings: loadMeetings,
+    shifts: loadShifts,
+    rules: loadRulesAndScores,
+    thanks: loadThanks,
+    links: loadLinks,
+    users: loadUsers,
+    system: loadSystemAdmin,
+  };
+  const loader = loaders[id];
+  if (loader) await loader();
+  renderNav();
 }
 
 async function refreshAll() {
@@ -2420,7 +2475,10 @@ function bindEvents() {
 
   $("#nav").addEventListener("click", (event) => {
     const button = event.target.closest("[data-page]");
-    if (button) switchPage(button.dataset.page);
+    if (button) {
+      switchPage(button.dataset.page);
+      refreshPageData(state.currentPage).catch((error) => toast(error.message));
+    }
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);
@@ -2462,7 +2520,7 @@ function bindEvents() {
   bindForm("#linkCategoryForm", (data) => api("/api/link-categories", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#machineForm", (data) => api("/api/machines", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
-  bindForm("#thankForm", (data) => api("/api/thank-you", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#thankForm", (_, form) => api("/api/thank-you", { method: "POST", body: JSON.stringify(thankFormPayload(form)) }));
   bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
@@ -2600,6 +2658,16 @@ function bindEvents() {
           renderMorning();
           toast("早例会事项已删除");
         })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const thankDelete = event.target.closest(".thank-delete-btn");
+    if (thankDelete) {
+      const title = thankDelete.dataset.voteTitle || "这条感谢记录";
+      if (!window.confirm(`确定删除 ${title} 吗？`)) return;
+      api(`/api/thank-you/${thankDelete.dataset.voteId}`, { method: "DELETE" })
+        .then(loadThanks)
+        .then(() => toast("感谢记录已删除"))
         .catch((error) => toast(error.message));
       return;
     }
