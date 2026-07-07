@@ -566,6 +566,10 @@ main {
   box-shadow: inset 0 0 0 2px rgba(51, 112, 255, 0.22);
 }
 
+.personal-calendar-day.focused-line-day {
+  z-index: 56;
+}
+
 .personal-calendar-date {
   font-weight: 800;
   font-size: 13px;
@@ -596,6 +600,8 @@ main {
   font-size: 0;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
   margin-inline: 7px;
+  overflow: visible;
+  cursor: pointer;
   z-index: 1;
 }
 
@@ -612,15 +618,109 @@ main {
 }
 
 .personal-calendar-line.highlighted {
-  min-height: 11px;
-  background: var(--line-color);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--line-color) 26%, transparent), 0 8px 18px rgba(15, 23, 42, 0.18);
-  filter: saturate(1.12);
-  z-index: 2;
+  min-height: 16px;
+  background: linear-gradient(90deg, #ffb000 0%, #ff6b00 100%);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 6px rgba(255, 176, 0, 0.42), 0 14px 28px rgba(255, 107, 0, 0.28);
+  filter: saturate(1.3) brightness(1.04);
+  outline: 2px solid #1f2937;
+  outline-offset: 1px;
+  z-index: 58;
+}
+
+.personal-line-popover {
+  position: absolute;
+  z-index: 60;
+  left: 50%;
+  bottom: calc(100% + 9px);
+  width: min(280px, calc(100vw - 42px));
+  display: grid;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--line-color) 42%, var(--line));
+  border-left: 4px solid var(--line-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+  max-height: 168px;
+  opacity: 0;
+  overflow-y: auto;
+  padding: 9px 10px;
+  pointer-events: none;
+  scrollbar-width: thin;
+  transform: translate(-50%, 6px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.personal-line-popover::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid color-mix(in srgb, var(--line-color) 42%, var(--line));
+  border-bottom: 1px solid color-mix(in srgb, var(--line-color) 42%, var(--line));
+  background: rgba(255, 255, 255, 0.98);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.personal-calendar-line:hover,
+.personal-calendar-line:focus-visible {
+  z-index: 61;
+}
+
+.personal-calendar-line:hover .personal-line-popover,
+.personal-calendar-line:focus-visible .personal-line-popover,
+.personal-calendar-line.highlighted .personal-line-popover {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.personal-calendar-line.highlighted .personal-line-popover {
+  top: calc(100% + 10px);
+  bottom: auto;
+  left: 0;
+  width: min(220px, calc(100vw - 42px));
+  border-color: #ffb000;
+  border-left-color: #ff6b00;
+  box-shadow: 0 22px 48px rgba(15, 23, 42, 0.22);
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.personal-calendar-line.highlighted .personal-line-popover::after {
+  top: -6px;
+  bottom: auto;
+  left: 18px;
+  border: 0;
+  border-left: 1px solid #ffb000;
+  border-top: 1px solid #ffb000;
+  transform: rotate(45deg);
+}
+
+.personal-line-popover strong,
+.personal-line-popover b,
+.personal-line-popover small {
+  color: inherit;
+  font-size: 12px;
+}
+
+.personal-line-popover strong {
+  color: var(--muted);
+}
+
+.personal-line-popover b {
+  font-size: 13px;
 }
 
 .personal-calendar-line.status-risk {
   box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.42);
+}
+
+.personal-calendar-line.highlighted.status-risk {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 6px rgba(255, 176, 0, 0.42), 0 14px 28px rgba(255, 107, 0, 0.28);
 }
 
 .personal-calendar-more {
@@ -685,12 +785,23 @@ main {
   border-radius: 8px;
   background: #fbfcff;
   padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.personal-calendar-popover-item:hover,
+.personal-calendar-popover-item:focus-visible {
+  border-color: color-mix(in srgb, var(--line-color) 50%, var(--line));
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.1);
+  outline: 0;
+  transform: translateY(-1px);
 }
 
 .personal-calendar-popover-item.active {
-  background: #f4f8ff;
-  border-color: color-mix(in srgb, var(--line-color) 42%, var(--line));
-  border-left-color: var(--line-color);
+  background: #fff8e6;
+  border-color: #ffb000;
+  border-left-color: #ff6b00;
+  box-shadow: 0 0 0 3px rgba(255, 176, 0, 0.16);
 }
 
 .personal-calendar-popover-item span,
@@ -703,6 +814,7 @@ main {
   display: grid;
   gap: 14px;
   align-content: start;
+  min-height: 0;
 }
 
 .personal-reminders h3 {
@@ -713,12 +825,16 @@ main {
 .personal-card-list {
   display: grid;
   gap: 10px;
+  min-height: 0;
 }
 
+#personalMorningActiveList,
 #personalMorningDoneList {
-  max-height: 420px;
+  max-height: clamp(360px, 48vh, 520px);
   overflow-y: auto;
   padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
@@ -731,6 +847,12 @@ main {
   background: #fff;
   padding: 11px;
   box-shadow: var(--shadow-soft);
+}
+
+.personal-reminder-card.calendar-focused,
+.personal-done-item.calendar-focused {
+  border-color: color-mix(in srgb, var(--line-color, var(--blue)) 48%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--line-color, var(--blue)) 16%, transparent), 0 12px 28px rgba(15, 23, 42, 0.1);
 }
 
 .personal-morning-form {
@@ -758,6 +880,16 @@ main {
   justify-content: space-between;
   align-items: flex-start;
   gap: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin: -3px -3px 0;
+  padding: 3px;
+  transition: background 0.16s ease;
+}
+
+.personal-reminder-card:hover .personal-card-head,
+.personal-reminder-card.calendar-focused .personal-card-head {
+  background: color-mix(in srgb, var(--line-color, var(--blue)) 10%, transparent);
 }
 
 .personal-card-head strong {

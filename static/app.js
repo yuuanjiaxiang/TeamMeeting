@@ -553,7 +553,10 @@ function latestByMorningChain(items = []) {
 
 function renderPersonalMorningCard(item) {
   const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
-  return `<article class="personal-reminder-card ${statusClass}">
+  const chain = morningChainId(item);
+  const color = personalLineColors[hashIndex(chain, personalLineColors.length)];
+  const isActive = state.activePersonalMorningChain === chain;
+  return `<article class="personal-reminder-card ${statusClass} ${isActive ? "calendar-focused" : ""}" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
     <form class="personal-morning-form" data-item-id="${item.id}">
       <div class="personal-card-head">
         <div>
@@ -666,9 +669,14 @@ function renderPersonalMorningCalendar(items = []) {
     date.setDate(gridStart.getDate() + index);
     const dateKey = iso(date);
     const dayEntries = model.byDate[dateKey] || [];
+    const hasFocusedLine = dayEntries.some(({ chain }) => chain.id === state.activePersonalMorningChain);
     const visibleLanes = Array.from({ length: 4 }, (_, lane) => dayEntries.find((entry) => entry.chain.lane === lane) || null);
-    const hiddenCount = dayEntries.filter(({ chain }) => chain.lane >= 4).length;
-    cells.push(`<div class="personal-calendar-day ${date.getMonth() !== month.getMonth() ? "other" : ""} ${dateKey === iso(today) ? "today" : ""}">
+    if (hasFocusedLine && !visibleLanes.some((entry) => entry?.chain.id === state.activePersonalMorningChain)) {
+      visibleLanes[3] = dayEntries.find(({ chain }) => chain.id === state.activePersonalMorningChain);
+    }
+    const visibleChainIds = new Set(visibleLanes.filter(Boolean).map((entry) => entry.chain.id));
+    const hiddenCount = dayEntries.filter(({ chain }) => !visibleChainIds.has(chain.id)).length;
+    cells.push(`<div class="personal-calendar-day ${date.getMonth() !== month.getMonth() ? "other" : ""} ${dateKey === iso(today) ? "today" : ""} ${hasFocusedLine ? "focused-line-day" : ""}">
       <div class="personal-calendar-date">${date.getDate()}</div>
       <div class="personal-calendar-lines">
         ${visibleLanes.map((entry) => {
@@ -683,7 +691,15 @@ function renderPersonalMorningCalendar(items = []) {
           const hasNext = chain.dates.has(nextDate) && !isWeekEnd;
           const segmentClass = `${hasPrevious ? "connect-left" : "segment-start"} ${hasNext ? "connect-right" : "segment-end"}`;
           const highlighted = chain.id === state.activePersonalMorningChain ? "highlighted" : "";
-          return `<span class="personal-calendar-line ${statusClass} ${segmentClass} ${highlighted}" data-chain-id="${escapeHtml(chain.id)}" style="--line-color:${chain.color}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>`;
+          const [statusLabel] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+          return `<span class="personal-calendar-line ${statusClass} ${segmentClass} ${highlighted}" data-chain-id="${escapeHtml(chain.id)}" data-personal-calendar-focus="${escapeHtml(chain.id)}" tabindex="0" style="--line-color:${chain.color}" title="${escapeHtml(item.title)}">
+            <span class="personal-line-popover">
+              <strong>${escapeHtml(shortDate(dateKey))} · ${escapeHtml(statusLabel)} · ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</strong>
+              <b>${escapeHtml(item.title)}</b>
+              ${item.detail ? `<small>进展：${escapeHtml(item.detail)}</small>` : ""}
+              ${item.blocker ? `<small class="risk-text">风险：${escapeHtml(item.blocker)}</small>` : ""}
+            </span>
+          </span>`;
         }).join("")}
         ${hiddenCount ? `<span class="personal-calendar-more">+${hiddenCount}</span>` : ""}
       </div>
@@ -692,7 +708,7 @@ function renderPersonalMorningCalendar(items = []) {
         ${dayEntries.map(({ chain, item }) => {
           const [statusLabel] = morningStatusMeta[item.status] || morningStatusMeta.todo;
           const highlighted = chain.id === state.activePersonalMorningChain ? "active" : "";
-          return `<div class="personal-calendar-popover-item ${highlighted}" style="--line-color:${chain.color}">
+          return `<div class="personal-calendar-popover-item ${highlighted}" role="button" tabindex="0" data-personal-calendar-focus="${escapeHtml(chain.id)}" style="--line-color:${chain.color}">
             <span>${escapeHtml(statusLabel)} · ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</span>
             <b>${escapeHtml(item.title)}</b>
             ${item.detail ? `<small>进展：${escapeHtml(item.detail)}</small>` : ""}
@@ -733,8 +749,12 @@ function renderPersonalWorkbench({ morningItems = [], monthItems = [] } = {}) {
 function focusPersonalMorningChain(chain) {
   state.activePersonalMorningChain = chain || null;
   renderPersonalMorningCalendar(state.personalMorningMonthItems);
-  $$("#personalMorningDoneList .personal-done-item").forEach((item) => {
-    item.classList.toggle("active", item.dataset.personalCalendarFocus === state.activePersonalMorningChain);
+  $$("[data-personal-calendar-focus]").forEach((item) => {
+    const isActive = item.dataset.personalCalendarFocus === state.activePersonalMorningChain;
+    item.classList.toggle("calendar-focused", isActive);
+    if (item.classList.contains("personal-done-item")) {
+      item.classList.toggle("active", isActive);
+    }
   });
   $("#personalMorningCalendar")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
@@ -3226,7 +3246,7 @@ function bindEvents() {
       selectShiftDay(shiftDay);
     }
     const personalDoneItem = event.target.closest?.("[data-personal-calendar-focus]");
-    if (personalDoneItem && !event.target.closest("button") && (event.key === "Enter" || event.key === " ")) {
+    if (personalDoneItem && !event.target.closest("button, input, select, textarea, label, a") && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       focusPersonalMorningChain(personalDoneItem.dataset.personalCalendarFocus);
     }
@@ -3319,7 +3339,7 @@ function bindEvents() {
       return;
     }
     const personalDoneFocus = event.target.closest("[data-personal-calendar-focus]");
-    if (personalDoneFocus && !event.target.closest("button")) {
+    if (personalDoneFocus && !event.target.closest("button, input, select, textarea, label, a")) {
       focusPersonalMorningChain(personalDoneFocus.dataset.personalCalendarFocus);
       return;
     }
