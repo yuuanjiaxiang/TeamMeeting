@@ -10,10 +10,10 @@
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">T</div>
+          <div class="brand-mark" id="brandMark">T</div>
           <div>
-            <strong>Team Loop</strong>
-            <span>技术项目团队</span>
+            <strong id="brandName">Team Loop</strong>
+            <span id="brandTeam">技术项目团队</span>
           </div>
         </div>
         <nav id="nav"></nav>
@@ -186,18 +186,61 @@
 
           <section id="dashboard" class="page">
             <div class="metrics">
-              <div><span>红黑榜净积分</span><strong id="metricScore">0</strong></div>
-              <div><span>Thank You 次数</span><strong id="metricThanks">0</strong></div>
-              <div><span>已排工时</span><strong id="metricHours">0</strong></div>
-              <div><span>开放例会</span><strong id="metricMeetings">0</strong></div>
+              <div><span>我的净积分</span><strong id="metricScore">0</strong></div>
+              <div><span>我收到的 Thank You</span><strong id="metricThanks">0</strong></div>
+              <div><span>我的已排工时</span><strong id="metricHours">0</strong></div>
+              <div><span>我的早例会事项</span><strong id="metricMeetings">0</strong></div>
             </div>
+            <section class="panel personal-workbench-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>我的工作台</h2>
+                  <p>新增和更新会同步到早例会；月历按事项持续天数显示。</p>
+                </div>
+                <span class="pill">今日早例会</span>
+              </div>
+              <form id="personalMorningCreateForm" class="personal-create-form">
+                <input name="title" placeholder="新增进行中事项，例如：TOPTB 温控复核" required />
+                <textarea name="detail" placeholder="今天怎么推进 / 下一步"></textarea>
+                <textarea name="blocker" placeholder="风险说明，没有可留空"></textarea>
+                <div class="personal-choice-field">
+                  <span>优先级</span>
+                  <input name="priority" type="hidden" value="normal" />
+                  <div class="morning-choice-group priority" role="group" aria-label="事项优先级">
+                    <button class="morning-choice-btn priority-high" type="button" data-choice-name="priority" data-choice-value="high">高</button>
+                    <button class="morning-choice-btn priority-normal active" type="button" data-choice-name="priority" data-choice-value="normal">中</button>
+                    <button class="morning-choice-btn priority-low" type="button" data-choice-name="priority" data-choice-value="low">低</button>
+                  </div>
+                </div>
+                <label>到期<input name="due_date" type="date" /></label>
+                <input name="status" type="hidden" value="doing" />
+                <button type="submit">新增进行中</button>
+              </form>
+              <div class="personal-workbench">
+                <section class="personal-reminders">
+                  <h3>进行中事项</h3>
+                  <div id="personalMorningActiveList" class="personal-card-list"></div>
+                </section>
+                <section class="personal-reminders">
+                  <h3>已完成事项</h3>
+                  <div id="personalMorningDoneList" class="personal-card-list"></div>
+                </section>
+              </div>
+              <section class="personal-calendar-section">
+                <div class="section-headline">
+                  <h3>本月事项</h3>
+                  <span>悬停日期查看当天事项</span>
+                </div>
+                <div id="personalMorningCalendar" class="personal-morning-calendar"></div>
+              </section>
+            </section>
             <div class="split">
               <section class="panel">
-                <h2>红黑榜排行</h2>
+                <h2>我的红黑榜</h2>
                 <div id="scoreRank" class="rank-list"></div>
               </section>
               <section class="panel">
-                <h2>Thank You 之星</h2>
+                <h2>我的 Thank You</h2>
                 <div id="thanksRank" class="rank-list"></div>
               </section>
             </div>
@@ -227,20 +270,28 @@
               <form id="morningItemForm" class="morning-create-form">
                 <label id="morningOwnerField" class="admin-only">负责人<select name="owner_id" data-morning-users></select></label>
                 <input name="title" placeholder="事项点，例如：TOPTB 夜班温控波动确认" required />
-                <select name="status">
-                  <option value="todo">待处理</option>
-                  <option value="doing">进行中</option>
-                  <option value="risk">有风险</option>
-                  <option value="done">已完成</option>
-                </select>
-                <select name="priority">
-                  <option value="normal">优先级中</option>
-                  <option value="high">优先级高</option>
-                  <option value="low">优先级低</option>
-                </select>
+                <div class="morning-choice-field">
+                  <span>进度</span>
+                  <input name="status" type="hidden" value="todo" />
+                  <div class="morning-choice-group status" role="group" aria-label="事项进度">
+                    <button class="morning-choice-btn status-todo active" type="button" data-choice-name="status" data-choice-value="todo">待处理</button>
+                    <button class="morning-choice-btn status-doing" type="button" data-choice-name="status" data-choice-value="doing">进行中</button>
+                    <button class="morning-choice-btn status-risk" type="button" data-choice-name="status" data-choice-value="risk">有风险</button>
+                    <button class="morning-choice-btn status-done" type="button" data-choice-name="status" data-choice-value="done">已完成</button>
+                  </div>
+                </div>
+                <div class="morning-choice-field">
+                  <span>优先级</span>
+                  <input name="priority" type="hidden" value="normal" />
+                  <div class="morning-choice-group priority" role="group" aria-label="事项优先级">
+                    <button class="morning-choice-btn priority-high" type="button" data-choice-name="priority" data-choice-value="high">高</button>
+                    <button class="morning-choice-btn priority-normal active" type="button" data-choice-name="priority" data-choice-value="normal">中</button>
+                    <button class="morning-choice-btn priority-low" type="button" data-choice-name="priority" data-choice-value="low">低</button>
+                  </div>
+                </div>
                 <input name="due_date" type="date" />
                 <textarea name="detail" placeholder="今日进展 / 下一步"></textarea>
-                <input name="blocker" placeholder="风险说明，没有可留空" />
+                <textarea name="blocker" placeholder="风险说明，没有可留空"></textarea>
                 <button>新增到早例会</button>
               </form>
             </section>
@@ -286,8 +337,12 @@
               <aside class="panel meeting-list-panel">
                 <div class="panel-title">
                   <div>
-                    <h2>本月会议</h2>
-                    <p>点击会议查看详情。</p>
+                    <h2 id="meetingListTitle">本周会议</h2>
+                    <p id="meetingListHint">只显示未过期会议，点击会议查看详情。</p>
+                  </div>
+                  <div class="meeting-scope-toggle" role="group" aria-label="会议列表范围">
+                    <button class="active" type="button" data-meeting-list-scope="week">本周</button>
+                    <button type="button" data-meeting-list-scope="month">本月</button>
                   </div>
                 </div>
                 <div id="meetingList" class="meeting-list"></div>
@@ -428,7 +483,8 @@
                 <h2>记录个人积分</h2>
                 <form id="scoreForm" class="form-grid compact">
                   <select name="user_id" data-users required></select>
-                  <select name="rule_id" data-rules></select>
+                  <input name="rule_id" type="hidden" />
+                  <div class="selected-rule-box" id="selectedScoreRule">从下方红黑榜细则中勾选规则</div>
                   <select name="kind"><option value="red">红榜加分</option><option value="black">黑榜扣分</option></select>
                   <input name="points" type="number" min="1" placeholder="分值" required />
                   <input name="score_date" type="date" />
@@ -441,6 +497,16 @@
               <h2>红黑榜细则</h2>
               <div id="ruleList" class="rule-columns"></div>
             </section>
+            <section class="panel annual-score-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>年度积分总览</h2>
+                  <p>按成员展示 12 个月净积分，年度总分高的排在前面。</p>
+                </div>
+                <label class="year-chip">年份<input id="scoreYear" type="number" min="2000" max="2100" step="1" /></label>
+              </div>
+              <div id="annualScoreTable" class="annual-score-wrap"></div>
+            </section>
             <section class="panel">
               <h2>积分明细</h2>
               <div id="scoreList" class="table"></div>
@@ -451,7 +517,7 @@
             <section class="panel">
               <h2>Thank You</h2>
               <form id="thankForm" class="form-grid compact">
-                <div class="thank-recipient-picker" data-thank-users-checklist></div>
+                <details class="thank-recipient-picker" data-thank-users-checklist></details>
                 <input name="week_start" type="date" />
                 <textarea name="evidence" placeholder="写下对方帮助你的具体事实。本周最多感谢 3 人。" required></textarea>
                 <button>送出 Thank You</button>

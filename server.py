@@ -21,6 +21,8 @@ BACKUP_DIR = DATA_DIR / "backups"
 SESSIONS = {}
 
 DEFAULT_SETTINGS = [
+    ("app_brand_name", "系统名称", "Team Loop", "text", "左侧顶部显示的系统名称"),
+    ("app_team_name", "团队名称", "技术项目团队", "text", "左侧顶部显示的团队名称"),
     ("meeting_default_title", "默认会议标题", "周例会", "text", "创建会议和批量生成时使用的默认标题"),
     ("meeting_bulk_default_weeks", "批量生成周数", "4", "number", "会议沙盘批量生成默认覆盖的周数"),
     ("shift_default_hours", "默认班次小时", "12", "number", "新增排班时默认计入的工时"),
@@ -1187,15 +1189,13 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(403, "当前用户类型无权访问该模块")
 
     def route_api(self, method, path, query):
-        if path.startswith("/api/thank-you/") and method == "DELETE":
-            return self.delete_thank_you(int(path.rstrip("/").rsplit("/", 1)[-1]))
         if path == "/api/login" and method == "POST":
             return self.login()
         if path == "/api/logout" and method == "POST":
             return self.logout()
         if path == "/api/me" and method == "GET":
             user = self.current_user(required=False)
-            return {"user": user, "permissions": permissions_for(user)}
+            return {"user": user, "permissions": permissions_for(user), "settings": self.public_settings()}
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
@@ -1270,6 +1270,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"scores": self.list_scores(query)}
             if method == "POST":
                 return self.create_score()
+        if len(parts) == 3 and parts[:2] == ["api", "scores"] and method == "PATCH":
+            return self.update_score(int(parts[2]))
 
         if path == "/api/dashboards/red-black" and method == "GET":
             return self.red_black_dashboard(query)
@@ -1337,8 +1339,11 @@ class Handler(BaseHTTPRequestHandler):
                 return {"votes": self.list_thank_you(query)}
             if method == "POST":
                 return self.create_thank_you(user)
-        if len(parts) == 3 and parts[:2] == ["api", "thank-you"] and method == "DELETE":
-            return self.delete_thank_you(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "thank-you"]:
+            if method == "PATCH":
+                return self.update_thank_you(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_thank_you(int(parts[2]), user)
         if path == "/api/dashboards/thank-you" and method == "GET":
             return self.thank_you_dashboard(query)
 
@@ -2036,9 +2041,54 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, admin, "score.create", "red_black_score", cursor.lastrowid, "红黑榜积分已记录", {"user_id": data.get("user_id"), "points": points}, self.client_address[0])
         return {"message": "积分已记录", "scores": self.list_scores({})}
 
+    def update_score(self, score_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            score = conn.execute("SELECT * FROM red_black_scores WHERE id=?", (score_id,)).fetchone()
+            if not score:
+                raise AppError(404, "积分记录不存在")
+            if score["score_date"] != today_iso():
+                raise AppError(400, "仅允许编辑当天积分明细")
+            kind = data.get("kind") if data.get("kind") in ("red", "black") else score["kind"]
+            points = abs(int(data.get("points") or abs(int(score["points"] or 0))))
+            if kind == "black":
+                points = -points
+            score_date = data.get("score_date") or score["score_date"]
+            if score_date != today_iso():
+                raise AppError(400, "积分日期只能保持当天")
+            user_id = int(data.get("user_id") or score["user_id"])
+            if not conn.execute("SELECT id FROM users WHERE id=? AND active=1", (user_id,)).fetchone():
+                raise AppError(404, "成员不存在")
+            rule_id = data.get("rule_id") or None
+            if rule_id:
+                rule = conn.execute("SELECT id, kind FROM red_black_rules WHERE id=? AND active=1", (rule_id,)).fetchone()
+                if not rule:
+                    raise AppError(404, "规则不存在")
+                kind = rule["kind"]
+                if kind == "black":
+                    points = -abs(points)
+                else:
+                    points = abs(points)
+            conn.execute(
+                """
+                UPDATE red_black_scores
+                SET user_id=?, rule_id=?, kind=?, points=?, reason=?, score_date=?
+                WHERE id=?
+                """,
+                (user_id, rule_id, kind, points, data.get("reason") or "", score_date, score_id),
+            )
+            write_audit(conn, admin, "score.update", "red_black_score", score_id, "红黑榜积分已更新", {"fields": list(data.keys())}, self.client_address[0])
+        return {"message": "积分已更新", "scores": self.list_scores({"from": [today_iso()], "to": [today_iso()]})}
+
     def red_black_dashboard(self, query):
         where, params = date_filter(query, "s.score_date")
         with connect() as conn:
+            users = rows_to_list(
+                conn.execute(
+                    "SELECT id, display_name FROM users WHERE active=1 ORDER BY display_name"
+                ).fetchall()
+            )
             totals = rows_to_list(
                 conn.execute(
                     f"""
@@ -2066,7 +2116,44 @@ class Handler(BaseHTTPRequestHandler):
                     params,
                 ).fetchall()
             )
-        return {"totals": totals, "timeline": timeline}
+            monthly_rows = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT s.user_id,
+                           strftime('%m', s.score_date) AS month,
+                           SUM(s.points) AS total,
+                           SUM(CASE WHEN s.kind='red' THEN s.points ELSE 0 END) AS red_points,
+                           SUM(CASE WHEN s.kind='black' THEN s.points ELSE 0 END) AS black_points
+                    FROM red_black_scores s
+                    WHERE {where}
+                    GROUP BY s.user_id, strftime('%m', s.score_date)
+                    """,
+                    params,
+                ).fetchall()
+            )
+        annual_map = {
+            user["id"]: {
+                "id": user["id"],
+                "display_name": user["display_name"],
+                "months": {str(month): 0 for month in range(1, 13)},
+                "total": 0,
+            }
+            for user in users
+        }
+        for row in monthly_rows:
+            user_id = row["user_id"]
+            if user_id not in annual_map:
+                continue
+            month = str(int(row["month"] or 0)) if row.get("month") else ""
+            if month in annual_map[user_id]["months"]:
+                value = int(row["total"] or 0)
+                annual_map[user_id]["months"][month] = value
+                annual_map[user_id]["total"] += value
+        annual = sorted(
+            annual_map.values(),
+            key=lambda item: (-int(item["total"] or 0), item["display_name"]),
+        )
+        return {"totals": totals, "timeline": timeline, "annual": annual}
 
     def list_meetings(self, query):
         where, params = date_filter(query, "m.meeting_date")
@@ -2659,7 +2746,7 @@ class Handler(BaseHTTPRequestHandler):
             by_user = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT u.display_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
+                    SELECT u.id, u.display_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
                     FROM shifts s
                     JOIN users u ON u.id = s.user_id
                     WHERE {where}
@@ -2763,8 +2850,27 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, user, "thank_you.create", "thank_you", None, "Thank You 已送达", {"receiver_ids": receiver_ids, "week_start": start}, self.client_address[0])
         return {"message": "Thank You 已送达", "votes": self.list_thank_you({"from": [start], "to": [start]})}
 
-    def delete_thank_you(self, vote_id):
-        admin = self.require_admin()
+    def can_manage_thank_vote(self, vote, user):
+        if user["role"] == "admin":
+            return True
+        return vote["voter_id"] == user["id"] and str(vote["created_at"] or "")[:10] == today_iso()
+
+    def update_thank_you(self, vote_id, user):
+        data = read_json(self)
+        evidence = (data.get("evidence") or "").strip()
+        if len(evidence) < 5:
+            raise AppError(400, "请写下具体事实依据")
+        with connect() as conn:
+            vote = conn.execute("SELECT * FROM thank_you_votes WHERE id=?", (vote_id,)).fetchone()
+            if not vote:
+                raise AppError(404, "感谢记录不存在")
+            if not self.can_manage_thank_vote(vote, user):
+                raise AppError(403, "仅可编辑当天自己送出的感谢")
+            conn.execute("UPDATE thank_you_votes SET evidence=? WHERE id=?", (evidence, vote_id))
+            write_audit(conn, user, "thank_you.update", "thank_you", vote_id, "Thank You 记录已更新", {"week_start": vote["week_start"]}, self.client_address[0])
+        return {"message": "感谢记录已更新"}
+
+    def delete_thank_you(self, vote_id, user):
         with connect() as conn:
             vote = conn.execute(
                 """
@@ -2778,10 +2884,12 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             if not vote:
                 raise AppError(404, "感谢记录不存在")
+            if not self.can_manage_thank_vote(vote, user):
+                raise AppError(403, "仅可删除当天自己送出的感谢")
             conn.execute("DELETE FROM thank_you_votes WHERE id=?", (vote_id,))
             write_audit(
                 conn,
-                admin,
+                user,
                 "thank_you.delete",
                 "thank_you",
                 vote_id,
@@ -2803,7 +2911,7 @@ class Handler(BaseHTTPRequestHandler):
             stars = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT receiver.display_name, COUNT(*) AS thanks
+                    SELECT receiver.id, receiver.display_name, COUNT(*) AS thanks
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id = v.receiver_id
                     WHERE {where}
@@ -2840,6 +2948,20 @@ class Handler(BaseHTTPRequestHandler):
                     """
                 ).fetchall()
             )
+
+    def public_settings(self):
+        keys = ("app_brand_name", "app_team_name")
+        placeholders = ",".join("?" for _ in keys)
+        with connect() as conn:
+            rows = rows_to_list(
+                conn.execute(
+                    f"SELECT key, value FROM system_settings WHERE key IN ({placeholders})",
+                    keys,
+                ).fetchall()
+            )
+        values = {key: value for key, _, value, _, _ in DEFAULT_SETTINGS if key in keys}
+        values.update({row["key"]: row["value"] for row in rows})
+        return values
 
     def update_settings(self):
         admin = self.require_admin()

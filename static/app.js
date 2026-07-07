@@ -21,14 +21,19 @@ const state = {
   userTypes: [],
   moduleCatalog: [],
   settings: [],
+  publicSettings: {},
   backups: [],
   auditLogs: [],
   shifts: [],
+  activeShiftPopoverDate: null,
+  personalMorningMonthItems: [],
+  activePersonalMorningChain: null,
   currentPage: "members",
   morningDate: iso(new Date()),
   shiftMonth: new Date(),
   selectedShiftDate: iso(new Date()),
   meetingMonth: new Date(),
+  meetingListScope: "week",
   selectedMeetingDate: iso(new Date()),
   selectedMeetingId: null,
   viewMode: safeStorageGet("teamLoopViewMode", "admin"),
@@ -171,11 +176,21 @@ function shortDateTime(value) {
   return `${shortDate(value)} ${time}`;
 }
 
+function isTodayValue(value) {
+  return String(value || "").slice(0, 10) === iso(new Date());
+}
+
 function mondayOf(value) {
   const d = new Date(value);
   const day = d.getDay() || 7;
   d.setDate(d.getDate() - day + 1);
   return iso(d);
+}
+
+function addDays(value, days) {
+  const date = new Date(value);
+  date.setDate(date.getDate() + days);
+  return date;
 }
 
 function monthStart(date) {
@@ -407,13 +422,23 @@ function populateSelects() {
   $$("[data-thank-users-checklist]").forEach((box) => {
     const form = box.closest("form");
     const selected = form ? new Set(new FormData(form).getAll("receiver_ids").map(String)) : new Set();
-    box.innerHTML = thankUsers.length
-      ? thankUsers.map((user) => `
-        <label class="check-chip">
-          <input type="checkbox" name="receiver_ids" value="${user.id}" ${selected.has(String(user.id)) ? "checked" : ""}>
-          <span>${escapeHtml(user.display_name)}</span>
-        </label>`).join("")
-      : '<p class="empty-note">暂无可感谢成员</p>';
+    const selectedNames = thankUsers
+      .filter((user) => selected.has(String(user.id)))
+      .map((user) => user.display_name);
+    box.innerHTML = `
+      <summary class="thank-recipient-summary">
+        <span data-thank-selected-label>${escapeHtml(selectedNames.length ? selectedNames.join("、") : "选择感谢对象（可多选）")}</span>
+        <strong data-thank-selected-count>${selectedNames.length} 人</strong>
+      </summary>
+      <div class="thank-recipient-menu">
+        ${thankUsers.length
+          ? thankUsers.map((user) => `
+            <label class="check-chip">
+              <input type="checkbox" name="receiver_ids" value="${user.id}" data-name="${escapeHtml(user.display_name)}" ${selected.has(String(user.id)) ? "checked" : ""}>
+              <span>${escapeHtml(user.display_name)}</span>
+            </label>`).join("")
+          : '<p class="empty-note">暂无可感谢成员</p>'}
+      </div>`;
   });
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
   $$("[data-owner-users]").forEach((select) => {
@@ -451,7 +476,21 @@ function renderRank(items, field, unit) {
 
 function settingValue(key, fallback = "") {
   const setting = state.settings.find((item) => item.key === key);
-  return setting ? setting.value : fallback;
+  if (setting) return setting.value;
+  return state.publicSettings?.[key] ?? fallback;
+}
+
+function applyBranding() {
+  const brandName = settingValue("app_brand_name", "Team Loop") || "Team Loop";
+  const teamName = settingValue("app_team_name", "技术项目团队") || "技术项目团队";
+  const mark = brandName.trim().slice(0, 1).toUpperCase() || "T";
+  const brandNameEl = $("#brandName");
+  const brandTeamEl = $("#brandTeam");
+  const brandMarkEl = $("#brandMark");
+  if (brandNameEl) brandNameEl.textContent = brandName;
+  if (brandTeamEl) brandTeamEl.textContent = teamName;
+  if (brandMarkEl) brandMarkEl.textContent = mark;
+  document.title = `${teamName}周例会`;
 }
 
 function formatBytes(value = 0) {
@@ -461,19 +500,302 @@ function formatBytes(value = 0) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function isMyMorningItem(item) {
+  return Number(item.owner_id) === Number(state.user?.id);
+}
+
+function sortMorningForWorkbench(items = []) {
+  return [...items].sort((a, b) => {
+    const score = (item) => (item.status === "risk" ? 4 : 0)
+      + (item.blocker ? 3 : 0)
+      + (isMorningDue(item) ? 2 : 0)
+      + (item.priority === "high" ? 1 : 0);
+    return score(b) - score(a) || String(a.title || "").localeCompare(String(b.title || ""), "zh-CN");
+  });
+}
+
+function dateListBetween(startValue, endValue) {
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  const dates = [];
+  for (let date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
+    dates.push(iso(date));
+  }
+  return dates;
+}
+
+function morningChainId(item) {
+  return String(item.root_id || item.id || `${item.owner_id}-${item.title}`);
+}
+
+function hashIndex(value, size) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) % 9973;
+  }
+  return Math.abs(hash) % size;
+}
+
+const personalLineColors = ["#3370ff", "#12b981", "#f59e0b", "#8b5cf6", "#ef4444", "#0ea5e9", "#14b8a6", "#f97316"];
+
+function latestByMorningChain(items = []) {
+  const map = new Map();
+  items.forEach((item) => {
+    const key = morningChainId(item);
+    const current = map.get(key);
+    if (!current || String(item.item_date) > String(current.item_date) || Number(item.id) > Number(current.id)) {
+      map.set(key, item);
+    }
+  });
+  return [...map.values()];
+}
+
+function renderPersonalMorningCard(item) {
+  const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+  return `<article class="personal-reminder-card ${statusClass}">
+    <form class="personal-morning-form" data-item-id="${item.id}">
+      <div class="personal-card-head">
+        <div>
+          <strong>${escapeHtml(item.title)}</strong>
+          <div class="personal-card-meta">
+            <span>${escapeHtml(compactDate(item.start_date || item.item_date))} 起 · ${Number(item.duration_days || 1)} 天</span>
+            ${item.due_date ? `<span class="${isMorningDue(item) ? "risk-text" : ""}">到期 ${escapeHtml(shortDate(item.due_date))}</span>` : ""}
+          </div>
+        </div>
+        <span class="pill">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="personal-edit-grid">
+        <div class="personal-choice-field">
+          <span>进度</span>
+          ${renderMorningChoiceGroup("status", item.status || "todo", "status")}
+        </div>
+        <div class="personal-choice-field">
+          <span>优先级</span>
+          ${renderMorningChoiceGroup("priority", item.priority || "normal", "priority")}
+        </div>
+        <label>到期<input name="due_date" type="date" value="${escapeHtml(item.due_date || item.item_date)}"></label>
+      </div>
+      <label class="personal-edit-field">进展 / 下一步<textarea name="detail" placeholder="更新今天的进展、下一步动作">${escapeHtml(item.detail || "")}</textarea></label>
+      <label class="personal-edit-field">风险<textarea name="blocker" placeholder="没有风险可留空">${escapeHtml(item.blocker || "")}</textarea></label>
+      <div class="personal-card-actions">
+        <button type="submit">保存进展</button>
+        <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">查看进展</button>
+      </div>
+    </form>
+  </article>`;
+}
+
+function renderPersonalDoneItem(item) {
+  const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.done;
+  const chain = morningChainId(item);
+  const color = personalLineColors[hashIndex(chain, personalLineColors.length)];
+  const isActive = state.activePersonalMorningChain === chain;
+  return `<article class="personal-done-item ${statusClass} ${isActive ? "active" : ""}" role="button" tabindex="0" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
+    <div>
+      <strong>${escapeHtml(item.title)}</strong>
+      <span>${escapeHtml(compactDate(item.start_date || item.item_date))} 起 · ${Number(item.duration_days || 1)} 天 · ${escapeHtml(statusLabel)}</span>
+    </div>
+    <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
+  </article>`;
+}
+
+function buildPersonalCalendarModel(items = [], month = new Date()) {
+  const start = monthStart(month);
+  const end = monthEnd(month);
+  const chains = new Map();
+  items.filter(isMyMorningItem).forEach((item) => {
+    if (item.item_date < iso(start) || item.item_date > iso(end)) return;
+    const id = morningChainId(item);
+    if (!chains.has(id)) {
+      chains.set(id, {
+        id,
+        title: item.title || "事项",
+        color: personalLineColors[hashIndex(id, personalLineColors.length)],
+        dates: new Map(),
+        minDate: item.item_date,
+        maxDate: item.item_date,
+        lane: 0,
+      });
+    }
+    const chain = chains.get(id);
+    const existing = chain.dates.get(item.item_date);
+    if (!existing || Number(item.id) >= Number(existing.id)) {
+      chain.dates.set(item.item_date, item);
+    }
+    chain.minDate = String(item.item_date) < String(chain.minDate) ? item.item_date : chain.minDate;
+    chain.maxDate = String(item.item_date) > String(chain.maxDate) ? item.item_date : chain.maxDate;
+  });
+  const laneDates = [];
+  const chainList = [...chains.values()].sort((a, b) => String(a.minDate).localeCompare(String(b.minDate)) || String(a.title).localeCompare(String(b.title), "zh-CN"));
+  chainList.forEach((chain) => {
+    let lane = laneDates.findIndex((dates) => ![...chain.dates.keys()].some((date) => dates.has(date)));
+    if (lane < 0) {
+      lane = laneDates.length;
+      laneDates[lane] = new Set();
+    }
+    chain.lane = lane;
+    chain.dates.forEach((_, date) => laneDates[lane].add(date));
+  });
+  const byDate = {};
+  chainList.forEach((chain) => {
+    chain.dates.forEach((item, date) => {
+      byDate[date] ||= [];
+      byDate[date].push({ chain, item });
+    });
+  });
+  Object.keys(byDate).forEach((date) => {
+    byDate[date].sort((a, b) => a.chain.lane - b.chain.lane || String(a.item.title).localeCompare(String(b.item.title), "zh-CN"));
+  });
+  return { byDate, chains };
+}
+
+function renderPersonalMorningCalendar(items = []) {
+  const target = $("#personalMorningCalendar");
+  if (!target) return;
+  const today = new Date();
+  const month = new Date(today.getFullYear(), today.getMonth(), 1);
+  const start = monthStart(month);
+  const gridStart = new Date(start);
+  gridStart.setDate(start.getDate() - (start.getDay() || 7) + 1);
+  const model = buildPersonalCalendarModel(items, month);
+  const weekdays = ["一", "二", "三", "四", "五", "六", "日"].map((day) => `<div class="personal-calendar-weekday">${day}</div>`).join("");
+  const cells = [];
+  for (let index = 0; index < 42; index += 1) {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const dateKey = iso(date);
+    const dayEntries = model.byDate[dateKey] || [];
+    const visibleLanes = Array.from({ length: 4 }, (_, lane) => dayEntries.find((entry) => entry.chain.lane === lane) || null);
+    const hiddenCount = dayEntries.filter(({ chain }) => chain.lane >= 4).length;
+    cells.push(`<div class="personal-calendar-day ${date.getMonth() !== month.getMonth() ? "other" : ""} ${dateKey === iso(today) ? "today" : ""}">
+      <div class="personal-calendar-date">${date.getDate()}</div>
+      <div class="personal-calendar-lines">
+        ${visibleLanes.map((entry) => {
+          if (!entry) return `<span class="personal-calendar-line-slot"></span>`;
+          const { chain, item } = entry;
+          const [, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+          const previousDate = iso(addDays(`${dateKey}T00:00:00`, -1));
+          const nextDate = iso(addDays(`${dateKey}T00:00:00`, 1));
+          const isWeekStart = date.getDay() === 1;
+          const isWeekEnd = date.getDay() === 0;
+          const hasPrevious = chain.dates.has(previousDate) && !isWeekStart;
+          const hasNext = chain.dates.has(nextDate) && !isWeekEnd;
+          const segmentClass = `${hasPrevious ? "connect-left" : "segment-start"} ${hasNext ? "connect-right" : "segment-end"}`;
+          const highlighted = chain.id === state.activePersonalMorningChain ? "highlighted" : "";
+          return `<span class="personal-calendar-line ${statusClass} ${segmentClass} ${highlighted}" data-chain-id="${escapeHtml(chain.id)}" style="--line-color:${chain.color}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>`;
+        }).join("")}
+        ${hiddenCount ? `<span class="personal-calendar-more">+${hiddenCount}</span>` : ""}
+      </div>
+      ${dayEntries.length ? `<div class="personal-calendar-popover">
+        <strong>${escapeHtml(shortDate(dateKey))}</strong>
+        ${dayEntries.map(({ chain, item }) => {
+          const [statusLabel] = morningStatusMeta[item.status] || morningStatusMeta.todo;
+          const highlighted = chain.id === state.activePersonalMorningChain ? "active" : "";
+          return `<div class="personal-calendar-popover-item ${highlighted}" style="--line-color:${chain.color}">
+            <span>${escapeHtml(statusLabel)} · ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</span>
+            <b>${escapeHtml(item.title)}</b>
+            ${item.detail ? `<small>进展：${escapeHtml(item.detail)}</small>` : ""}
+            ${item.blocker ? `<small class="risk-text">风险：${escapeHtml(item.blocker)}</small>` : ""}
+          </div>`;
+        }).join("")}
+      </div>` : ""}
+    </div>`);
+  }
+  target.innerHTML = weekdays + cells.join("");
+}
+
+function renderPersonalMorningList(items = [], monthItems = items) {
+  const activeTarget = $("#personalMorningActiveList");
+  const doneTarget = $("#personalMorningDoneList");
+  if (!activeTarget || !doneTarget) return;
+  const myItems = sortMorningForWorkbench(items.filter(isMyMorningItem));
+  const activeItems = myItems.filter((item) => item.status !== "done");
+  const doneItems = latestByMorningChain(monthItems.filter((item) => isMyMorningItem(item) && item.status === "done"))
+    .sort((a, b) => String(b.item_date).localeCompare(String(a.item_date)) || String(a.title || "").localeCompare(String(b.title || ""), "zh-CN"));
+  activeTarget.innerHTML = activeItems.length
+    ? activeItems.map(renderPersonalMorningCard).join("")
+    : `<p class="empty-note">今天没有进行中的早例会事项。</p>`;
+  doneTarget.innerHTML = doneItems.length
+    ? doneItems.map(renderPersonalDoneItem).join("")
+    : `<p class="empty-note">本月还没有完成事项。</p>`;
+  renderPersonalMorningCalendar(monthItems);
+}
+
+function renderPersonalWorkbench({ morningItems = [], monthItems = [] } = {}) {
+  if (!$("#personalMorningActiveList")) return;
+  state.personalMorningMonthItems = monthItems.length ? monthItems : morningItems;
+  const chainExists = state.personalMorningMonthItems.some((item) => morningChainId(item) === state.activePersonalMorningChain);
+  if (!chainExists) state.activePersonalMorningChain = null;
+  renderPersonalMorningList(morningItems, state.personalMorningMonthItems);
+}
+
+function focusPersonalMorningChain(chain) {
+  state.activePersonalMorningChain = chain || null;
+  renderPersonalMorningCalendar(state.personalMorningMonthItems);
+  $$("#personalMorningDoneList .personal-done-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.personalCalendarFocus === state.activePersonalMorningChain);
+  });
+  $("#personalMorningCalendar")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function findMyDashboardRow(items = []) {
+  return items.find((item) => Number(item.id) === Number(state.user?.id)) || null;
+}
+
+function renderOwnScoreSummary(score) {
+  if (!score) return `<p class="empty-note">当前周期暂无你的红黑榜积分。</p>`;
+  return `
+    <div class="rank-row"><span class="rank-no">净</span><strong>净积分</strong><span>${Number(score.total || 0)} 分</span></div>
+    <div class="rank-row"><span class="rank-no">红</span><strong>红榜加分</strong><span>${Number(score.red_points || 0)} 分</span></div>
+    <div class="rank-row"><span class="rank-no">黑</span><strong>黑榜扣分</strong><span>${Number(score.black_points || 0)} 分</span></div>
+  `;
+}
+
+function renderOwnThanksSummary(thanks) {
+  if (!thanks) return `<p class="empty-note">当前周期暂无你收到的 Thank You。</p>`;
+  return `
+    <div class="rank-row"><span class="rank-no">谢</span><strong>收到感谢</strong><span>${Number(thanks.thanks || 0)} 次</span></div>
+  `;
+}
+
+async function loadPersonalMorningMonth() {
+  const today = iso(new Date());
+  const start = iso(monthStart(new Date()));
+  const dates = dateListBetween(start, today);
+  const responses = await Promise.all(dates.map((date) => api(`/api/morning-items?date=${encodeURIComponent(date)}`)));
+  const todayData = responses.find((response) => response.date === today) || responses[responses.length - 1] || { items: [] };
+  return {
+    today: todayData,
+    monthItems: responses.flatMap((response) => response.items || []),
+  };
+}
+
 async function loadDashboard() {
-  const [scores, thanks, shifts, meetings] = await Promise.all([
-    api(`/api/dashboards/red-black?${periodQuery()}`),
-    api(`/api/dashboards/thank-you?${periodQuery()}`),
-    api(`/api/dashboards/shifts?${periodQuery()}`),
-    api(`/api/meetings?${periodQuery()}`),
+  const emptyScores = { totals: [], timeline: [] };
+  const emptyThanks = { stars: [] };
+  const emptyShifts = { by_user: [], by_machine: [] };
+  const emptyMorning = { today: { items: [] }, monthItems: [] };
+  const [scores, thanks, shifts, morning] = await Promise.all([
+    canLoadModule("rules") ? api(`/api/dashboards/red-black?${periodQuery()}`).catch(() => emptyScores) : emptyScores,
+    canLoadModule("thanks") ? api(`/api/dashboards/thank-you?${periodQuery()}`).catch(() => emptyThanks) : emptyThanks,
+    canLoadModule("shifts") ? api(`/api/dashboards/shifts?${periodQuery()}`).catch(() => emptyShifts) : emptyShifts,
+    canLoadModule("morning") ? loadPersonalMorningMonth().catch(() => emptyMorning) : emptyMorning,
   ]);
-  $("#metricScore").textContent = scores.totals.reduce((sum, item) => sum + Number(item.total || 0), 0);
-  $("#metricThanks").textContent = thanks.stars.reduce((sum, item) => sum + Number(item.thanks || 0), 0);
-  $("#metricHours").textContent = shifts.by_user.reduce((sum, item) => sum + Number(item.hours || 0), 0);
-  $("#metricMeetings").textContent = meetings.meetings.filter((meeting) => meeting.status === "open").length;
-  $("#scoreRank").innerHTML = renderRank(scores.totals, "total", "分");
-  $("#thanksRank").innerHTML = renderRank(thanks.stars, "thanks", "次");
+  const myScore = findMyDashboardRow(scores.totals);
+  const myThanks = findMyDashboardRow(thanks.stars);
+  const myShift = findMyDashboardRow(shifts.by_user);
+  const myMorningItems = (morning.today?.items || []).filter(isMyMorningItem);
+  $("#metricScore").textContent = Number(myScore?.total || 0);
+  $("#metricThanks").textContent = Number(myThanks?.thanks || 0);
+  $("#metricHours").textContent = Number(myShift?.hours || 0);
+  $("#metricMeetings").textContent = myMorningItems.length;
+  $("#scoreRank").innerHTML = renderOwnScoreSummary(myScore);
+  $("#thanksRank").innerHTML = renderOwnThanksSummary(myThanks);
+  renderPersonalWorkbench({
+    morningItems: morning.today?.items || [],
+    monthItems: morning.monthItems || [],
+  });
 }
 
 const morningStatusMeta = {
@@ -488,6 +810,19 @@ const morningPriorityMeta = {
   normal: "中",
   high: "高",
 };
+
+const morningStatusChoices = [
+  ["todo", "待处理"],
+  ["doing", "进行中"],
+  ["risk", "有风险"],
+  ["done", "已完成"],
+];
+
+const morningPriorityChoices = [
+  ["high", "高"],
+  ["normal", "中"],
+  ["low", "低"],
+];
 
 const meetingItemStatusMeta = {
   todo: ["待处理", "status-todo"],
@@ -505,6 +840,46 @@ function renderMorningPriorityOptions(selected) {
   return Object.entries(morningPriorityMeta)
     .map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`)
     .join("");
+}
+
+function renderMorningChoiceGroup(name, selected, kind) {
+  const choices = kind === "priority" ? morningPriorityChoices : morningStatusChoices;
+  const fallback = kind === "priority" ? "normal" : "todo";
+  const value = choices.some(([choiceValue]) => choiceValue === selected) ? selected : fallback;
+  return `
+    <input name="${escapeHtml(name)}" type="hidden" value="${escapeHtml(value)}" />
+    <div class="morning-choice-group ${escapeHtml(kind)}" role="group" aria-label="${kind === "priority" ? "事项优先级" : "事项进度"}">
+      ${choices.map(([choiceValue, label]) => `
+        <button class="morning-choice-btn ${escapeHtml(kind)}-${escapeHtml(choiceValue)} ${choiceValue === value ? "active" : ""}" type="button" data-choice-name="${escapeHtml(name)}" data-choice-value="${escapeHtml(choiceValue)}">
+          ${escapeHtml(label)}
+        </button>`).join("")}
+    </div>`;
+}
+
+function syncMorningChoiceGroups(root = document) {
+  $$(".morning-choice-group", root).forEach((group) => {
+    const firstButton = group.querySelector("[data-choice-name]");
+    const name = firstButton?.dataset.choiceName;
+    const input = name ? group.closest("form")?.elements[name] : null;
+    if (!input) return;
+    $$(".morning-choice-btn", group).forEach((button) => {
+      button.classList.toggle("active", button.dataset.choiceValue === input.value);
+    });
+  });
+}
+
+function setMorningChoice(button) {
+  const form = button.closest("form");
+  const group = button.closest(".morning-choice-group");
+  const name = button.dataset.choiceName;
+  if (!form || !group || !name || !form.elements[name]) return;
+  form.elements[name].value = button.dataset.choiceValue || "";
+  $$(".morning-choice-btn", group).forEach((item) => {
+    item.classList.toggle("active", item === button);
+  });
+  if (name === "status" && button.dataset.choiceValue === "risk") {
+    form.elements.blocker?.focus();
+  }
 }
 
 function renderMeetingItemStatusOptions(selected) {
@@ -885,6 +1260,7 @@ async function loadSystemAdmin() {
   renderSettings();
   renderBackups();
   renderAuditLogs();
+  applyBranding();
   applySettingDefaults();
 }
 
@@ -963,9 +1339,145 @@ function applySettingDefaults() {
   if (scorePoints && !scorePoints.value) scorePoints.value = settingValue("red_score_default_points", "1");
 }
 
+function scoreRuleLabel(rule) {
+  if (!rule) return "未关联规则";
+  const sameKindRules = state.rules.filter((item) => item.kind === rule.kind);
+  const index = sameKindRules.findIndex((item) => Number(item.id) === Number(rule.id)) + 1;
+  return `${rule.kind === "red" ? "红榜" : "黑榜"} #${index || "-"} · ${rule.content}`;
+}
+
+function renderSelectedScoreRule() {
+  const form = $("#scoreForm");
+  const target = $("#selectedScoreRule");
+  if (!form || !target) return;
+  const ruleId = form.elements.rule_id?.value;
+  const rule = state.rules.find((item) => Number(item.id) === Number(ruleId));
+  target.innerHTML = rule
+    ? `<strong>${escapeHtml(scoreRuleLabel(rule))}</strong><button class="secondary clear-score-rule-btn" type="button">清除</button>`
+    : `<span>从下方红黑榜细则中勾选规则</span>`;
+  $$(".rule-pick-btn").forEach((button) => {
+    button.classList.toggle("selected", Number(button.dataset.ruleId) === Number(ruleId));
+  });
+}
+
+function selectScoreRule(ruleId) {
+  const form = $("#scoreForm");
+  const rule = state.rules.find((item) => Number(item.id) === Number(ruleId));
+  if (!form || !rule) return;
+  form.elements.rule_id.value = rule.id;
+  form.elements.kind.value = rule.kind;
+  if (!form.elements.points.value) {
+    form.elements.points.value = settingValue(rule.kind === "red" ? "red_score_default_points" : "black_score_default_points", "1");
+  }
+  renderSelectedScoreRule();
+}
+
+function renderRuleSelectOptions(selectedId = "") {
+  return `<option value="">不关联规则</option>${state.rules.map((rule) => {
+    const label = scoreRuleLabel(rule);
+    return `<option value="${rule.id}" ${Number(selectedId) === Number(rule.id) ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("")}`;
+}
+
+function renderScoreList(scores) {
+  const list = $("#scoreList");
+  if (!list) return;
+  if (!scores.length) {
+    list.innerHTML = "<p>暂无积分记录</p>";
+    return;
+  }
+  list.innerHTML = `
+    <table>
+      <thead><tr><th>日期</th><th>成员</th><th>类型</th><th>积分</th><th>规则</th><th>依据</th><th>操作</th></tr></thead>
+      <tbody>
+        ${scores.map((score) => {
+          const editable = isAdminView() && score.score_date === iso(new Date());
+          if (!editable) {
+            return `<tr>
+              <td>${escapeHtml(score.score_date)}</td>
+              <td>${escapeHtml(score.display_name)}</td>
+              <td>${score.kind === "red" ? "红榜" : "黑榜"}</td>
+              <td>${escapeHtml(score.points)}</td>
+              <td>${escapeHtml(score.rule_title || "-")}</td>
+              <td>${escapeHtml(score.reason)}</td>
+              <td><span class="pill">只读</span></td>
+            </tr>`;
+          }
+          return `<tr>
+            <td><input form="scoreEdit${score.id}" name="score_date" type="date" value="${escapeHtml(score.score_date)}"></td>
+            <td><select form="scoreEdit${score.id}" name="user_id">${renderUserOptions(score.user_id, "成员")}</select></td>
+            <td><select form="scoreEdit${score.id}" name="kind"><option value="red" ${score.kind === "red" ? "selected" : ""}>红榜</option><option value="black" ${score.kind === "black" ? "selected" : ""}>黑榜</option></select></td>
+            <td><input form="scoreEdit${score.id}" name="points" type="number" min="1" value="${Math.abs(Number(score.points || 0))}"></td>
+            <td><select form="scoreEdit${score.id}" name="rule_id">${renderRuleSelectOptions(score.rule_id)}</select></td>
+            <td><input form="scoreEdit${score.id}" name="reason" value="${escapeHtml(score.reason || "")}"></td>
+            <td>
+              <form id="scoreEdit${score.id}" class="score-edit-form" data-score-id="${score.id}">
+                <button type="submit">保存</button>
+              </form>
+            </td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>`;
+}
+
+function scoreYearValue() {
+  const input = $("#scoreYear");
+  const fallback = new Date().getFullYear();
+  const value = Number(input?.value || fallback);
+  const year = Number.isFinite(value) && value >= 2000 && value <= 2100 ? value : fallback;
+  if (input) input.value = String(year);
+  return year;
+}
+
+function scoreClass(value) {
+  const number = Number(value || 0);
+  if (number > 0) return "positive";
+  if (number < 0) return "negative";
+  return "zero";
+}
+
+function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
+  const target = $("#annualScoreTable");
+  if (!target) return;
+  const months = Array.from({ length: 12 }, (_, index) => index + 1);
+  if (!rows.length) {
+    target.innerHTML = `<p class="empty-note">${year} 年暂无积分数据。</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <table class="annual-score-table">
+      <thead>
+        <tr>
+          <th class="member-col">成员</th>
+          ${months.map((month) => `<th>${month}月</th>`).join("")}
+          <th class="total-col">总分</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => {
+          const monthsData = row.months || {};
+          return `<tr>
+            <th class="member-col">${escapeHtml(row.display_name || "未命名")}</th>
+            ${months.map((month) => {
+              const value = Number(monthsData[String(month)] || 0);
+              return `<td class="${scoreClass(value)}">${value || ""}</td>`;
+            }).join("")}
+            <td class="total-col ${scoreClass(row.total)}">${Number(row.total || 0)}</td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>`;
+}
+
 async function loadRulesAndScores() {
   state.rules = (await api("/api/rules")).rules;
-  const scores = (await api(`/api/scores?${periodQuery()}`)).scores;
+  const year = scoreYearValue();
+  const [scoresData, annualData] = await Promise.all([
+    api(`/api/scores?${periodQuery()}`),
+    api(`/api/dashboards/red-black?from=${year}-01-01&to=${year}-12-31`),
+  ]);
+  const scores = scoresData.scores || [];
   const renderRuleColumn = (kind, title) => {
     const rules = state.rules.filter((rule) => rule.kind === kind);
     return `<section class="rule-column ${kind}">
@@ -974,20 +1486,19 @@ async function loadRulesAndScores() {
         <small>${rules.length} 条</small>
       </div>
       <div class="item-list">
-        ${rules.length ? rules.map((rule) => `<div class="item"><p>${escapeHtml(rule.content)}</p></div>`).join("") : "<p>暂无规则</p>"}
+        ${rules.length ? rules.map((rule, index) => `
+          <button class="item rule-pick-btn" type="button" data-rule-id="${rule.id}" data-rule-kind="${rule.kind}" data-rule-index="${index + 1}">
+            <span class="rule-number">${index + 1}</span>
+            <p>${escapeHtml(rule.content)}</p>
+          </button>`).join("") : "<p>暂无规则</p>"}
       </div>
     </section>`;
   };
   $("#ruleList").innerHTML = renderRuleColumn("red", "红榜") + renderRuleColumn("black", "黑榜");
-  $("#scoreList").innerHTML = table(["日期", "成员", "类型", "积分", "规则", "依据"], scores.map((score) => [
-    score.score_date,
-    score.display_name,
-    score.kind === "red" ? "红榜" : "黑榜",
-    score.points,
-    score.rule_title || "-",
-    score.reason,
-  ]));
+  renderAnnualScoreTable(annualData.annual || [], year);
+  renderScoreList(scores);
   populateSelects();
+  renderSelectedScoreRule();
 }
 
 function recurrenceRule(option = {}) {
@@ -1655,15 +2166,51 @@ function renderMeetingCalendar(meetings) {
   $("#meetingCalendar").innerHTML = weekdays + cells.join("");
 }
 
+function meetingListRange() {
+  const today = iso(new Date());
+  if (state.meetingListScope === "month") {
+    const monthFrom = iso(monthStart(state.meetingMonth));
+    const monthTo = iso(monthEnd(state.meetingMonth));
+    return {
+      from: monthFrom > today ? monthFrom : today,
+      to: monthTo,
+      label: "本月",
+    };
+  }
+  const weekFrom = mondayOf(today);
+  const weekTo = iso(addDays(`${weekFrom}T00:00:00`, 6));
+  return {
+    from: today > weekFrom ? today : weekFrom,
+    to: weekTo,
+    label: "本周",
+  };
+}
+
+function upcomingMeetings(meetings = state.meetings) {
+  const range = meetingListRange();
+  return meetings
+    .filter((meeting) => meeting.meeting_date >= range.from && meeting.meeting_date <= range.to)
+    .sort((a, b) => String(a.meeting_date).localeCompare(String(b.meeting_date)) || Number(a.id) - Number(b.id));
+}
+
 function renderMeetingList(meetings) {
   const list = $("#meetingList");
   if (!list) return;
-  list.innerHTML = meetings.length ? meetings.map((meeting) => `
+  const range = meetingListRange();
+  const visibleMeetings = upcomingMeetings(meetings);
+  const title = $("#meetingListTitle");
+  const hint = $("#meetingListHint");
+  if (title) title.textContent = `${range.label}会议`;
+  if (hint) hint.textContent = `${shortDate(range.from)} 至 ${shortDate(range.to)}，只显示未过期会议。`;
+  $$("[data-meeting-list-scope]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.meetingListScope === state.meetingListScope);
+  });
+  list.innerHTML = visibleMeetings.length ? visibleMeetings.map((meeting) => `
     <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
-      <span>${escapeHtml(meeting.meeting_date)}</span>
+      <span>${escapeHtml(shortDate(meeting.meeting_date))}</span>
       <strong>${escapeHtml(meeting.title)}</strong>
       <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
-    </button>`).join("") : "<p>本月暂无会议。</p>";
+    </button>`).join("") : `<p>${range.label}暂无后续会议。</p>`;
 }
 
 function renderMeetingTopicScopeForm(meeting) {
@@ -1752,10 +2299,11 @@ function renderMeetingDetail(meeting) {
 async function loadMeetings() {
   const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
   state.meetings = data.meetings;
-  const selectedStillVisible = state.meetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  const visibleMeetings = upcomingMeetings(state.meetings);
+  const selectedStillVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
   if (!selectedStillVisible) {
-    const sameDate = state.meetings.find((meeting) => meeting.meeting_date === state.selectedMeetingDate);
-    state.selectedMeetingId = sameDate?.id || state.meetings[0]?.id || null;
+    const sameDate = visibleMeetings.find((meeting) => meeting.meeting_date === state.selectedMeetingDate);
+    state.selectedMeetingId = sameDate?.id || visibleMeetings[0]?.id || null;
   }
   const selectedMeeting = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
   if (selectedMeeting) state.selectedMeetingDate = selectedMeeting.meeting_date;
@@ -1772,6 +2320,21 @@ async function loadMeetings() {
       </span>`).join("")
     : "<p>暂无议题类型</p>";
   populateSelects();
+}
+
+function setMeetingListScope(scope) {
+  if (!["week", "month"].includes(scope)) return;
+  state.meetingListScope = scope;
+  const visibleMeetings = upcomingMeetings(state.meetings);
+  const selectedVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  if (!selectedVisible) {
+    state.selectedMeetingId = visibleMeetings[0]?.id || null;
+    if (visibleMeetings[0]) state.selectedMeetingDate = visibleMeetings[0].meeting_date;
+  }
+  const selectedMeeting = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+  renderMeetingCalendar(state.meetings);
+  renderMeetingList(state.meetings);
+  renderMeetingDetail(selectedMeeting || null);
 }
 
 function renderAttendanceReadonly(meeting) {
@@ -1959,6 +2522,36 @@ function renderShiftLine(shift) {
   </div>`;
 }
 
+function shiftTypeLabel(shift) {
+  return shift.shift_type === "night" ? "夜班" : "白班";
+}
+
+function renderShiftDayPopover(date, shifts) {
+  if (!shifts.length) return "";
+  const sorted = [...shifts].sort((a, b) => {
+    const typeOrder = (a.shift_type === "night" ? 1 : 0) - (b.shift_type === "night" ? 1 : 0);
+    if (typeOrder) return typeOrder;
+    return String(a.machine_name || "").localeCompare(String(b.machine_name || ""), "zh-CN");
+  });
+  return `<div class="shift-day-popover" role="tooltip">
+    <div class="shift-popover-head">
+      <strong>${escapeHtml(shortDate(date))} 排班详情</strong>
+      <span>${sorted.length} 条</span>
+    </div>
+    <div class="shift-popover-list">
+      ${sorted.map((shift) => `
+        <div class="shift-popover-row ${shift.shift_type === "night" ? "night" : "day"}">
+          <span class="shift-popover-type">${escapeHtml(shiftTypeLabel(shift))}</span>
+          <div>
+            <strong>${escapeHtml(shift.machine_name || "未填写机台")}</strong>
+            <span>支撑人员：${escapeHtml(shift.display_name || "未指定")}</span>
+            <small>${Number(shift.hours || 0) ? `${Number(shift.hours)} 小时` : "未填写工时"}${shift.note ? ` · ${escapeHtml(shift.note)}` : ""}</small>
+          </div>
+        </div>`).join("")}
+    </div>
+  </div>`;
+}
+
 function renderCalendar() {
   const month = state.shiftMonth;
   const start = monthStart(month);
@@ -1989,12 +2582,31 @@ function renderCalendar() {
     const date = iso(d);
     const shifts = byDate[date] || [];
     const hasMine = shifts.some((shift) => Number(shift.user_id) === Number(state.user?.id));
-    cells.push(`<div class="day-cell shift-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""} ${hasMine ? "has-mine" : ""}" data-date="${date}">
+    const hasShifts = shifts.length > 0;
+    const popoverOpen = hasShifts && state.activeShiftPopoverDate === date;
+    const detailLabel = hasShifts
+      ? `${date}，${shifts.length} 条排班，点击查看机台和支撑人员`
+      : `${date}，暂无排班`;
+    cells.push(`<div class="day-cell shift-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedShiftDate ? "selected" : ""} ${hasMine ? "has-mine" : ""} ${hasShifts ? "has-shifts" : ""} ${popoverOpen ? "popover-open" : ""}" data-date="${date}" tabindex="0" aria-label="${escapeHtml(detailLabel)}">
       <div class="day-no">${d.getDate()}</div>
       ${shifts.map(renderShiftLine).join("")}
+      ${renderShiftDayPopover(date, shifts)}
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
+}
+
+function selectShiftDay(cell) {
+  if (!cell) return;
+  const date = cell.dataset.date;
+  state.selectedShiftDate = date;
+  state.activeShiftPopoverDate = cell.classList.contains("has-shifts") ? date : null;
+  renderCalendar();
+}
+
+function closeShiftPopover() {
+  state.activeShiftPopoverDate = null;
+  $$(".shift-day.popover-open").forEach((cell) => cell.classList.remove("popover-open"));
 }
 
 async function loadShifts() {
@@ -2017,11 +2629,21 @@ async function loadThanks() {
     <div class="item thank-item">
       <div class="thank-item-head">
         <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
-        ${isAdminView() ? `<button class="danger thank-delete-btn" type="button" data-vote-id="${vote.id}" data-vote-title="${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}">删除</button>` : ""}
+        ${canManageThankVote(vote) ? `
+          <div class="thank-item-actions">
+            <button class="secondary thank-edit-btn" type="button" data-vote-id="${vote.id}" data-evidence="${escapeHtml(vote.evidence || "")}">编辑</button>
+            <button class="danger thank-delete-btn" type="button" data-vote-id="${vote.id}" data-vote-title="${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}">删除</button>
+          </div>` : ""}
       </div>
       <p>${escapeHtml(vote.evidence)}</p>
       <p class="thank-date-line">周次 ${escapeHtml(shortDate(vote.week_start))} · 送出 ${escapeHtml(shortDateTime(vote.created_at))}</p>
     </div>`).join("") : "<p>暂无感谢记录</p>";
+}
+
+function canManageThankVote(vote) {
+  if (!state.user) return false;
+  if (isAdminView()) return true;
+  return Number(vote.voter_id) === Number(state.user.id) && isTodayValue(vote.created_at);
 }
 
 function thankFormPayload(form) {
@@ -2033,6 +2655,16 @@ function thankFormPayload(form) {
     week_start: data.week_start,
     evidence: data.evidence,
   };
+}
+
+function updateThankRecipientPicker(picker) {
+  if (!picker) return;
+  const checked = $$('input[name="receiver_ids"]:checked', picker);
+  const names = checked.map((input) => input.dataset.name || input.value);
+  const label = $("[data-thank-selected-label]", picker);
+  const count = $("[data-thank-selected-count]", picker);
+  if (label) label.textContent = names.length ? names.join("、") : "选择感谢对象（可多选）";
+  if (count) count.textContent = `${names.length} 人`;
 }
 
 function canLoadPageData(id) {
@@ -2089,6 +2721,7 @@ function bindForm(id, handler) {
     try {
       await handler(formData(form), form);
       form.reset();
+      syncMorningChoiceGroups(form);
       setDefaultDates();
       await refreshAll();
       toast("已保存");
@@ -2431,6 +3064,7 @@ function moveMonth(delta) {
 
 function moveMeetingMonth(delta) {
   state.meetingMonth = new Date(state.meetingMonth.getFullYear(), state.meetingMonth.getMonth() + delta, 1);
+  state.meetingListScope = "month";
   state.selectedMeetingDate = iso(new Date(state.meetingMonth.getFullYear(), state.meetingMonth.getMonth(), 1));
   loadMeetings().catch((error) => toast(error.message));
 }
@@ -2502,6 +3136,9 @@ function bindEvents() {
   $("#nextMonthBtn").addEventListener("click", () => moveMonth(1));
   $("#prevMonthBtn2").addEventListener("click", () => moveMonth(-1));
   $("#nextMonthBtn2").addEventListener("click", () => moveMonth(1));
+  $("#scoreYear")?.addEventListener("change", () => {
+    loadRulesAndScores().catch((error) => toast(error.message));
+  });
 
   bindForm("#userForm", (data) => api("/api/users", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#ruleForm", (data) => api("/api/rules", { method: "POST", body: JSON.stringify(data) }));
@@ -2512,6 +3149,14 @@ function bindEvents() {
     if (state.morningReadOnly) throw new Error("历史日期只读，不能新增");
     const payload = { ...data, item_date: state.morningDate };
     if (!isAdminView()) delete payload.owner_id;
+    return api("/api/morning-items", { method: "POST", body: JSON.stringify(payload) });
+  });
+  bindForm("#personalMorningCreateForm", (data) => {
+    const payload = {
+      ...data,
+      status: "doing",
+      item_date: iso(new Date()),
+    };
     return api("/api/morning-items", { method: "POST", body: JSON.stringify(payload) });
   });
   bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
@@ -2572,10 +3217,29 @@ function bindEvents() {
       closeMemberEditModal();
       closeMorningHistoryModal();
       closeMeetingMinuteModal();
+      closeShiftPopover();
+      return;
+    }
+    const shiftDay = event.target.closest?.(".shift-day");
+    if (shiftDay && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      selectShiftDay(shiftDay);
+    }
+    const personalDoneItem = event.target.closest?.("[data-personal-calendar-focus]");
+    if (personalDoneItem && !event.target.closest("button") && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      focusPersonalMorningChain(personalDoneItem.dataset.personalCalendarFocus);
     }
   });
 
   document.body.addEventListener("click", (event) => {
+    if (!event.target.closest("#shiftCalendar")) {
+      closeShiftPopover();
+    }
+    const activeThankPicker = event.target.closest(".thank-recipient-picker");
+    $$(".thank-recipient-picker[open]").forEach((picker) => {
+      if (picker !== activeThankPicker) picker.removeAttribute("open");
+    });
     const memberEditButton = event.target.closest(".member-edit-btn");
     if (memberEditButton) {
       openMemberEditModal(memberEditButton.dataset.memberId);
@@ -2644,6 +3308,32 @@ function bindEvents() {
     if (!event.target.closest(".chat-reaction-wrap")) {
       closeReactionPopover();
     }
+    const rulePick = event.target.closest(".rule-pick-btn");
+    if (rulePick) {
+      selectScoreRule(rulePick.dataset.ruleId);
+      return;
+    }
+    const morningChoice = event.target.closest(".morning-choice-btn");
+    if (morningChoice) {
+      setMorningChoice(morningChoice);
+      return;
+    }
+    const personalDoneFocus = event.target.closest("[data-personal-calendar-focus]");
+    if (personalDoneFocus && !event.target.closest("button")) {
+      focusPersonalMorningChain(personalDoneFocus.dataset.personalCalendarFocus);
+      return;
+    }
+    const meetingListScope = event.target.closest("[data-meeting-list-scope]");
+    if (meetingListScope) {
+      setMeetingListScope(meetingListScope.dataset.meetingListScope);
+      return;
+    }
+    if (event.target.closest(".clear-score-rule-btn")) {
+      const form = $("#scoreForm");
+      if (form) form.elements.rule_id.value = "";
+      renderSelectedScoreRule();
+      return;
+    }
     const morningDelete = event.target.closest(".morning-delete-btn");
     if (morningDelete) {
       if (state.morningReadOnly) {
@@ -2658,6 +3348,16 @@ function bindEvents() {
           renderMorning();
           toast("早例会事项已删除");
         })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const thankEdit = event.target.closest(".thank-edit-btn");
+    if (thankEdit) {
+      const evidence = window.prompt("修改感谢事实依据", thankEdit.dataset.evidence || "");
+      if (evidence === null) return;
+      api(`/api/thank-you/${thankEdit.dataset.voteId}`, { method: "PATCH", body: JSON.stringify({ evidence }) })
+        .then(loadThanks)
+        .then(() => toast("感谢记录已更新"))
         .catch((error) => toast(error.message));
       return;
     }
@@ -2738,6 +3438,7 @@ function bindEvents() {
     const shiftDelete = event.target.closest(".shift-delete-btn");
     if (shiftDelete) {
       event.stopPropagation();
+      closeShiftPopover();
       if (!window.confirm("确定删除这条排班吗？")) return;
       api(`/api/shifts/${shiftDelete.dataset.shiftId}`, { method: "DELETE" })
         .then(loadShifts)
@@ -2747,8 +3448,8 @@ function bindEvents() {
     }
     const shiftCell = event.target.closest(".shift-day");
     if (shiftCell) {
-      state.selectedShiftDate = shiftCell.dataset.date;
-      renderCalendar();
+      selectShiftDay(shiftCell);
+      return;
     }
   });
 
@@ -2763,6 +3464,10 @@ function bindEvents() {
       fileToDataUrl(file)
         .then((src) => setMemberAvatarPreview(src, member?.name || "?"))
         .catch((error) => toast(error.message));
+    }
+    if (event.target.matches('.thank-recipient-picker input[name="receiver_ids"]')) {
+      updateThankRecipientPicker(event.target.closest(".thank-recipient-picker"));
+      return;
     }
     if (event.target.matches('.attendance-donation input[name="donation_done"]')) {
       const form = event.target.closest(".attendance-row");
@@ -2796,9 +3501,11 @@ function bindEvents() {
     const linkQualityForm = event.target.closest(".link-quality-form");
     const chatReplyForm = event.target.closest(".chat-reply-form");
     const morningItemForm = event.target.closest(".morning-item-form");
+    const personalMorningForm = event.target.closest(".personal-morning-form");
     const permissionForm = event.target.closest(".user-type-permission-form");
     const passwordForm = event.target.closest("#passwordForm");
-    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm && !morningItemForm && !permissionForm && !passwordForm) return;
+    const scoreEditForm = event.target.closest(".score-edit-form");
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !chatReplyForm && !morningItemForm && !personalMorningForm && !permissionForm && !passwordForm && !scoreEditForm) return;
     event.preventDefault();
     try {
       if (passwordForm) {
@@ -2825,6 +3532,12 @@ function bindEvents() {
         toast("用户类型权限已保存");
         return;
       }
+      if (scoreEditForm) {
+        await api(`/api/scores/${scoreEditForm.dataset.scoreId}`, { method: "PATCH", body: JSON.stringify(fullFormData(scoreEditForm)) });
+        await loadRulesAndScores();
+        toast("积分明细已更新");
+        return;
+      }
       if (morningItemForm) {
         if (state.morningReadOnly) {
           toast("历史日期只读，不能修改");
@@ -2838,6 +3551,15 @@ function bindEvents() {
         state.morningUsers = data.users || state.morningUsers;
         renderMorning();
         toast("早例会事项已保存");
+        return;
+      }
+      if (personalMorningForm) {
+        await api(`/api/morning-items/${personalMorningForm.dataset.itemId}`, {
+          method: "PATCH",
+          body: JSON.stringify(fullFormData(personalMorningForm)),
+        });
+        await loadDashboard();
+        toast("事项进展已同步");
         return;
       }
       if (chatReplyForm) {
@@ -2900,12 +3622,16 @@ async function boot() {
     const data = await api("/api/me");
     state.user = data.user;
     state.permissions = data.permissions;
+    state.publicSettings = data.settings || {};
+    applyBranding();
     applyAuthView();
     switchPage("members");
     await refreshAll();
   } catch {
     state.user = null;
     state.permissions = {};
+    state.publicSettings = {};
+    applyBranding();
     state.showLogin = false;
     applyAuthView();
     await refreshAll();
