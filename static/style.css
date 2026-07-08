@@ -3074,6 +3074,67 @@ th {
   gap: 16px;
 }
 
+.machine-list-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.machine-list-heading strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.machine-list-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.machine-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.machine-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 9px 10px;
+}
+
+.machine-item strong,
+.machine-item span,
+.machine-item small {
+  display: block;
+  min-width: 0;
+}
+
+.machine-item strong {
+  color: var(--ink);
+}
+
+.machine-item span,
+.machine-item small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.machine-item button {
+  width: auto;
+  min-width: 54px;
+  min-height: 30px;
+  padding: 5px 10px;
+}
+
 .calendar-head,
 .month-switch {
   display: flex;
@@ -3209,6 +3270,7 @@ th {
 .shift-day.popover-open .shift-day-popover {
   opacity: 1;
   visibility: visible;
+  pointer-events: auto;
   transform: translateY(0);
 }
 
@@ -3246,7 +3308,7 @@ th {
 
 .shift-popover-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: start;
   border: 1px solid #e5eaf2;
@@ -3385,8 +3447,8 @@ th {
   box-shadow: none;
   line-height: 18px;
   font-size: 13px;
-  opacity: 0;
-  transform: scale(0.92);
+  opacity: 1;
+  transform: scale(1);
   transition: opacity 0.16s ease, transform 0.16s ease;
 }
 
@@ -3394,6 +3456,18 @@ th {
 .shift-delete-btn:focus {
   opacity: 1;
   transform: scale(1);
+}
+
+.shift-popover-delete {
+  width: auto;
+  min-width: 44px;
+  height: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  line-height: 1;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .link-grid {

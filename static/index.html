@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=20260708-shift-machine" />
   </head>
   <body>
     <div class="app-shell">
@@ -439,6 +439,11 @@
                 <input name="description" placeholder="说明" />
                 <button>新增机台</button>
               </form>
+              <div class="machine-list-heading">
+                <strong>机台管理</strong>
+                <span>删除机台会同步清理该机台下的排班。</span>
+              </div>
+              <div id="machineList" class="machine-list"></div>
             </section>
 
             <section class="shift-layout">
@@ -641,6 +646,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260708-shift-machine"></script>
   </body>
 </html>

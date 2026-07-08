@@ -1049,6 +1049,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Connection", "close")
         self.close_connection = True
         self.end_headers()
@@ -1323,6 +1326,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"machines": self.list_machines()}
             if method == "POST":
                 return self.create_machine()
+        if len(parts) == 3 and parts[:2] == ["api", "machines"] and method == "DELETE":
+            return self.delete_machine(int(parts[2]))
 
         if path == "/api/shifts":
             if method == "GET":
@@ -1528,6 +1533,12 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
+        if "username" in data:
+            username = (data.get("username") or "").strip()
+            if not username:
+                raise AppError(400, "账号不能为空")
+            fields.append("username=?")
+            values.append(username)
         for key in ("display_name", "role", "active", "user_type"):
             if key in data:
                 fields.append(f"{key}=?")
@@ -1540,6 +1551,13 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(user_id)
         with connect() as conn:
+            if "username" in data:
+                duplicate = conn.execute(
+                    "SELECT id FROM users WHERE username=? AND id<>?",
+                    ((data.get("username") or "").strip(), user_id),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(400, "账号已存在")
             if "user_type" in data and not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (data.get("user_type"),)).fetchone():
                 raise AppError(400, "用户类型不存在")
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
@@ -2690,6 +2708,27 @@ class Handler(BaseHTTPRequestHandler):
             cursor = conn.execute("INSERT INTO machines(name, description) VALUES(?,?)", (data.get("name"), data.get("description") or ""))
             write_audit(conn, admin, "machine.create", "machine", cursor.lastrowid, "机台已创建", {"name": data.get("name")}, self.client_address[0])
         return {"message": "机台已创建", "machines": self.list_machines()}
+
+    def delete_machine(self, machine_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            machine = conn.execute("SELECT * FROM machines WHERE id=?", (machine_id,)).fetchone()
+            if not machine:
+                raise AppError(404, "机台不存在")
+            shift_count = conn.execute("SELECT COUNT(*) AS count FROM shifts WHERE machine_id=?", (machine_id,)).fetchone()["count"]
+            conn.execute("DELETE FROM shifts WHERE machine_id=?", (machine_id,))
+            conn.execute("DELETE FROM machines WHERE id=?", (machine_id,))
+            write_audit(
+                conn,
+                admin,
+                "machine.delete",
+                "machine",
+                machine_id,
+                "机台已删除",
+                {"name": machine["name"], "deleted_shifts": shift_count},
+                self.client_address[0],
+            )
+        return {"message": "机台已删除", "machines": self.list_machines()}
 
     def list_shifts(self, query):
         where, params = date_filter(query, "s.shift_date")

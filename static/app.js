@@ -1218,7 +1218,9 @@ function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
   return `<table><thead><tr><th>账号</th><th>姓名 / 角色</th><th>用户类型</th><th>密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
-      <td>${escapeHtml(user.username)}</td>
+      <td>
+        <input form="userEdit${user.id}" name="username" value="${escapeHtml(user.username)}" placeholder="账号" required>
+      </td>
       <td>
         <form id="userEdit${user.id}" class="user-edit-form user-inline-form" data-user-id="${user.id}">
           <input name="display_name" value="${escapeHtml(user.display_name)}" placeholder="姓名" required>
@@ -2542,6 +2544,24 @@ function renderShiftLine(shift) {
   </div>`;
 }
 
+function renderMachineList() {
+  const target = $("#machineList");
+  if (!target) return;
+  target.innerHTML = state.machines.length
+    ? state.machines.map((machine) => {
+      const shiftCount = state.shifts.filter((shift) => Number(shift.machine_id) === Number(machine.id)).length;
+      return `<div class="machine-item">
+        <div>
+          <strong>${escapeHtml(machine.name)}</strong>
+          <span>${machine.description ? escapeHtml(machine.description) : "暂无说明"}</span>
+        </div>
+        <small>${shiftCount} 条本月排班</small>
+        <button class="danger machine-delete-btn" type="button" data-machine-id="${machine.id}" data-machine-name="${escapeHtml(machine.name)}">删除</button>
+      </div>`;
+    }).join("")
+    : `<p class="empty-note">暂无机台，先新增一个机台用于排班。</p>`;
+}
+
 function shiftTypeLabel(shift) {
   return shift.shift_type === "night" ? "夜班" : "白班";
 }
@@ -2567,6 +2587,7 @@ function renderShiftDayPopover(date, shifts) {
             <span>支撑人员：${escapeHtml(shift.display_name || "未指定")}</span>
             <small>${Number(shift.hours || 0) ? `${Number(shift.hours)} 小时` : "未填写工时"}${shift.note ? ` · ${escapeHtml(shift.note)}` : ""}</small>
           </div>
+          ${isAdminView() ? `<button class="shift-delete-btn shift-popover-delete" type="button" data-shift-id="${shift.id}" title="删除这条排班">删除</button>` : ""}
         </div>`).join("")}
     </div>
   </div>`;
@@ -2614,6 +2635,7 @@ function renderCalendar() {
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
+  renderMachineList();
 }
 
 function selectShiftDay(cell) {
@@ -2793,6 +2815,7 @@ async function submitUserEditForm(form) {
   const response = await api(`/api/users/${form.dataset.userId}`, { method: "PATCH", body: JSON.stringify(data) });
   state.users = response.users || state.users;
   if (Number(form.dataset.userId) === Number(state.user?.id)) {
+    state.user.username = data.username || state.user.username;
     state.user.display_name = data.display_name || state.user.display_name;
     if (data.role) state.user.role = data.role;
     if (data.user_type) state.user.user_type = data.user_type;
@@ -3453,6 +3476,17 @@ function bindEvents() {
       renderMeetingCalendar(state.meetings);
       renderMeetingList(state.meetings);
       renderMeetingDetail(meeting || null);
+      return;
+    }
+    const machineDelete = event.target.closest(".machine-delete-btn");
+    if (machineDelete) {
+      event.stopPropagation();
+      const name = machineDelete.dataset.machineName || "该机台";
+      if (!window.confirm(`确定删除「${name}」吗？该机台下的排班也会一起删除。`)) return;
+      api(`/api/machines/${machineDelete.dataset.machineId}`, { method: "DELETE" })
+        .then(refreshAll)
+        .then(() => toast("机台已删除"))
+        .catch((error) => toast(error.message));
       return;
     }
     const shiftDelete = event.target.closest(".shift-delete-btn");
