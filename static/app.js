@@ -1,6 +1,3 @@
-import "/vendor/emoji-picker-element/index.js";
-import zhCnEmojiI18n from "/vendor/emoji-picker-element/i18n/zh_CN.js";
-
 const uiThemeVersion = "miro-v1";
 
 const state = {
@@ -64,13 +61,12 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules"]);
 const guestPages = new Set(["members", "shifts", "rules", "thanks", "links"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
-const teamReactionOptions = ["+1", "👍", "收到", "辛苦了", "已跟进"];
+const teamReactionOptions = ["+1", "👍", "🤑", "🤔", "收到", "辛苦了", "已跟进"];
 const teamReactionEmojiAssets = {
   "1f44d": "/vendor/team-reaction-emoji/1f44d.svg",
   "1f911": "/vendor/team-reaction-emoji/1f911.svg",
   "1f914": "/vendor/team-reaction-emoji/1f914.svg",
 };
-const emojiDataSource = "/vendor/emoji-picker-element-data/zh/emojibase/data.json";
 let activeReactionPostId = null;
 let activePageRefreshId = 0;
 
@@ -3019,18 +3015,10 @@ function ensureReactionPopover() {
   popover.id = "teamReactionPopover";
   popover.className = "chat-reaction-picker hidden";
   popover.innerHTML = `
-    <div class="chat-reaction-quick">
+    <div class="chat-reaction-picker-title">选择回应</div>
+    <div class="chat-reaction-quick team-reaction-static-grid">
       ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}">${renderReactionMark(reaction)}</button>`).join("")}
-    </div>
-    <emoji-picker class="team-emoji-picker" locale="zh" data-source="${emojiDataSource}"></emoji-picker>`;
-  const picker = popover.querySelector("emoji-picker");
-  picker.i18n = zhCnEmojiI18n;
-  picker.locale = "zh";
-  picker.dataSource = emojiDataSource;
-  picker.addEventListener("emoji-click", (event) => {
-    const reaction = event.detail?.unicode || event.detail?.emoji?.unicode;
-    sendTeamReaction(activeReactionPostId, reaction).catch((error) => toast(error.message));
-  });
+    </div>`;
   document.body.appendChild(popover);
   return popover;
 }
