@@ -2998,7 +2998,9 @@ function closeReactionPopover() {
 }
 
 async function sendTeamReaction(postId, reaction) {
-  if (!postId || !reaction) return;
+  if (!postId || !reaction) {
+    throw new Error("回应发送失败：缺少对话或回应内容，请重新打开回应面板");
+  }
   const data = await api(`/api/team-posts/${postId}/reactions`, {
     method: "POST",
     body: JSON.stringify({ reaction }),
@@ -3017,8 +3019,16 @@ function ensureReactionPopover() {
   popover.innerHTML = `
     <div class="chat-reaction-picker-title">选择回应</div>
     <div class="chat-reaction-quick team-reaction-static-grid">
-      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}">${renderReactionMark(reaction)}</button>`).join("")}
+      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}" aria-label="${escapeHtml(reaction)}" title="${escapeHtml(reaction)}">${renderReactionMark(reaction)}</button>`).join("")}
     </div>`;
+  popover.addEventListener("click", (event) => {
+    const option = event.target.closest(".chat-reaction-option");
+    if (!option) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const postId = option.dataset.postId || popover.dataset.postId || activeReactionPostId;
+    sendTeamReaction(postId, option.dataset.reaction).catch((error) => toast(error.message));
+  });
   document.body.appendChild(popover);
   return popover;
 }
@@ -3032,6 +3042,9 @@ function openReactionPopover(button) {
   }
   activeReactionPostId = button.dataset.postId;
   popover.dataset.postId = activeReactionPostId;
+  $$(".chat-reaction-option", popover).forEach((option) => {
+    option.dataset.postId = activeReactionPostId;
+  });
   document.body.appendChild(popover);
   popover.classList.remove("hidden");
   const buttonRect = button.getBoundingClientRect();

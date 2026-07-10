@@ -2333,6 +2333,7 @@ th {
   flex: 0 0 auto;
   object-fit: contain;
   vertical-align: -3px;
+  pointer-events: none;
 }
 
 .chat-reaction-text {
@@ -2340,6 +2341,7 @@ th {
   align-items: center;
   line-height: 1;
   font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", var(--font);
+  pointer-events: none;
 }
 
 .chat-reaction-picker {
