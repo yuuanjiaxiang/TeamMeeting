@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="thinking face">
+  <defs>
+    <radialGradient id="face" cx="23" cy="18" r="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff3a8"/>
+      <stop offset=".62" stop-color="#ffd34d"/>
+      <stop offset="1" stop-color="#f2a92d"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="27" fill="url(#face)" stroke="#bd7c10" stroke-width="2"/>
+  <path fill="none" stroke="#5d3a17" stroke-linecap="round" stroke-width="3" d="M15.5 21.5c4-3.4 8.4-3.8 12.6-1.4M37.5 19.5c4.7-1.4 8.4-.7 11.5 2.1"/>
+  <circle cx="24" cy="28" r="3" fill="#4a2d14"/>
+  <circle cx="43" cy="29" r="3" fill="#4a2d14"/>
+  <path fill="none" stroke="#6b3f1d" stroke-linecap="round" stroke-width="3" d="M27 39c4.2 1.1 8.2.9 12-.8"/>
+  <path fill="#ffd98a" stroke="#9d6430" stroke-linejoin="round" stroke-width="2.2" d="M43.5 38.2c3.5 1.8 5.5 5.2 5.1 8.8-.4 3.8-3.4 6.8-7.4 7.3l-9.6 1.2c-2.3.3-4.5-1.2-4.9-3.5-.4-2.1.9-4 2.8-4.7l4.4-1.5-6.8-.5c-2.1-.2-3.7-2-3.5-4.1.1-2 1.8-3.6 3.8-3.6l9 .3c1.9.1 3.8.2 5.5.3h1.6Z"/>
+  <path fill="#fff4c7" opacity=".5" d="M31 49.6l6.1-2.1c1.2-.4 1-2.2-.3-2.4l-9.2-.8c-1.2-.1-2.1-1.1-2-2.2.1-1.2 1.1-2 2.3-2l10 .3c2.9.1 5.8.2 8.3 1.8 1.4 1.4 2.1 3.2 1.9 5.1-.3 2.8-2.7 5-5.7 5.4l-10.8 1.3c-1.3.2-2.6-.7-2.8-2-.2-1.1.6-2.1 2.2-2.4Z"/>
+</svg>

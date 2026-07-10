@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260708-shift-machine" />
+    <link rel="stylesheet" href="/style.css?v=20260710-emoji-static" />
   </head>
   <body>
     <div class="app-shell">
@@ -530,7 +530,13 @@
             </section>
             <div class="split">
               <section class="panel">
-                <h2>Thank You 之星</h2>
+                <div class="panel-title compact-title">
+                  <div>
+                    <h2>Thank You 之星</h2>
+                    <p id="thankPeriodLabel">按月份查看团队感谢榜。</p>
+                  </div>
+                </div>
+                <div id="thankPeriodControls" class="thank-period-controls"></div>
                 <div id="thankStars" class="rank-list"></div>
               </section>
               <section class="panel">
@@ -646,6 +652,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260708-shift-machine"></script>
+    <script type="module" src="/app.js?v=20260710-emoji-static"></script>
   </body>
 </html>

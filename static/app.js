@@ -36,6 +36,9 @@ const state = {
   meetingListScope: "week",
   selectedMeetingDate: iso(new Date()),
   selectedMeetingId: null,
+  thankYear: new Date().getFullYear(),
+  thankScope: "month",
+  thankMonth: new Date().getMonth() + 1,
   viewMode: safeStorageGet("teamLoopViewMode", "admin"),
   showLogin: false,
   uiTheme: safeStorageGet("teamLoopThemeVersion", "") === uiThemeVersion
@@ -58,10 +61,15 @@ const pages = [
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const dateFilterPages = new Set(["dashboard", "rules", "thanks"]);
+const dateFilterPages = new Set(["dashboard", "rules"]);
 const guestPages = new Set(["members", "shifts", "rules", "thanks", "links"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "收到", "辛苦了", "已跟进"];
+const teamReactionEmojiAssets = {
+  "1f44d": "/vendor/team-reaction-emoji/1f44d.svg",
+  "1f911": "/vendor/team-reaction-emoji/1f911.svg",
+  "1f914": "/vendor/team-reaction-emoji/1f914.svg",
+};
 const emojiDataSource = "/vendor/emoji-picker-element-data/zh/emojibase/data.json";
 let activeReactionPostId = null;
 let activePageRefreshId = 0;
@@ -273,11 +281,34 @@ function toast(message) {
   el.textContent = message;
   el.classList.remove("hidden");
   clearTimeout(window.__toastTimer);
-  window.__toastTimer = setTimeout(() => el.classList.add("hidden"), 2200);
+  const duration = Math.min(9000, Math.max(2200, String(message).length * 90));
+  window.__toastTimer = setTimeout(() => el.classList.add("hidden"), duration);
 }
 
 function periodQuery() {
   return `from=${encodeURIComponent($("#fromDate").value)}&to=${encodeURIComponent($("#toDate").value)}`;
+}
+
+function thankPeriodRange() {
+  if (state.thankScope === "year") {
+    return {
+      from: `${state.thankYear}-01-01`,
+      to: `${state.thankYear}-12-31`,
+      label: `${state.thankYear} 年全年`,
+    };
+  }
+  const start = new Date(state.thankYear, state.thankMonth - 1, 1);
+  const end = monthEnd(start);
+  return {
+    from: iso(start),
+    to: iso(end),
+    label: `${state.thankYear} 年 ${state.thankMonth} 月`,
+  };
+}
+
+function thankPeriodQuery() {
+  const range = thankPeriodRange();
+  return `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`;
 }
 
 function shiftPeriodQuery() {
@@ -2123,37 +2154,121 @@ function buildMeetingMinutesHtml(meeting, thankData = {}) {
   </article>`;
 }
 
-async function copyMeetingMinutes(html, text) {
-  if (!navigator.clipboard) return false;
+function errorReason(error) {
+  const name = error?.name ? `${error.name}` : "";
+  const message = error?.message ? `${error.message}` : "";
+  return [name, message].filter(Boolean).join("：") || "未知错误";
+}
+
+function copySelection(html, text, asHtml = true) {
+  const element = document.createElement(asHtml ? "div" : "textarea");
+  element.style.position = "fixed";
+  element.style.left = "-9999px";
+  element.style.top = "0";
+  if (asHtml) {
+    element.contentEditable = "true";
+    element.innerHTML = html;
+  } else {
+    element.value = text;
+  }
+  document.body.appendChild(element);
+  const selection = window.getSelection();
   try {
-    if (window.ClipboardItem) {
-      await navigator.clipboard.write([new ClipboardItem({
-        "text/html": new Blob([html], { type: "text/html" }),
-        "text/plain": new Blob([text], { type: "text/plain" }),
-      })]);
+    if (asHtml) {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
     } else {
-      await navigator.clipboard.writeText(text);
+      element.focus();
+      element.select();
     }
-    return true;
-  } catch {
-    return false;
+    if (!document.execCommand("copy")) {
+      throw new Error("浏览器返回复制失败");
+    }
+    return { ok: true, method: asHtml ? "html-fallback" : "text-fallback" };
+  } catch (error) {
+    return { ok: false, reason: errorReason(error) };
+  } finally {
+    selection?.removeAllRanges();
+    element.remove();
+  }
+}
+
+async function copyMeetingMinutes(html, text) {
+  const failures = [];
+  if (navigator.clipboard) {
+    try {
+      if (window.ClipboardItem && navigator.clipboard.write) {
+        await navigator.clipboard.write([new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        })]);
+        return { ok: true, method: "html" };
+      }
+      await navigator.clipboard.writeText(text);
+      return { ok: true, method: "text" };
+    } catch (error) {
+      failures.push(`剪贴板 API 失败：${errorReason(error)}`);
+    }
+  } else {
+    failures.push("当前浏览器不支持 navigator.clipboard");
+  }
+  const htmlFallback = copySelection(html, text, true);
+  if (htmlFallback.ok) return htmlFallback;
+  failures.push(`兼容 HTML 复制失败：${htmlFallback.reason}`);
+  const textFallback = copySelection("", text, false);
+  if (textFallback.ok) return textFallback;
+  failures.push(`兼容纯文本复制失败：${textFallback.reason}`);
+  return { ok: false, reason: failures.join("；") };
+}
+
+function openMailDraft(subject, text) {
+  const params = new URLSearchParams({ subject });
+  const bodyTooLong = text.length > 1800;
+  if (!bodyTooLong) params.set("body", text);
+  const mailto = `mailto:?${params.toString()}`;
+  try {
+    window.location.href = mailto;
+    return {
+      ok: true,
+      bodyMode: bodyTooLong ? "clipboard-only" : "mailto-body",
+      reason: bodyTooLong ? "纪要内容较长，已避免写入 mailto 正文以免 Outlook 拦截" : "",
+    };
+  } catch (error) {
+    return { ok: false, reason: errorReason(error) };
   }
 }
 
 async function openMeetingEmail(meetingId) {
   const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingId));
-  if (!meeting) throw new Error("请先选择会议");
+  if (!meeting) throw new Error("生成会议邮件失败：请先选择会议");
   const weekStart = mondayOf(meeting.meeting_date);
-  const [thankVotes, thankDashboard] = await Promise.all([
-    api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
-    api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
-  ]);
+  let thankVotes;
+  let thankDashboard;
+  try {
+    [thankVotes, thankDashboard] = await Promise.all([
+      api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+      api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+    ]);
+  } catch (error) {
+    throw new Error(`生成会议邮件失败：读取 Thank You 数据失败，${errorReason(error)}`);
+  }
   const thankData = { votes: thankVotes.votes, stars: thankDashboard.stars };
   const text = buildMeetingMinutesText(meeting, thankData);
   const html = buildMeetingMinutesHtml(meeting, thankData);
-  const copied = await copyMeetingMinutes(html, text);
-  window.location.href = `mailto:?subject=${encodeURIComponent(meetingMinutesSubject(meeting))}`;
-  toast(copied ? "已复制表格纪要，请在 Outlook 正文中粘贴" : "已打开邮件草稿，纪要复制失败请重试");
+  const copyResult = await copyMeetingMinutes(html, text);
+  const mailResult = openMailDraft(meetingMinutesSubject(meeting), text);
+  if (!mailResult.ok) {
+    throw new Error(`生成会议邮件失败：无法唤起邮件客户端，${mailResult.reason}。请确认 Windows 默认邮件应用已设置为 Outlook。`);
+  }
+  if (!copyResult.ok) {
+    toast(`已尝试打开邮件草稿，但纪要复制失败。原因：${copyResult.reason}`);
+    return;
+  }
+  const bodyHint = mailResult.bodyMode === "clipboard-only" ? `；${mailResult.reason}，请在 Outlook 正文中粘贴` : "";
+  const copyHint = copyResult.method === "text" || copyResult.method === "text-fallback" ? "已复制纯文本纪要" : "已复制表格纪要";
+  toast(`已生成会议邮件，${copyHint}${bodyHint}`);
 }
 
 function renderMeetingCalendar(meetings) {
@@ -2661,10 +2776,38 @@ async function loadShifts() {
   renderCalendar();
 }
 
+function renderThankPeriodControls() {
+  const target = $("#thankPeriodControls");
+  if (!target) return;
+  const months = Array.from({ length: 12 }, (_, index) => index + 1);
+  const currentYear = new Date().getFullYear();
+  const years = Array.from(new Set([
+    state.thankYear,
+    ...Array.from({ length: 7 }, (_, index) => currentYear - 5 + index),
+  ])).sort((a, b) => b - a);
+  const monthValue = state.thankScope === "year" ? "year" : String(state.thankMonth);
+  target.innerHTML = `
+    <label>年份
+      <select id="thankYearSelect">
+        ${years.map((year) => `<option value="${year}" ${year === state.thankYear ? "selected" : ""}>${year} 年</option>`).join("")}
+      </select>
+    </label>
+    <label>月份
+      <select id="thankMonthSelect">
+        <option value="year" ${monthValue === "year" ? "selected" : ""}>全年</option>
+        ${months.map((month) => `<option value="${month}" ${monthValue === String(month) ? "selected" : ""}>${month} 月</option>`).join("")}
+      </select>
+    </label>
+  `;
+  const label = $("#thankPeriodLabel");
+  if (label) label.textContent = `${thankPeriodRange().label} Thank You 统计`;
+}
+
 async function loadThanks() {
+  renderThankPeriodControls();
   const [votes, dashboard] = await Promise.all([
-    api(`/api/thank-you?${periodQuery()}`),
-    api(`/api/dashboards/thank-you?${periodQuery()}`),
+    api(`/api/thank-you?${thankPeriodQuery()}`),
+    api(`/api/dashboards/thank-you?${thankPeriodQuery()}`),
   ]);
   $("#thankStars").innerHTML = renderRank(dashboard.stars, "thanks", "次");
   $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
@@ -2825,7 +2968,7 @@ async function submitUserEditForm(form) {
 
 function renderTeamReactions(post) {
   const reactions = post.reactions || [];
-  const renderCount = (item) => `${escapeHtml(item.reaction)} <span>+${Number(item.count || 0)}</span>`;
+  const renderCount = (item) => `${renderReactionMark(item.reaction)} <span>+${Number(item.count || 0)}</span>`;
   if (isGuest()) {
     if (!reactions.length) return "";
     return `<div class="chat-reactions readonly">
@@ -2838,6 +2981,20 @@ function renderTeamReactions(post) {
       <button type="button" class="chat-reaction-picker-toggle" data-post-id="${post.id}">＋回应</button>
     </div>
   </div>`;
+}
+
+function reactionAssetKey(reaction) {
+  return Array.from(String(reaction || ""))
+    .map((char) => char.codePointAt(0).toString(16).toLowerCase())
+    .filter((code) => code !== "fe0f")
+    .join("-");
+}
+
+function renderReactionMark(reaction) {
+  const text = String(reaction || "");
+  const asset = teamReactionEmojiAssets[reactionAssetKey(text)];
+  if (!asset) return `<span class="chat-reaction-text">${escapeHtml(text)}</span>`;
+  return `<img class="chat-reaction-emoji-img" src="${asset}" alt="${escapeHtml(text)}" loading="lazy" decoding="async">`;
 }
 
 function closeReactionPopover() {
@@ -2869,7 +3026,7 @@ function ensureReactionPopover() {
   popover.className = "chat-reaction-picker hidden";
   popover.innerHTML = `
     <div class="chat-reaction-quick">
-      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}">${escapeHtml(reaction)}</button>`).join("")}
+      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}">${renderReactionMark(reaction)}</button>`).join("")}
     </div>
     <emoji-picker class="team-emoji-picker" locale="zh" data-source="${emojiDataSource}"></emoji-picker>`;
   const picker = popover.querySelector("emoji-picker");
@@ -3222,6 +3379,21 @@ function bindEvents() {
   });
   $("#morningOwnerFilter")?.addEventListener("change", renderMorningBoard);
   $("#morningStatusFilter")?.addEventListener("change", renderMorningBoard);
+  $("#thankPeriodControls")?.addEventListener("change", (event) => {
+    if (event.target.matches("#thankYearSelect")) {
+      state.thankYear = Number(event.target.value) || state.thankYear;
+      loadThanks().catch((error) => toast(error.message));
+    }
+    if (event.target.matches("#thankMonthSelect")) {
+      if (event.target.value === "year") {
+        state.thankScope = "year";
+      } else {
+        state.thankScope = "month";
+        state.thankMonth = Number(event.target.value) || state.thankMonth;
+      }
+      loadThanks().catch((error) => toast(error.message));
+    }
+  });
   const linkForm = $("#linkForm");
   if (linkForm) {
     ["title", "url", "description"].forEach((name) => {

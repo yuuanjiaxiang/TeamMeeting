@@ -1700,6 +1700,29 @@ main {
   color: var(--ink);
 }
 
+.thank-period-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 220px));
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 14px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcff;
+}
+
+.thank-period-controls label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.thank-period-controls select {
+  min-height: 36px;
+  background: #fff;
+}
+
 .thank-item-head {
   display: flex;
   align-items: flex-start;
@@ -2272,6 +2295,10 @@ th {
 .chat-reaction-option,
 .chat-reaction-count,
 .chat-reply-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   min-height: 26px;
   border-radius: 999px;
   border: 1px solid var(--line);
@@ -2297,7 +2324,22 @@ th {
 .chat-reaction-chip span,
 .chat-reaction-count span {
   color: inherit;
-  margin-left: 2px;
+}
+
+.chat-reaction-emoji-img {
+  width: 17px;
+  height: 17px;
+  display: inline-block;
+  flex: 0 0 auto;
+  object-fit: contain;
+  vertical-align: -3px;
+}
+
+.chat-reaction-text {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", var(--font);
 }
 
 .chat-reaction-picker {
