@@ -2223,18 +2223,12 @@ async function copyMeetingMinutes(html, text) {
   return { ok: false, reason: failures.join("；") };
 }
 
-function openMailDraft(subject, text) {
+function openMailDraft(subject) {
   const params = new URLSearchParams({ subject });
-  const bodyTooLong = text.length > 1800;
-  if (!bodyTooLong) params.set("body", text);
   const mailto = `mailto:?${params.toString()}`;
   try {
     window.location.href = mailto;
-    return {
-      ok: true,
-      bodyMode: bodyTooLong ? "clipboard-only" : "mailto-body",
-      reason: bodyTooLong ? "纪要内容较长，已避免写入 mailto 正文以免 Outlook 拦截" : "",
-    };
+    return { ok: true };
   } catch (error) {
     return { ok: false, reason: errorReason(error) };
   }
@@ -2258,7 +2252,7 @@ async function openMeetingEmail(meetingId) {
   const text = buildMeetingMinutesText(meeting, thankData);
   const html = buildMeetingMinutesHtml(meeting, thankData);
   const copyResult = await copyMeetingMinutes(html, text);
-  const mailResult = openMailDraft(meetingMinutesSubject(meeting), text);
+  const mailResult = openMailDraft(meetingMinutesSubject(meeting));
   if (!mailResult.ok) {
     throw new Error(`生成会议邮件失败：无法唤起邮件客户端，${mailResult.reason}。请确认 Windows 默认邮件应用已设置为 Outlook。`);
   }
@@ -2266,9 +2260,9 @@ async function openMeetingEmail(meetingId) {
     toast(`已尝试打开邮件草稿，但纪要复制失败。原因：${copyResult.reason}`);
     return;
   }
-  const bodyHint = mailResult.bodyMode === "clipboard-only" ? `；${mailResult.reason}，请在 Outlook 正文中粘贴` : "";
-  const copyHint = copyResult.method === "text" || copyResult.method === "text-fallback" ? "已复制纯文本纪要" : "已复制表格纪要";
-  toast(`已生成会议邮件，${copyHint}${bodyHint}`);
+  const copyHint = copyResult.method === "text" || copyResult.method === "text-fallback" ? "已复制纯文本纪要" : "已复制会议纪要模板";
+  const pasteHint = copyResult.method === "text" || copyResult.method === "text-fallback" ? "HTML 模板复制未生效，请在 Outlook 正文中粘贴纯文本纪要" : "请在 Outlook 正文中粘贴模板";
+  toast(`已生成会议邮件，${copyHint}，${pasteHint}`);
 }
 
 function renderMeetingCalendar(meetings) {
