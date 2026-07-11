@@ -72,6 +72,7 @@ const teamReactionEmojiAssets = {
 };
 const teamReactionEmojiDataSource = "/vendor/emoji-picker-element-data/zh/emojibase/data.json";
 let activeReactionTarget = null;
+let pendingLinkDeleteId = null;
 let activePageRefreshId = 0;
 
 function safeStorageGet(key, fallback) {
@@ -2642,9 +2643,12 @@ function renderLinks() {
             <td><span title="${escapeHtml(link.last_clicked_at || "")}">${Number(link.click_count || 0)} 次</span></td>
             ${canManage ? `
               <td>
-                <div class="link-row-actions">
-                  <button class="secondary link-edit-btn" type="button" data-link-id="${link.id}">编辑</button>
-                  <button class="danger link-delete-btn" type="button" data-link-id="${link.id}">删除</button>
+                <div class="link-action-menu-wrap">
+                  <button class="link-action-menu-toggle" type="button" data-link-menu-toggle data-link-id="${link.id}" aria-label="更多操作" title="更多操作" aria-expanded="false">⋯</button>
+                  <div class="link-action-menu hidden" data-link-menu="${link.id}">
+                    <button class="link-edit-btn" type="button" data-link-id="${link.id}">编辑链接</button>
+                    <button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>
+                  </div>
                 </div>
                 ${isAdminView() ? `<form class="link-quality-form" data-link-id="${link.id}">
                   <select name="pinned">
@@ -3238,12 +3242,55 @@ function closeLinkEditModal() {
   document.body.classList.remove("modal-open");
 }
 
+function closeLinkActionMenus(exceptId = null) {
+  $$("[data-link-menu]").forEach((menu) => {
+    const keepOpen = exceptId !== null && String(menu.dataset.linkMenu) === String(exceptId);
+    menu.classList.toggle("hidden", !keepOpen);
+  });
+  $$("[data-link-menu-toggle]").forEach((button) => {
+    const expanded = exceptId !== null && String(button.dataset.linkId) === String(exceptId);
+    button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  });
+}
+
+function toggleLinkActionMenu(button) {
+  const linkId = button.dataset.linkId;
+  const menu = $(`[data-link-menu="${linkId}"]`);
+  const shouldOpen = menu?.classList.contains("hidden");
+  closeLinkActionMenus(shouldOpen ? linkId : null);
+}
+
+function closeLinkDeleteModal() {
+  const modal = $("#linkDeleteModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  pendingLinkDeleteId = null;
+  document.body.classList.remove("modal-open");
+}
+
+function openLinkDeleteModal(linkId) {
+  if (!canManageLinks()) return;
+  const link = state.links.find((item) => Number(item.id) === Number(linkId));
+  const modal = $("#linkDeleteModal");
+  if (!link || !modal) return;
+  pendingLinkDeleteId = link.id;
+  $("#linkDeleteName").textContent = link.title || "常用链接";
+  $("#linkDeleteUrl").textContent = link.url || "";
+  closeLinkActionMenus();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  $("[data-link-delete-confirm]", modal)?.focus();
+}
+
 function openLinkEditModal(linkId) {
   if (!canManageLinks()) return;
   const link = state.links.find((item) => Number(item.id) === Number(linkId));
   const modal = $("#linkEditModal");
   const form = $("#linkEditForm");
   if (!link || !modal || !form) return;
+  closeLinkActionMenus();
   populateSelects();
   form.dataset.linkId = link.id;
   form.elements.title.value = link.title || "";
@@ -3272,11 +3319,10 @@ async function submitLinkEditForm(form) {
 
 async function deleteLink(linkId) {
   if (!canManageLinks()) throw new Error("当前账号无权删除常用链接");
-  const link = state.links.find((item) => Number(item.id) === Number(linkId));
-  if (!window.confirm(`确定删除常用链接「${link?.title || ""}」吗？删除后不可恢复。`)) return;
   const data = await api(`/api/links/${linkId}`, { method: "DELETE" });
   state.links = data.links || state.links.filter((item) => Number(item.id) !== Number(linkId));
   renderLinks();
+  closeLinkDeleteModal();
   toast(data.message || "链接已删除");
 }
 
@@ -3306,21 +3352,7 @@ function openMemberEditModal(memberId) {
   form.elements.title.focus();
 }
 
-const memberClusterDefinitions = [
-  { key: "coordination", label: "项目统筹", tone: "blue", keywords: ["管理", "统筹", "项目", "规则", "协调", "负责人"] },
-  { key: "quality", label: "质量与复盘", tone: "red", keywords: ["质量", "复盘", "测试", "SOP", "标准"] },
-  { key: "automation", label: "工具与自动化", tone: "purple", keywords: ["自动化", "工具", "脚本", "数据", "看板", "链接库"] },
-  { key: "field", label: "现场与机台", tone: "green", keywords: ["现场", "机台", "TOPTB", "交接", "执行", "夜班"] },
-  { key: "support", label: "协作支持", tone: "orange", keywords: ["支持", "协作", "新人", "轮岗", "学习"] },
-];
-
-function memberCluster(member) {
-  const source = [member.title, ...(member.tags || []), ...(member.skills || [])].join(" ").toLowerCase();
-  return memberClusterDefinitions.find((cluster) => cluster.keywords.some((keyword) => source.includes(keyword.toLowerCase())))
-    || { key: "other", label: "其他成员", tone: "gray", keywords: [] };
-}
-
-function renderMemberCard(member, clusterIndex = 0, clusterSize = 1) {
+function renderMemberCard(member, memberIndex = 0, memberCount = 1) {
   const canEdit = isAdminView() || member.user_id === state.user?.id;
   const skills = member.skills || [];
   const tags = member.tags || [];
@@ -3332,8 +3364,8 @@ function renderMemberCard(member, clusterIndex = 0, clusterSize = 1) {
       <section class="member-profile">
         ${isAdminView() ? `
           <div class="member-order-actions" aria-label="调整成员顺序">
-            <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="up" title="向前移动" ${clusterIndex === 0 ? "disabled" : ""}>↑</button>
-            <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="down" title="向后移动" ${clusterIndex === clusterSize - 1 ? "disabled" : ""}>↓</button>
+            <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="up" title="向前移动" ${memberIndex === 0 ? "disabled" : ""}>↑</button>
+            <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="down" title="向后移动" ${memberIndex === memberCount - 1 ? "disabled" : ""}>↓</button>
           </div>` : ""}
         <div class="member-head">
           ${renderAvatar(member)}
@@ -3354,49 +3386,25 @@ function renderMemberCard(member, clusterIndex = 0, clusterSize = 1) {
     </article>`;
 }
 
-function renderMemberGroups() {
-  const grouped = new Map();
-  state.members.forEach((member) => {
-    const cluster = memberCluster(member);
-    if (!grouped.has(cluster.key)) grouped.set(cluster.key, { ...cluster, members: [] });
-    grouped.get(cluster.key).members.push(member);
-  });
-  const orderedKeys = [...memberClusterDefinitions.map((item) => item.key), "other"];
-  return orderedKeys
-    .map((key) => grouped.get(key))
-    .filter(Boolean)
-    .map((cluster) => `
-      <section class="member-cluster member-cluster-${cluster.tone}">
-        <div class="member-cluster-head">
-          <div><h2>${escapeHtml(cluster.label)}</h2><p>按成员标签与能力方向归类</p></div>
-          <span>${cluster.members.length} 人</span>
-        </div>
-        <div class="member-layout">
-          ${cluster.members.map((member, index) => renderMemberCard(member, index, cluster.members.length)).join("")}
-        </div>
-      </section>`)
-    .join("");
+function renderMemberCards() {
+  return state.members.map((member, index) => renderMemberCard(member, index, state.members.length)).join("");
 }
 
 async function moveMemberCard(memberId, direction) {
   const member = state.members.find((item) => Number(item.id) === Number(memberId));
   if (!member || !isAdminView()) return;
-  const clusterKey = memberCluster(member).key;
-  const clusterMembers = state.members.filter((item) => memberCluster(item).key === clusterKey);
-  const index = clusterMembers.findIndex((item) => Number(item.id) === Number(memberId));
+  const index = state.members.findIndex((item) => Number(item.id) === Number(memberId));
   const swapIndex = direction === "up" ? index - 1 : index + 1;
-  if (index < 0 || swapIndex < 0 || swapIndex >= clusterMembers.length) return;
-  const firstIndex = state.members.findIndex((item) => Number(item.id) === Number(clusterMembers[index].id));
-  const secondIndex = state.members.findIndex((item) => Number(item.id) === Number(clusterMembers[swapIndex].id));
-  [state.members[firstIndex], state.members[secondIndex]] = [state.members[secondIndex], state.members[firstIndex]];
-  $("#memberList").innerHTML = renderMemberGroups();
+  if (index < 0 || swapIndex < 0 || swapIndex >= state.members.length) return;
+  [state.members[index], state.members[swapIndex]] = [state.members[swapIndex], state.members[index]];
+  $("#memberList").innerHTML = renderMemberCards();
   try {
     const data = await api("/api/members/order", {
       method: "PATCH",
       body: JSON.stringify({ member_ids: state.members.map((item) => item.id) }),
     });
     state.members = data.members || state.members;
-    $("#memberList").innerHTML = renderMemberGroups();
+    $("#memberList").innerHTML = renderMemberCards();
     toast("成员顺序已保存");
   } catch (error) {
     await loadMembers();
@@ -3411,7 +3419,7 @@ async function loadMembers() {
   ]);
   state.members = membersData.members;
   renderTeamChat(postsData.posts);
-  $("#memberList").innerHTML = renderMemberGroups();
+  $("#memberList").innerHTML = renderMemberCards();
 }
 
 function updateOptionSelect(typeSelect) {
@@ -3622,6 +3630,8 @@ function bindEvents() {
       closeMorningHistoryModal();
       closeMeetingMinuteModal();
       closeLinkEditModal();
+      closeLinkDeleteModal();
+      closeLinkActionMenus();
       closeShiftPopover();
       return;
     }
@@ -3645,6 +3655,9 @@ function bindEvents() {
     $$(".thank-recipient-picker[open]").forEach((picker) => {
       if (picker !== activeThankPicker) picker.removeAttribute("open");
     });
+    if (!event.target.closest(".link-action-menu-wrap")) {
+      closeLinkActionMenus();
+    }
     const memberEditButton = event.target.closest(".member-edit-btn");
     if (memberEditButton) {
       openMemberEditModal(memberEditButton.dataset.memberId);
@@ -3676,6 +3689,21 @@ function bindEvents() {
       closeLinkEditModal();
       return;
     }
+    if (event.target.closest("[data-link-delete-close]") || event.target === $("#linkDeleteModal")) {
+      closeLinkDeleteModal();
+      return;
+    }
+    if (event.target.closest("[data-link-delete-confirm]")) {
+      if (pendingLinkDeleteId) {
+        deleteLink(pendingLinkDeleteId).catch((error) => toast(error.message));
+      }
+      return;
+    }
+    const linkMenuToggle = event.target.closest("[data-link-menu-toggle]");
+    if (linkMenuToggle) {
+      toggleLinkActionMenu(linkMenuToggle);
+      return;
+    }
     const linkEditButton = event.target.closest(".link-edit-btn");
     if (linkEditButton) {
       openLinkEditModal(linkEditButton.dataset.linkId);
@@ -3683,7 +3711,7 @@ function bindEvents() {
     }
     const linkDeleteButton = event.target.closest(".link-delete-btn");
     if (linkDeleteButton) {
-      deleteLink(linkDeleteButton.dataset.linkId).catch((error) => toast(error.message));
+      openLinkDeleteModal(linkDeleteButton.dataset.linkId);
       return;
     }
     const meetingMinuteButton = event.target.closest(".meeting-minute-btn");

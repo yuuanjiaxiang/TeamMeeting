@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260711-team-collaboration" />
+    <link rel="stylesheet" href="/style.css?v=20260711-member-links-menu" />
   </head>
   <body>
     <div class="app-shell">
@@ -189,8 +189,28 @@
             </div>
           </div>
 
+          <div id="linkDeleteModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="linkDeleteTitle" aria-hidden="true">
+            <div class="modal-card link-delete-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="linkDeleteTitle">确认删除链接</h2>
+                  <p>删除后无法恢复，请确认这条链接已不再需要。</p>
+                </div>
+                <button class="modal-close" type="button" data-link-delete-close aria-label="关闭">×</button>
+              </div>
+              <div class="link-delete-confirmation">
+                <strong id="linkDeleteName">常用链接</strong>
+                <p id="linkDeleteUrl"></p>
+              </div>
+              <div class="modal-actions">
+                <button class="secondary" type="button" data-link-delete-close>取消</button>
+                <button class="danger" type="button" data-link-delete-confirm>确认删除</button>
+              </div>
+            </div>
+          </div>
+
           <section id="members" class="page active">
-            <section class="member-clusters" id="memberList"></section>
+            <section class="member-layout" id="memberList"></section>
             <section class="panel team-chat-panel">
               <div class="chat-title">
                 <div>
@@ -676,6 +696,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260711-team-collaboration"></script>
+    <script type="module" src="/app.js?v=20260711-member-links-menu"></script>
   </body>
 </html>
