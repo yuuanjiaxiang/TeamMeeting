@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260710-reaction-send-fix" />
+    <link rel="stylesheet" href="/style.css?v=20260711-team-collaboration" />
   </head>
   <body>
     <div class="app-shell">
@@ -165,8 +165,32 @@
             </div>
           </div>
 
+          <div id="linkEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="linkEditTitle" aria-hidden="true">
+            <div class="modal-card link-edit-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="linkEditTitle">编辑常用链接</h2>
+                  <p>内部用户可维护链接名称、地址、分类、说明和适用范围。</p>
+                </div>
+                <button class="modal-close" type="button" data-link-edit-close aria-label="关闭">×</button>
+              </div>
+              <form id="linkEditForm" class="link-edit-modal-form">
+                <label>名称<input name="title" required /></label>
+                <label>地址<input name="url" placeholder="https://..." required /></label>
+                <label>分类<select name="category" data-link-edit-categories required></select></label>
+                <label>说明<input name="description" placeholder="链接用途或注意事项" /></label>
+                <label>适用范围<input name="machine_scope" placeholder="适用机台，逗号分隔" /></label>
+                <label>关键词<input name="process_tags" placeholder="流程/标签，逗号分隔" /></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-link-edit-close>取消</button>
+                  <button type="submit">保存修改</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="members" class="page active">
-            <section class="member-layout" id="memberList"></section>
+            <section class="member-clusters" id="memberList"></section>
             <section class="panel team-chat-panel">
               <div class="chat-title">
                 <div>
@@ -178,7 +202,7 @@
               <div id="teamChatList" class="chat-list team-chat-list"></div>
               <form id="teamChatForm" class="chat-form">
                 <select name="kind"><option value="comment">评论</option><option value="roast">吐槽</option></select>
-                <input name="content" placeholder="输入后发送到团队对话" required />
+                <input name="content" placeholder="输入后发送到团队对话，最多 300 字" maxlength="300" required />
                 <button>发送</button>
               </form>
             </section>
@@ -186,7 +210,7 @@
 
           <section id="dashboard" class="page">
             <div class="metrics">
-              <div><span>我的净积分</span><strong id="metricScore">0</strong></div>
+              <div><span>我的红榜 / 黑榜积分</span><strong id="metricScore">红 0 / 黑 0</strong></div>
               <div><span>我收到的 Thank You</span><strong id="metricThanks">0</strong></div>
               <div><span>我的已排工时</span><strong id="metricHours">0</strong></div>
               <div><span>我的早例会事项</span><strong id="metricMeetings">0</strong></div>
@@ -506,7 +530,7 @@
               <div class="panel-title">
                 <div>
                   <h2>年度积分总览</h2>
-                  <p>按成员展示 12 个月净积分，年度总分高的排在前面。</p>
+                  <p>红榜与黑榜分别统计，不折算净分。</p>
                 </div>
                 <label class="year-chip">年份<input id="scoreYear" type="number" min="2000" max="2100" step="1" /></label>
               </div>
@@ -652,6 +676,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260710-reaction-send-fix"></script>
+    <script type="module" src="/app.js?v=20260711-team-collaboration"></script>
   </body>
 </html>

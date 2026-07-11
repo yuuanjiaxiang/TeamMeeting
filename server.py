@@ -666,6 +666,7 @@ def init_db():
                 responsibilities TEXT,
                 tags TEXT NOT NULL DEFAULT '[]',
                 comment TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -689,6 +690,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS team_post_replies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 post_id INTEGER NOT NULL REFERENCES team_posts(id) ON DELETE CASCADE,
+                parent_reply_id INTEGER REFERENCES team_post_replies(id) ON DELETE CASCADE,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -701,6 +703,15 @@ def init_db():
                 reaction TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(post_id, user_id, reaction)
+            );
+
+            CREATE TABLE IF NOT EXISTS team_reply_reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reply_id INTEGER NOT NULL REFERENCES team_post_replies(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                reaction TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(reply_id, user_id, reaction)
             );
 
             CREATE TABLE IF NOT EXISTS red_black_rules (
@@ -902,11 +913,13 @@ def init_db():
         )
         ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'internal'")
         ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "members", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "members", "skills", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "members", "machine_scope", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "members", "expertise", "TEXT")
         ensure_column(conn, "members", "backup_owner", "TEXT")
         ensure_column(conn, "members", "contact", "TEXT")
+        ensure_column(conn, "team_post_replies", "parent_reply_id", "INTEGER")
         ensure_column(conn, "links", "pinned", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "invalid", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "click_count", "INTEGER NOT NULL DEFAULT 0")
@@ -937,6 +950,7 @@ def init_db():
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
         conn.execute("UPDATE users SET user_type='internal' WHERE user_type IS NULL OR user_type=''")
+        conn.execute("UPDATE members SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
         conn.execute("UPDATE morning_items SET root_id=id WHERE root_id IS NULL")
         seed_meeting_topics(conn)
@@ -1129,6 +1143,12 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(403, "仅管理员可操作")
         return user
 
+    def require_internal_user(self, user=None):
+        user = user or self.current_user()
+        if user.get("role") == "admin" or (user.get("user_type") or "internal") == "internal":
+            return user
+        raise AppError(403, "仅内部用户可维护常用链接")
+
     def is_public_read_api(self, method, path):
         if method != "GET":
             return False
@@ -1210,6 +1230,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_team_post_reply(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
             return self.toggle_team_post_reaction(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-replies"] and parts[3] == "reactions" and method == "POST":
+            return self.toggle_team_reply_reaction(int(parts[2]), user)
+        if len(parts) == 3 and parts[:2] == ["api", "team-replies"] and method == "DELETE":
+            return self.delete_team_post_reply(int(parts[2]), user)
 
         self.require_module(user, self.module_for_path(path))
 
@@ -1236,6 +1260,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"members": self.list_members()}
             if method == "POST":
                 return self.create_member()
+        if path == "/api/members/order" and method == "PATCH":
+            return self.update_member_order()
         if len(parts) == 3 and parts[:2] == ["api", "members"] and method == "PATCH":
             return self.update_member(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "members"] and parts[3] == "posts" and method == "POST":
@@ -1249,6 +1275,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_team_post_reply(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
             return self.toggle_team_post_reaction(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "team-replies"] and parts[3] == "reactions" and method == "POST":
+            return self.toggle_team_reply_reaction(int(parts[2]), user)
+        if len(parts) == 3 and parts[:2] == ["api", "team-replies"] and method == "DELETE":
+            return self.delete_team_post_reply(int(parts[2]), user)
 
         if path == "/api/morning-items":
             if method == "GET":
@@ -1313,8 +1343,11 @@ class Handler(BaseHTTPRequestHandler):
                 return {"links": self.list_links()}
             if method == "POST":
                 return self.create_link()
-        if len(parts) == 3 and parts[:2] == ["api", "links"] and method == "PATCH":
-            return self.update_link_quality(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "links"]:
+            if method == "PATCH":
+                return self.update_link(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_link(int(parts[2]), user)
         if path == "/api/link-categories":
             if method == "GET":
                 return {"categories": self.list_link_categories()}
@@ -1592,7 +1625,7 @@ class Handler(BaseHTTPRequestHandler):
                     FROM members m
                     JOIN users u ON u.id = m.user_id
                     WHERE m.active=1 AND u.active=1
-                    ORDER BY m.id
+                    ORDER BY CASE WHEN m.sort_order=0 THEN m.id ELSE m.sort_order END, m.id
                     """
                 ).fetchall()
             )
@@ -1615,6 +1648,39 @@ class Handler(BaseHTTPRequestHandler):
             member["machine_scope"] = json.loads(member["machine_scope"] or "[]")
             member["posts"] = post_map.get(member["id"], [])
         return members
+
+    def update_member_order(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        member_ids = data.get("member_ids") or []
+        if not isinstance(member_ids, list):
+            raise AppError(400, "成员排序格式不正确")
+        try:
+            member_ids = [int(member_id) for member_id in member_ids]
+        except (TypeError, ValueError):
+            raise AppError(400, "成员排序包含无效成员")
+        if len(member_ids) != len(set(member_ids)):
+            raise AppError(400, "成员排序不能包含重复成员")
+        with connect() as conn:
+            active_ids = {
+                row["id"]
+                for row in conn.execute("SELECT id FROM members WHERE active=1").fetchall()
+            }
+            if set(member_ids) != active_ids:
+                raise AppError(400, "成员排序列表与当前成员不一致，请刷新后重试")
+            for index, member_id in enumerate(member_ids, start=1):
+                conn.execute("UPDATE members SET sort_order=? WHERE id=?", (index, member_id))
+            write_audit(
+                conn,
+                admin,
+                "member.order",
+                "member",
+                None,
+                "团队成员卡片顺序已更新",
+                {"member_ids": member_ids},
+                self.client_address[0],
+            )
+        return {"message": "成员顺序已更新", "members": self.list_members()}
 
     def create_member(self):
         self.require_admin()
@@ -1715,9 +1781,22 @@ class Handler(BaseHTTPRequestHandler):
                     reaction_params,
                 ).fetchall()
             )
-        reply_map = {}
-        for reply in replies:
-            reply_map.setdefault(reply["post_id"], []).append(reply)
+            reply_ids = [reply["id"] for reply in replies]
+            reply_reactions = []
+            if reply_ids:
+                reply_placeholders = ",".join("?" for _ in reply_ids)
+                reply_reactions = rows_to_list(
+                    conn.execute(
+                        f"""
+                        SELECT reply_id, reaction, COUNT(*) AS count,
+                               SUM(CASE WHEN user_id=? THEN 1 ELSE 0 END) AS mine
+                        FROM team_reply_reactions
+                        WHERE reply_id IN ({reply_placeholders})
+                        GROUP BY reply_id, reaction
+                        """,
+                        [user["id"] if user else -1, *reply_ids],
+                    ).fetchall()
+                )
         reaction_rank = {reaction: index for index, reaction in enumerate(TEAM_REACTIONS)}
         reaction_map = {}
         for reaction in reactions:
@@ -1726,8 +1805,32 @@ class Handler(BaseHTTPRequestHandler):
                 "count": reaction["count"],
                 "mine": bool(reaction["mine"]),
             })
+        reply_reaction_map = {}
+        for reaction in reply_reactions:
+            reply_reaction_map.setdefault(reaction["reply_id"], []).append({
+                "reaction": reaction["reaction"],
+                "count": reaction["count"],
+                "mine": bool(reaction["mine"]),
+            })
+        reply_lookup = {}
+        root_replies = {}
+        for reply in replies:
+            reply["reactions"] = sorted(
+                reply_reaction_map.get(reply["id"], []),
+                key=lambda item: (reaction_rank.get(item["reaction"], 99), -int(item["count"] or 0), item["reaction"]),
+            )
+            reply["replies"] = []
+            reply["mine"] = bool(user and reply["user_id"] == user["id"])
+            reply_lookup[reply["id"]] = reply
+        for reply in replies:
+            parent = reply_lookup.get(reply.get("parent_reply_id"))
+            if parent and parent["post_id"] == reply["post_id"]:
+                parent["replies"].append(reply)
+            else:
+                root_replies.setdefault(reply["post_id"], []).append(reply)
         for post in posts:
-            post["replies"] = reply_map.get(post["id"], [])
+            post["replies"] = root_replies.get(post["id"], [])
+            post["mine"] = bool(user and post["user_id"] == user["id"])
             post["reactions"] = sorted(
                 reaction_map.get(post["id"], []),
                 key=lambda item: (reaction_rank.get(item["reaction"], 99), -int(item["count"] or 0), item["reaction"]),
@@ -1740,6 +1843,8 @@ class Handler(BaseHTTPRequestHandler):
         content = (data.get("content") or "").strip()
         if not content:
             raise AppError(400, "内容不能为空")
+        if len(content) > 300:
+            raise AppError(400, "团队对话最多 300 字")
         with connect() as conn:
             conn.execute(
                 "INSERT INTO team_posts(user_id, kind, content, created_at) VALUES(?,?,?,?)",
@@ -1752,13 +1857,28 @@ class Handler(BaseHTTPRequestHandler):
         content = (data.get("content") or "").strip()
         if not content:
             raise AppError(400, "回复内容不能为空")
+        if len(content) > 200:
+            raise AppError(400, "回复最多 200 字")
+        parent_reply_id = data.get("parent_reply_id") or None
+        if parent_reply_id is not None:
+            try:
+                parent_reply_id = int(parent_reply_id)
+            except (TypeError, ValueError):
+                raise AppError(400, "回复层级不正确")
         with connect() as conn:
             post = conn.execute("SELECT id FROM team_posts WHERE id=?", (post_id,)).fetchone()
             if not post:
                 raise AppError(404, "对话不存在")
+            if parent_reply_id is not None:
+                parent = conn.execute(
+                    "SELECT id FROM team_post_replies WHERE id=? AND post_id=?",
+                    (parent_reply_id, post_id),
+                ).fetchone()
+                if not parent:
+                    raise AppError(404, "被回复的内容不存在")
             conn.execute(
-                "INSERT INTO team_post_replies(post_id, user_id, content, created_at) VALUES(?,?,?,?)",
-                (post_id, user["id"], content, now_iso()),
+                "INSERT INTO team_post_replies(post_id, parent_reply_id, user_id, content, created_at) VALUES(?,?,?,?,?)",
+                (post_id, parent_reply_id, user["id"], content, now_iso()),
             )
         return {"message": "已回复", "posts": self.list_team_posts(user)}
 
@@ -1783,6 +1903,75 @@ class Handler(BaseHTTPRequestHandler):
                     (post_id, user["id"], reaction, now_iso()),
                 )
         return {"message": "已更新回应", "posts": self.list_team_posts(user)}
+
+    def toggle_team_reply_reaction(self, reply_id, user):
+        data = read_json(self)
+        reaction = str(data.get("reaction") or "+1").strip()
+        if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
+            raise AppError(400, "回应内容不支持")
+        with connect() as conn:
+            reply = conn.execute("SELECT id FROM team_post_replies WHERE id=?", (reply_id,)).fetchone()
+            if not reply:
+                raise AppError(404, "回复不存在")
+            existing = conn.execute(
+                "SELECT id FROM team_reply_reactions WHERE reply_id=? AND user_id=? AND reaction=?",
+                (reply_id, user["id"], reaction),
+            ).fetchone()
+            if existing:
+                conn.execute("DELETE FROM team_reply_reactions WHERE id=?", (existing["id"],))
+            else:
+                conn.execute(
+                    "INSERT INTO team_reply_reactions(reply_id, user_id, reaction, created_at) VALUES(?,?,?,?)",
+                    (reply_id, user["id"], reaction, now_iso()),
+                )
+        return {"message": "已更新回应", "posts": self.list_team_posts(user)}
+
+    def delete_team_post_reply(self, reply_id, user):
+        with connect() as conn:
+            reply = conn.execute(
+                "SELECT id, user_id FROM team_post_replies WHERE id=?",
+                (reply_id,),
+            ).fetchone()
+            if not reply:
+                raise AppError(404, "回复不存在")
+            if reply["user_id"] != user["id"] and user.get("role") != "admin":
+                raise AppError(403, "只能删除自己的回复")
+            descendant_ids = [
+                row["id"]
+                for row in conn.execute(
+                    """
+                    WITH RECURSIVE descendants(id) AS (
+                        SELECT id FROM team_post_replies WHERE id=?
+                        UNION ALL
+                        SELECT child.id
+                        FROM team_post_replies child
+                        JOIN descendants parent ON child.parent_reply_id=parent.id
+                    )
+                    SELECT id FROM descendants
+                    """,
+                    (reply_id,),
+                ).fetchall()
+            ]
+            placeholders = ",".join("?" for _ in descendant_ids)
+            conn.execute(
+                f"DELETE FROM team_reply_reactions WHERE reply_id IN ({placeholders})",
+                descendant_ids,
+            )
+            conn.execute(
+                f"DELETE FROM team_post_replies WHERE id IN ({placeholders})",
+                descendant_ids,
+            )
+            write_audit(
+                conn,
+                user,
+                "team_reply.delete",
+                "team_post_reply",
+                reply_id,
+                "团队对话回复已删除",
+                {"deleted_count": len(descendant_ids)},
+                self.client_address[0],
+            )
+        return {"message": "回复已删除", "posts": self.list_team_posts(user)}
 
     def list_morning_items(self, query):
         item_date = (query.get("date") or [today_iso()])[0] or today_iso()
@@ -2110,14 +2299,14 @@ class Handler(BaseHTTPRequestHandler):
             totals = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT u.id, u.display_name, COALESCE(SUM(s.points), 0) AS total,
-                           SUM(CASE WHEN s.kind='red' THEN s.points ELSE 0 END) AS red_points,
-                           SUM(CASE WHEN s.kind='black' THEN s.points ELSE 0 END) AS black_points
+                    SELECT u.id, u.display_name,
+                           SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
+                           SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM users u
                     LEFT JOIN red_black_scores s ON s.user_id = u.id AND {where}
                     WHERE u.active=1
                     GROUP BY u.id
-                    ORDER BY total DESC
+                    ORDER BY red_points DESC, black_points ASC, u.display_name
                     """,
                     params,
                 ).fetchall()
@@ -2125,7 +2314,9 @@ class Handler(BaseHTTPRequestHandler):
             timeline = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT s.score_date, SUM(s.points) AS total
+                    SELECT s.score_date,
+                           SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
+                           SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM red_black_scores s
                     WHERE {where}
                     GROUP BY s.score_date
@@ -2139,9 +2330,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"""
                     SELECT s.user_id,
                            strftime('%m', s.score_date) AS month,
-                           SUM(s.points) AS total,
-                           SUM(CASE WHEN s.kind='red' THEN s.points ELSE 0 END) AS red_points,
-                           SUM(CASE WHEN s.kind='black' THEN s.points ELSE 0 END) AS black_points
+                           SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
+                           SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM red_black_scores s
                     WHERE {where}
                     GROUP BY s.user_id, strftime('%m', s.score_date)
@@ -2153,8 +2343,9 @@ class Handler(BaseHTTPRequestHandler):
             user["id"]: {
                 "id": user["id"],
                 "display_name": user["display_name"],
-                "months": {str(month): 0 for month in range(1, 13)},
-                "total": 0,
+                "months": {str(month): {"red": 0, "black": 0} for month in range(1, 13)},
+                "total_red": 0,
+                "total_black": 0,
             }
             for user in users
         }
@@ -2164,12 +2355,14 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             month = str(int(row["month"] or 0)) if row.get("month") else ""
             if month in annual_map[user_id]["months"]:
-                value = int(row["total"] or 0)
-                annual_map[user_id]["months"][month] = value
-                annual_map[user_id]["total"] += value
+                red_points = int(row["red_points"] or 0)
+                black_points = int(row["black_points"] or 0)
+                annual_map[user_id]["months"][month] = {"red": red_points, "black": black_points}
+                annual_map[user_id]["total_red"] += red_points
+                annual_map[user_id]["total_black"] += black_points
         annual = sorted(
             annual_map.values(),
-            key=lambda item: (-int(item["total"] or 0), item["display_name"]),
+            key=lambda item: (-int(item["total_red"] or 0), int(item["total_black"] or 0), item["display_name"]),
         )
         return {"totals": totals, "timeline": timeline, "annual": annual}
 
@@ -2633,24 +2826,34 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, user, "link.create", "link", cursor.lastrowid, "常用链接已归档", {"title": title, "category": category}, self.client_address[0])
         return {"message": "链接已归档", "links": self.list_links()}
 
-    def update_link_quality(self, link_id):
-        admin = self.require_admin()
+    def normalize_link_items(self, items):
+        if isinstance(items, str):
+            items = items.replace("，", ",").split(",")
+        if not isinstance(items, list):
+            return []
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    def update_link(self, link_id, user):
+        operator = self.require_internal_user(user)
         data = read_json(self)
         fields = []
         values = []
+        if operator.get("role") != "admin" and any(key in data for key in ("pinned", "invalid", "quality_note")):
+            raise AppError(403, "链接置顶、失效和质量状态仅管理员可维护")
         for key in ("pinned", "invalid"):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(1 if data.get(key) in (1, "1", True, "true", "on", "yes", "置顶", "失效") else 0)
-        for key in ("quality_note", "description", "category"):
+        for key in ("title", "url", "quality_note", "description", "category"):
             if key in data:
+                value = str(data.get(key) or "").strip()
+                if key in ("title", "url") and not value:
+                    raise AppError(400, "链接名称和地址不能为空")
                 fields.append(f"{key}=?")
-                values.append(data.get(key) or "")
+                values.append(value)
         for key in ("machine_scope", "process_tags"):
             if key in data:
-                items = data.get(key) or []
-                if isinstance(items, str):
-                    items = [item.strip() for item in items.split(",") if item.strip()]
+                items = self.normalize_link_items(data.get(key) or [])
                 fields.append(f"{key}=?")
                 values.append(json.dumps(items, ensure_ascii=False))
         if not fields:
@@ -2663,15 +2866,34 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute(f"UPDATE links SET {', '.join(fields)} WHERE id=?", values)
             write_audit(
                 conn,
-                admin,
-                "link.quality_update",
+                operator,
+                "link.update",
                 "link",
                 link_id,
-                "链接质量信息已更新",
+                "常用链接已更新",
                 {"title": link["title"], "fields": list(data.keys())},
                 self.client_address[0],
             )
-        return {"message": "链接质量已更新", "links": self.list_links()}
+        return {"message": "链接已更新", "links": self.list_links()}
+
+    def delete_link(self, link_id, user):
+        operator = self.require_internal_user(user)
+        with connect() as conn:
+            link = conn.execute("SELECT id, title FROM links WHERE id=?", (link_id,)).fetchone()
+            if not link:
+                raise AppError(404, "链接不存在")
+            conn.execute("DELETE FROM links WHERE id=?", (link_id,))
+            write_audit(
+                conn,
+                operator,
+                "link.delete",
+                "link",
+                link_id,
+                "常用链接已删除",
+                {"title": link["title"]},
+                self.client_address[0],
+            )
+        return {"message": "链接已删除", "links": self.list_links()}
 
     def list_link_categories(self):
         with connect() as conn:
