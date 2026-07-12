@@ -4117,6 +4117,74 @@ th {
   gap: 12px;
 }
 
+.user-type-create-form,
+.user-create-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.5fr) minmax(180px, 0.9fr) auto;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.user-create-form {
+  grid-template-columns: repeat(2, minmax(140px, 1fr)) minmax(160px, 1fr) minmax(160px, 1fr) minmax(180px, 1fr) auto;
+}
+
+.user-type-config-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.user-type-identity {
+  display: grid;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+}
+
+.user-type-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.user-type-name-row input {
+  width: min(320px, 100%);
+  min-height: 38px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.user-type-identity > input {
+  width: min(620px, 100%);
+}
+
+.user-type-lock-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.guest-permission-card {
+  border-color: #b8ccff;
+  background: #f7faff;
+}
+
+.permission-action-check.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.user-table-wrap {
+  overflow-x: auto;
+}
+
+.user-management-table {
+  min-width: 980px;
+}
+
 .permission-card {
   display: grid;
   gap: 12px;
@@ -4360,10 +4428,7 @@ th {
 }
 
 .user-inline-form {
-  display: grid;
-  grid-template-columns: minmax(140px, 1fr) 120px;
-  gap: 8px;
-  align-items: center;
+  display: block;
 }
 
 .user-password-input {
@@ -6025,6 +6090,19 @@ body[data-theme="miro"] #memberList .tag {
 
   .user-inline-form,
   body[data-theme] .user-inline-form {
+    grid-template-columns: 1fr;
+  }
+
+  .user-type-create-form,
+  .user-create-form,
+  body[data-theme] .user-type-create-form,
+  body[data-theme] .user-create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .user-type-config-head,
+  body[data-theme] .user-type-config-head {
+    display: grid;
     grid-template-columns: 1fr;
   }
 

@@ -47,13 +47,14 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | --- | --- | --- |
 | GET/POST | `/api/users` | 查询或创建用户 |
 | PATCH/DELETE | `/api/users/{id}` | 修改或软删除用户 |
-| GET | `/api/user-types` | 用户类型、模块和操作权限 |
-| PATCH | `/api/user-types/{code}/permissions` | 更新某类用户权限 |
+| GET/POST | `/api/user-types` | 查询或创建用户类型；创建时可指定 `copy_from` 复制权限 |
+| PATCH | `/api/user-types/{code}/permissions` | 更新类型名称、说明和模块操作权限；`guest` 仅接受查看权限 |
+| DELETE | `/api/user-types/{code}` | 删除没有有效用户的类型；访客模板及最后一个可分配类型不可删除 |
 | GET/POST | `/api/members` | 查询成员或维护当前成员资料 |
 | PATCH | `/api/members/{id}` | 更新成员资料 |
 | PATCH | `/api/members/order` | 管理员调整成员卡片顺序 |
 
-用户与成员是一一关联的业务实体。删除用户后历史记录保留，成员列表不再展示该用户。
+用户与成员是一一关联的业务实体。新增用户必须指定有效用户类型，不能指定 `guest`。删除用户后历史记录保留，成员列表不再展示该用户。
 
 ## 4. 团队对话
 
@@ -161,4 +162,3 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 6. 错误是否为用户可理解的中文；
 7. 是否需要软删除、回收站和恢复能力；
 8. 是否需要更新本文件及冒烟测试。
-

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260712-archive-restore-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260713-dynamic-user-types-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -195,7 +195,7 @@
               <div class="modal-head">
                 <div>
                   <h2 id="linkEditTitle">编辑常用链接</h2>
-                  <p>内部用户可维护链接名称、地址、分类、说明和适用范围。</p>
+                  <p>具备编辑权限的用户可维护链接名称、地址、分类、说明和适用范围。</p>
                 </div>
                 <button class="modal-close" type="button" data-link-edit-close aria-label="关闭">×</button>
               </div>
@@ -702,25 +702,36 @@
 
           <section id="users" class="page">
             <section class="panel admin-only">
-              <h2>用户管理</h2>
-              <form id="userForm" class="form-row">
-                <input name="username" placeholder="账号" required />
-                <input name="display_name" placeholder="姓名" required />
-                <select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
-                <select name="user_type" data-user-types></select>
-                <input name="password" placeholder="初始密码，默认 123456" />
-                <button>新增用户</button>
+              <div class="panel-title">
+                <div>
+                  <h2>用户类型与权限</h2>
+                  <p>先创建用户类型并配置模块权限；访客使用单独的只读权限模板。</p>
+                </div>
+              </div>
+              <form id="userTypeForm" class="user-type-create-form">
+                <input name="name" placeholder="类型名称，例如：项目成员" maxlength="30" required />
+                <input name="description" placeholder="类型说明，例如：可参与日常协作" maxlength="200" />
+                <select name="copy_from" data-user-type-copy><option value="">不复制权限</option></select>
+                <button>新增用户类型</button>
               </form>
-              <div id="userList" class="table"></div>
+              <div id="userTypePermissionList" class="permission-list"></div>
             </section>
             <section class="panel admin-only">
               <div class="panel-title">
                 <div>
-                  <h2>用户类型权限</h2>
-                  <p>按用户类型配置每个模块的查看、新增、编辑和删除权限；勾选操作权限时会自动开放查看权限。</p>
+                  <h2>账号管理</h2>
+                  <p>新增账号必须指定用户类型；只有确需管理系统的账号才设置为管理员。</p>
                 </div>
               </div>
-              <div id="userTypePermissionList" class="permission-list"></div>
+              <form id="userForm" class="user-create-form">
+                <input name="username" placeholder="账号" required />
+                <input name="display_name" placeholder="姓名" required />
+                <select name="user_type" data-user-types required></select>
+                <select name="role"><option value="user">按用户类型授权</option><option value="admin">系统管理员</option></select>
+                <input name="password" placeholder="初始密码，默认 123456" />
+                <button>新增用户</button>
+              </form>
+              <div id="userList" class="table"></div>
             </section>
           </section>
 
@@ -773,6 +784,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260712-archive-restore-v1"></script>
+    <script type="module" src="/app.js?v=20260713-dynamic-user-types-v1"></script>
   </body>
 </html>

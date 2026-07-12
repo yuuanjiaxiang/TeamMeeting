@@ -40,8 +40,9 @@ Use these references conditionally:
 
 - Treat frontend visibility as presentation only.
 - Enforce admin, ownership, module, and action permissions in `server.py`.
-- Register new modules in `MODULE_CATALOG`, default type permissions, `route_module()`, frontend `pages`, loaders, and guest sets when applicable.
-- Test admin view, admin user view, internal member, partner, and guest behavior when the change affects access.
+- Register new modules in `MODULE_CATALOG`, initial permissions, `module_for_path()`, frontend `pages`, and loaders.
+- Treat user types as administrator-defined data. Never branch business behavior on a display name or assume fixed internal/partner type keys.
+- Test admin view, admin user view, at least two custom user types, and the dynamic guest template when the change affects access.
 
 ### Backend and data
 
@@ -58,7 +59,7 @@ Use these references conditionally:
 - Keep workbench and morning-meeting data synchronized.
 - Keep meeting state locks enforced by the server.
 - Keep Thank You weekly limits and red/black independent scoring semantics.
-- Keep guest and partner visibility narrower than internal-member visibility.
+- Keep guest access read-only and entirely driven by the reserved `guest` permission template.
 
 ## Validate
 
@@ -105,4 +106,3 @@ When authorized to publish:
 6. Report the commit, branch, validation, and environment status.
 
 Do not include databases, backups, runtime logs, screenshots with real employee data, credentials, or gray test records.
-

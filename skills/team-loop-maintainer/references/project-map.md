@@ -17,13 +17,14 @@
 ## Domain invariants
 
 - A user owns one member profile; inactive users disappear from current member views while history remains.
-- Guest modules require matching backend and frontend public-module declarations.
+- Guest modules are selected through the reserved `guest` permission template; the frontend consumes `/api/me` and must not maintain a separate allowlist.
 - User-type permissions include view/create/edit/delete; UI hiding never replaces server checks.
+- User types are dynamic. Only `guest` is reserved; it is read-only and cannot be assigned to an account.
 - Past morning-meeting dates are read-only; unfinished items inherit through a root chain.
 - Completed or archived meetings lock agenda and minutes until an admin reopens them.
 - Red and black scores remain separate; do not silently convert to a net score.
 - A user may edit/delete only allowed Thank You records; weekly recipient limits come from settings.
-- Link edits and deletes are available to allowed internal users, with soft deletion and audit history.
+- Link edits and deletes are available to users whose type grants the matching operation, with soft deletion and audit history.
 - Gray uses a production snapshot and never writes its test data back to production.
 
 ## High-risk areas
@@ -34,4 +35,3 @@
 - SQLite files cannot be replaced while another Windows process holds them open.
 - Theme-specific CSS appears after base CSS and can override new styles.
 - Development hot reload on port 8000 may point at the main database; use Gray for destructive tests.
-

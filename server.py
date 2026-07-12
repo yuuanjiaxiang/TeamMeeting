@@ -52,17 +52,15 @@ MODULE_CATALOG = [
 ]
 MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
 PERMISSION_ACTIONS = ("view", "create", "edit", "delete")
-PUBLIC_MODULES = {"members", "shifts", "rules", "thanks", "links"}
-DEFAULT_USER_TYPES = [
-    ("internal", "内部成员", "项目团队正式成员，默认可查看日常协作模块。", 10, 1),
-    ("partner", "合作方", "合作方或外协人员，默认只开放早例会和常用链接。", 20, 0),
+DEFAULT_USER_TYPE_KEY = "default"
+GUEST_USER_TYPE_KEY = "guest"
+LEGACY_GUEST_MODULES = {"members", "shifts", "rules", "thanks", "links"}
+SYSTEM_USER_TYPES = [
+    (DEFAULT_USER_TYPE_KEY, "默认用户类型", "管理员可修改名称和权限，也可以在迁移用户后删除。", 10, 0),
+    (GUEST_USER_TYPE_KEY, "访客", "未登录用户使用的只读权限模板。", 9999, 1),
 ]
-DEFAULT_TYPE_PERMISSIONS = {
-    "internal": {"members", "dashboard", "archive", "morning", "meetings", "shifts", "rules", "thanks", "links"},
-    "partner": {"morning", "links"},
-}
-DEFAULT_TYPE_OPERATIONS = {
-    "internal": {
+INITIAL_TYPE_OPERATIONS = {
+    DEFAULT_USER_TYPE_KEY: {
         "members": (1, 1, 1, 1),
         "dashboard": (1, 0, 0, 0),
         "archive": (1, 0, 0, 0),
@@ -73,9 +71,8 @@ DEFAULT_TYPE_OPERATIONS = {
         "thanks": (1, 1, 1, 1),
         "links": (1, 1, 1, 1),
     },
-    "partner": {
-        "morning": (1, 1, 1, 1),
-        "links": (1, 0, 0, 0),
+    GUEST_USER_TYPE_KEY: {
+        module: (1, 0, 0, 0) for module in LEGACY_GUEST_MODULES
     },
 }
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}
@@ -276,7 +273,7 @@ def seed_system_settings(conn):
 
 
 def seed_user_types(conn):
-    for key, name, description, sort_order, locked in DEFAULT_USER_TYPES:
+    for key, name, description, sort_order, locked in SYSTEM_USER_TYPES:
         conn.execute(
             """
             INSERT OR IGNORE INTO user_types(key, name, description, sort_order, locked, active, created_at)
@@ -284,11 +281,12 @@ def seed_user_types(conn):
             """,
             (key, name, description, sort_order, locked, now_iso()),
         )
-        conn.execute(
-            "UPDATE user_types SET name=?, description=?, sort_order=?, locked=?, active=1 WHERE key=?",
-            (name, description, sort_order, locked, key),
-        )
-    for type_key, modules in DEFAULT_TYPE_OPERATIONS.items():
+        if key == GUEST_USER_TYPE_KEY:
+            conn.execute(
+                "UPDATE user_types SET name=?, description=?, sort_order=?, locked=1, active=1 WHERE key=?",
+                (name, description, sort_order, key),
+            )
+    for type_key, modules in INITIAL_TYPE_OPERATIONS.items():
         for module_key, actions in modules.items():
             conn.execute(
                 """
@@ -300,12 +298,50 @@ def seed_user_types(conn):
             )
 
 
+def migrate_dynamic_user_types(conn):
+    migration_key = "dynamic_user_types_v1"
+    if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
+        return
+
+    legacy_internal = conn.execute("SELECT key FROM user_types WHERE key='internal'").fetchone()
+    if legacy_internal:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO module_permissions(
+                user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+            )
+            SELECT ?, module_key, can_view, can_create, can_edit, can_delete, ?
+            FROM module_permissions WHERE user_type_key='internal'
+            """,
+            (DEFAULT_USER_TYPE_KEY, now_iso()),
+        )
+        conn.execute("UPDATE users SET user_type=? WHERE user_type='internal'", (DEFAULT_USER_TYPE_KEY,))
+        conn.execute("DELETE FROM module_permissions WHERE user_type_key='internal'")
+        conn.execute("UPDATE user_types SET active=0, locked=0 WHERE key='internal'")
+
+    legacy_partner = conn.execute("SELECT key FROM user_types WHERE key='partner'").fetchone()
+    if legacy_partner:
+        assigned = conn.execute("SELECT COUNT(*) FROM users WHERE user_type='partner' AND active=1").fetchone()[0]
+        if assigned:
+            conn.execute(
+                "UPDATE user_types SET name='受限用户类型', description='由旧权限配置迁移，可自由改名和调整权限。', locked=0, active=1 WHERE key='partner'"
+            )
+        else:
+            conn.execute("DELETE FROM module_permissions WHERE user_type_key='partner'")
+            conn.execute("UPDATE user_types SET active=0, locked=0 WHERE key='partner'")
+
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
+        (migration_key, now_iso()),
+    )
+
+
 def migrate_operation_permissions(conn):
     migration_key = "operation_permissions_v1"
     if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
         return
     conn.execute("UPDATE module_permissions SET can_create=0, can_edit=0, can_delete=0")
-    for type_key, modules in DEFAULT_TYPE_OPERATIONS.items():
+    for type_key, modules in INITIAL_TYPE_OPERATIONS.items():
         for module_key, actions in modules.items():
             conn.execute(
                 """
@@ -701,7 +737,7 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
-                user_type TEXT NOT NULL DEFAULT 'internal',
+                user_type TEXT NOT NULL DEFAULT 'default',
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
@@ -1012,7 +1048,7 @@ def init_db():
             );
             """
         )
-        ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'internal'")
+        ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'default'")
         ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "members", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "members", "skills", "TEXT NOT NULL DEFAULT '[]'")
@@ -1076,7 +1112,7 @@ def init_db():
         conn.execute("UPDATE meetings SET status='scheduled' WHERE status='open' OR status IS NULL OR status=''")
         conn.execute("UPDATE meetings SET status='completed' WHERE status='closed'")
         conn.execute("UPDATE meeting_items SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
-        conn.execute("UPDATE users SET user_type='internal' WHERE user_type IS NULL OR user_type=''")
+        conn.execute("UPDATE users SET user_type=? WHERE user_type IS NULL OR user_type=''", (DEFAULT_USER_TYPE_KEY,))
         conn.execute("UPDATE members SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
         conn.execute("UPDATE morning_items SET root_id=id WHERE root_id IS NULL")
@@ -1084,18 +1120,19 @@ def init_db():
         seed_link_categories(conn)
         seed_system_settings(conn)
         seed_user_types(conn)
+        migrate_dynamic_user_types(conn)
         migrate_operation_permissions(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
             user_salt, user_hash = make_hash("user123")
             conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, created_at) VALUES(?,?,?,?,?,?)",
-                ("admin", admin_salt, admin_hash, "管理员", "admin", now_iso()),
+                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?)",
+                ("admin", admin_salt, admin_hash, "管理员", "admin", DEFAULT_USER_TYPE_KEY, now_iso()),
             )
             conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, created_at) VALUES(?,?,?,?,?,?)",
-                ("user", user_salt, user_hash, "普通成员", "user", now_iso()),
+                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?)",
+                ("user", user_salt, user_hash, "示例成员", "user", DEFAULT_USER_TYPE_KEY, now_iso()),
             )
             conn.execute(
                 "INSERT INTO machines(name, description) VALUES(?, ?)",
@@ -1111,7 +1148,7 @@ def init_db():
             )
             conn.execute(
                 "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (2, "普通成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
+                (2, "示例成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
             )
         seed_morning_items(conn)
         seed_morning_history_samples(conn)
@@ -1272,28 +1309,10 @@ class Handler(BaseHTTPRequestHandler):
         return user
 
     def require_internal_user(self, user=None):
-        user = user or self.current_user()
-        if user.get("role") == "admin" or (user.get("user_type") or "internal") == "internal":
-            return user
-        raise AppError(403, "仅内部用户可维护常用链接")
+        return user or self.current_user()
 
     def is_public_read_api(self, method, path):
-        if method != "GET":
-            return False
-        return path in {
-            "/api/members",
-            "/api/team-posts",
-            "/api/rules",
-            "/api/scores",
-            "/api/dashboards/red-black",
-            "/api/machines",
-            "/api/shifts",
-            "/api/dashboards/shifts",
-            "/api/thank-you",
-            "/api/dashboards/thank-you",
-            "/api/links",
-            "/api/link-categories",
-        }
+        return method == "GET" and self.module_for_path(path) in MODULE_KEYS
 
     def module_for_path(self, path):
         if path.startswith("/api/user-types") or path.startswith("/api/users"):
@@ -1323,11 +1342,9 @@ class Handler(BaseHTTPRequestHandler):
     def require_module(self, user, module_key, action="view"):
         if not module_key:
             return
-        if module_key in PUBLIC_MODULES and not user and action == "view":
-            return
-        if not user:
+        if not user and action != "view":
             raise AppError(401, "请先登录")
-        if user.get("role") == "admin":
+        if user and user.get("role") == "admin":
             return
         if module_key not in MODULE_KEYS:
             raise AppError(403, "当前账号无权访问该模块")
@@ -1345,9 +1362,11 @@ class Handler(BaseHTTPRequestHandler):
                 FROM module_permissions
                 WHERE user_type_key=? AND module_key=?
                 """,
-                (user.get("user_type") or "internal", module_key),
+                ((user.get("user_type") if user else GUEST_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY, module_key),
             ).fetchone()
         if not row or not row["can_view"] or not row["allowed"]:
+            if not user:
+                raise AppError(403, "访客无权查看该模块")
             action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
             raise AppError(403, f"当前用户类型无权{action_name}该模块内容")
 
@@ -1404,10 +1423,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/archive/search" and method == "GET":
             return self.search_archive(user, query)
 
-        if path == "/api/user-types" and method == "GET":
-            return self.list_user_types()
+        if path == "/api/user-types":
+            if method == "GET":
+                return self.list_user_types()
+            if method == "POST":
+                return self.create_user_type()
         if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "permissions" and method == "PATCH":
             return self.update_user_type_permissions(parts[2])
+        if len(parts) == 3 and parts[:2] == ["api", "user-types"] and method == "DELETE":
+            return self.delete_user_type(parts[2])
 
         if path == "/api/users":
             if method == "GET":
@@ -1679,7 +1703,15 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             types = rows_to_list(
                 conn.execute(
-                    "SELECT * FROM user_types WHERE active=1 ORDER BY sort_order, key"
+                    """
+                    SELECT t.*, COUNT(CASE WHEN u.active=1 THEN 1 END) AS user_count
+                    FROM user_types t
+                    LEFT JOIN users u ON u.user_type=t.key
+                    WHERE t.active=1
+                    GROUP BY t.key
+                    ORDER BY CASE WHEN t.key=? THEN 1 ELSE 0 END, t.sort_order, t.key
+                    """,
+                    (GUEST_USER_TYPE_KEY,),
                 ).fetchall()
             )
             permissions = rows_to_list(
@@ -1699,11 +1731,74 @@ class Handler(BaseHTTPRequestHandler):
                 "delete": bool(permission["can_delete"]),
             }
         for user_type in types:
+            user_type["is_guest"] = user_type["key"] == GUEST_USER_TYPE_KEY
             user_type["permissions"] = permission_map.get(user_type["key"], {})
             user_type["modules"] = sorted(
                 module for module, actions in user_type["permissions"].items() if actions.get("view")
             )
         return {"types": types, "modules": MODULE_CATALOG}
+
+    def create_user_type(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        name = str(data.get("name") or "").strip()
+        description = str(data.get("description") or "").strip()
+        copy_from = str(data.get("copy_from") or "").strip()
+        if not name:
+            raise AppError(400, "用户类型名称不能为空")
+        if len(name) > 30:
+            raise AppError(400, "用户类型名称最多 30 个字符")
+        if len(description) > 200:
+            raise AppError(400, "用户类型说明最多 200 个字符")
+        type_key = f"type_{uuid.uuid4().hex[:10]}"
+        with connect() as conn:
+            duplicate = conn.execute(
+                "SELECT key FROM user_types WHERE active=1 AND lower(name)=lower(?)",
+                (name,),
+            ).fetchone()
+            if duplicate:
+                raise AppError(400, "用户类型名称已存在")
+            sort_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM user_types WHERE key<>?",
+                (GUEST_USER_TYPE_KEY,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO user_types(key, name, description, sort_order, locked, active, created_at) VALUES(?,?,?,?,0,1,?)",
+                (type_key, name, description, sort_order, now_iso()),
+            )
+            source_permissions = {}
+            if copy_from:
+                source = conn.execute(
+                    "SELECT key FROM user_types WHERE key=? AND active=1",
+                    (copy_from,),
+                ).fetchone()
+                if not source:
+                    raise AppError(400, "复制来源用户类型不存在")
+                source_permissions = {
+                    row["module_key"]: row
+                    for row in conn.execute(
+                        "SELECT * FROM module_permissions WHERE user_type_key=?",
+                        (copy_from,),
+                    ).fetchall()
+                }
+            for module_key in MODULE_KEYS:
+                source = source_permissions.get(module_key)
+                actions = (
+                    int(source["can_view"]),
+                    int(source["can_create"]),
+                    int(source["can_edit"]),
+                    int(source["can_delete"]),
+                ) if source else (0, 0, 0, 0)
+                conn.execute(
+                    """
+                    INSERT INTO module_permissions(
+                        user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (type_key, module_key, *actions, now_iso()),
+                )
+            write_audit(conn, admin, "user_type.create", "user_type", None, "用户类型已创建", {"user_type": type_key, "name": name, "copy_from": copy_from}, self.client_address[0])
+        return {"message": "用户类型已创建", **self.list_user_types()}
 
     def update_user_type_permissions(self, type_key):
         admin = self.require_admin()
@@ -1727,14 +1822,39 @@ class Handler(BaseHTTPRequestHandler):
             values = {action: bool(actions.get(action)) for action in PERMISSION_ACTIONS}
             if values["create"] or values["edit"] or values["delete"]:
                 values["view"] = True
+            if type_key == GUEST_USER_TYPE_KEY:
+                values["create"] = False
+                values["edit"] = False
+                values["delete"] = False
             normalized[module] = values
+        if type_key == GUEST_USER_TYPE_KEY:
+            normalized["dashboard"] = {action: False for action in PERMISSION_ACTIONS}
+            if not any(actions["view"] for actions in normalized.values()):
+                raise AppError(400, "访客至少需要保留一个可查看模块")
         with connect() as conn:
             user_type = conn.execute(
-                "SELECT key, name FROM user_types WHERE key=? AND active=1",
+                "SELECT key, name, description FROM user_types WHERE key=? AND active=1",
                 (type_key,),
             ).fetchone()
             if not user_type:
                 raise AppError(404, "用户类型不存在")
+            if type_key != GUEST_USER_TYPE_KEY:
+                name = str(data.get("name") or user_type["name"] or "").strip()
+                description = str(data.get("description", user_type["description"] or "") or "").strip()
+                if not name:
+                    raise AppError(400, "用户类型名称不能为空")
+                if len(name) > 30 or len(description) > 200:
+                    raise AppError(400, "用户类型名称或说明过长")
+                duplicate = conn.execute(
+                    "SELECT key FROM user_types WHERE active=1 AND lower(name)=lower(?) AND key<>?",
+                    (name, type_key),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(400, "用户类型名称已存在")
+                conn.execute(
+                    "UPDATE user_types SET name=?, description=? WHERE key=?",
+                    (name, description, type_key),
+                )
             conn.execute("DELETE FROM module_permissions WHERE user_type_key=?", (type_key,))
             for module, actions in normalized.items():
                 conn.execute(
@@ -1756,6 +1876,35 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, admin, "user_type.permissions", "user_type", None, "用户类型权限已更新", {"user_type": type_key, "permissions": normalized}, self.client_address[0])
         return {"message": "用户类型权限已更新", **self.list_user_types(), "permissions": permissions_for(admin)}
 
+    def delete_user_type(self, type_key):
+        admin = self.require_admin()
+        if type_key == GUEST_USER_TYPE_KEY:
+            raise AppError(400, "访客权限模板不能删除")
+        with connect() as conn:
+            user_type = conn.execute(
+                "SELECT key, name, locked FROM user_types WHERE key=? AND active=1",
+                (type_key,),
+            ).fetchone()
+            if not user_type:
+                raise AppError(404, "用户类型不存在")
+            users = conn.execute(
+                "SELECT display_name FROM users WHERE user_type=? AND active=1 ORDER BY id LIMIT 4",
+                (type_key,),
+            ).fetchall()
+            if users:
+                names = "、".join(row["display_name"] for row in users)
+                raise AppError(400, f"该类型仍有用户：{names}。请先将这些用户调整到其他类型")
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM user_types WHERE active=1 AND key NOT IN (?,?)",
+                (type_key, GUEST_USER_TYPE_KEY),
+            ).fetchone()[0]
+            if remaining == 0:
+                raise AppError(400, "至少保留一个可分配的用户类型，请先新增替代类型")
+            conn.execute("DELETE FROM module_permissions WHERE user_type_key=?", (type_key,))
+            conn.execute("UPDATE user_types SET active=0, locked=0 WHERE key=?", (type_key,))
+            write_audit(conn, admin, "user_type.delete", "user_type", None, "用户类型已删除", {"user_type": type_key, "name": user_type["name"]}, self.client_address[0])
+        return {"message": "用户类型已删除", **self.list_user_types()}
+
     def list_users(self):
         self.require_admin()
         with connect() as conn:
@@ -1774,17 +1923,26 @@ class Handler(BaseHTTPRequestHandler):
     def create_user(self):
         admin = self.require_admin()
         data = read_json(self)
+        username = str(data.get("username") or "").strip()
+        display_name = str(data.get("display_name") or username).strip()
+        role = data.get("role") or "user"
+        user_type = str(data.get("user_type") or "").strip()
+        if not username or not display_name:
+            raise AppError(400, "账号和姓名不能为空")
+        if role not in ("admin", "user"):
+            raise AppError(400, "账号授权方式不正确")
+        if not user_type or user_type == GUEST_USER_TYPE_KEY:
+            raise AppError(400, "新增用户时必须指定有效用户类型")
         salt, password_hash = make_hash(data.get("password") or "123456")
-        user_type = data.get("user_type") or "internal"
         with connect() as conn:
             if not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (user_type,)).fetchone():
-                user_type = "internal"
+                raise AppError(400, "用户类型不存在，请先创建用户类型")
             cursor = conn.execute(
                 "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, active, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                ((data.get("username") or "").strip(), salt, password_hash, data.get("display_name") or data.get("username"), data.get("role") or "user", user_type, 1, now_iso()),
+                (username, salt, password_hash, display_name, role, user_type, 1, now_iso()),
             )
             sync_member_for_user(conn, cursor.lastrowid)
-            write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": data.get("username"), "role": data.get("role") or "user", "user_type": user_type}, self.client_address[0])
+            write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": username, "role": role, "user_type": user_type}, self.client_address[0])
         return {"message": "用户已创建", "users": self.list_users()}
 
     def update_user(self, user_id):
@@ -1817,8 +1975,11 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if duplicate:
                     raise AppError(400, "账号已存在")
-            if "user_type" in data and not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (data.get("user_type"),)).fetchone():
-                raise AppError(400, "用户类型不存在")
+            if "role" in data and data.get("role") not in ("admin", "user"):
+                raise AppError(400, "账号授权方式不正确")
+            if "user_type" in data:
+                if data.get("user_type") == GUEST_USER_TYPE_KEY or not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (data.get("user_type"),)).fetchone():
+                    raise AppError(400, "用户类型不存在")
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
             sync_member_for_user(conn, user_id)
             write_audit(conn, admin, "user.update", "user", user_id, "用户已更新", {"fields": list(data.keys())}, self.client_address[0])
@@ -4352,14 +4513,26 @@ def permissions_for(user):
             for module in MODULE_KEYS
         }
     elif not user:
+        with connect() as conn:
+            rows = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT module_key, can_view
+                    FROM module_permissions
+                    WHERE user_type_key=?
+                    ORDER BY module_key
+                    """,
+                    (GUEST_USER_TYPE_KEY,),
+                ).fetchall()
+            )
         operations = {
-            module: {
-                "view": module in PUBLIC_MODULES,
+            row["module_key"]: {
+                "view": bool(row["can_view"]),
                 "create": False,
                 "edit": False,
                 "delete": False,
             }
-            for module in MODULE_KEYS
+            for row in rows
         }
     else:
         with connect() as conn:
@@ -4371,7 +4544,7 @@ def permissions_for(user):
                     WHERE user_type_key=?
                     ORDER BY module_key
                     """,
-                    (user.get("user_type") or "internal",),
+                    (user.get("user_type") or DEFAULT_USER_TYPE_KEY,),
                 ).fetchall()
             )
         operations = {
@@ -4386,7 +4559,7 @@ def permissions_for(user):
     modules = sorted(module for module, actions in operations.items() if actions.get("view"))
     return {
         "isAdmin": is_admin,
-        "userType": user.get("user_type") if user else "guest",
+        "userType": user.get("user_type") if user else GUEST_USER_TYPE_KEY,
         "modules": modules,
         "operations": operations,
         "canManageUsers": is_admin,

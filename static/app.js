@@ -67,7 +67,6 @@ const pages = [
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules"]);
-const guestPages = new Set(["members", "shifts", "rules", "thanks", "links"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "🤑", "🤔", "收到", "辛苦了", "已跟进"];
 const teamReactionEmojiAssets = {
@@ -125,7 +124,7 @@ function isGuest() {
 }
 
 function canAccessPage(id) {
-  if (isGuest()) return guestPages.has(id);
+  if (isGuest()) return Array.isArray(state.permissions?.modules) && state.permissions.modules.includes(id);
   if (isAdminView()) return true;
   if (["users", "system"].includes(id)) return false;
   const modules = state.permissions?.modules;
@@ -139,14 +138,13 @@ function canManageLinks() {
 
 function canOperate(moduleKey, action = "view") {
   if (isAdminAccount()) return true;
-  if (!state.user) return action === "view" && guestPages.has(moduleKey);
   const operations = state.permissions?.operations;
-  if (!operations || !operations[moduleKey]) return action === "view" ? canAccessPage(moduleKey) : true;
+  if (!operations || !operations[moduleKey]) return action === "view" ? canAccessPage(moduleKey) : false;
   return Boolean(operations[moduleKey][action]);
 }
 
 function firstAccessiblePage() {
-  return pages.find(([id]) => canAccessPage(id))?.[0] || (isGuest() ? "members" : "morning");
+  return pages.find(([id]) => canAccessPage(id))?.[0] || "members";
 }
 
 function canLoadModule(id) {
@@ -356,7 +354,7 @@ function applyAuthView() {
   const showLogin = guest && state.showLogin;
   $("#loginView").classList.toggle("hidden", !showLogin);
   $("#appView").classList.toggle("hidden", showLogin);
-  const roleText = state.user?.role === "admin" ? "管理员" : "普通用户";
+  const roleText = state.user?.role === "admin" ? "管理员" : (state.user?.user_type_name || "类型用户");
   const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
   $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
   $("#logoutBtn")?.classList.toggle("hidden", guest);
@@ -428,7 +426,7 @@ async function loadReferenceData() {
   } else {
     state.linkCategories = [];
   }
-  if (!isGuest() && canLoadModule("meetings")) {
+  if (canLoadModule("meetings")) {
     tasks.push(api("/api/meeting-topics").then((data) => { state.topics = data.types; }));
   } else {
     state.topics = [];
@@ -468,11 +466,14 @@ function populateSelects() {
   const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
   const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
-  const userTypeOptions = state.userTypes.map((type) => `<option value="${escapeHtml(type.key)}">${escapeHtml(type.name)}</option>`).join("");
+  const accountTypes = state.userTypes.filter((type) => !type.is_guest && type.key !== "guest");
+  const userTypeOptions = accountTypes.map((type) => `<option value="${escapeHtml(type.key)}">${escapeHtml(type.name)}</option>`).join("");
+  const userTypeCopyOptions = `<option value="">不复制权限</option>${accountTypes.map((type) => `<option value="${escapeHtml(type.key)}">复制 ${escapeHtml(type.name)} 权限</option>`).join("")}`;
 
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
   $$("[data-morning-users]").forEach((select) => { select.innerHTML = userOptions; });
   $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
+  $$("[data-user-type-copy]").forEach((select) => { select.innerHTML = userTypeCopyOptions; });
   $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
   $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
@@ -1302,13 +1303,13 @@ async function loadUsers() {
 }
 
 function renderUserTypeOptions(selected) {
-  const options = state.userTypes.length ? state.userTypes : [{ key: "internal", name: "内部成员" }, { key: "partner", name: "合作方" }];
+  const options = state.userTypes.filter((type) => !type.is_guest && type.key !== "guest");
   return options.map((type) => `<option value="${escapeHtml(type.key)}" ${type.key === selected ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("");
 }
 
 function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
-  return `<table><thead><tr><th>账号</th><th>姓名 / 角色</th><th>用户类型</th><th>密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th>账号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>重置密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
       <td>
         <input form="userEdit${user.id}" name="username" value="${escapeHtml(user.username)}" placeholder="账号" required>
@@ -1316,19 +1317,19 @@ function renderUserTable(users) {
       <td>
         <form id="userEdit${user.id}" class="user-edit-form user-inline-form" data-user-id="${user.id}">
           <input name="display_name" value="${escapeHtml(user.display_name)}" placeholder="姓名" required>
-          <select name="role" ${user.id === state.user?.id ? "disabled" : ""}>
-            <option value="user" ${user.role === "user" ? "selected" : ""}>普通用户</option>
-            <option value="admin" ${user.role === "admin" ? "selected" : ""}>管理员</option>
-          </select>
         </form>
       </td>
-      <td><select form="userEdit${user.id}" name="user_type">${renderUserTypeOptions(user.user_type || "internal")}</select></td>
+      <td><select form="userEdit${user.id}" name="user_type" required>${renderUserTypeOptions(user.user_type)}</select></td>
+      <td><select form="userEdit${user.id}" name="role" ${user.id === state.user?.id ? "disabled" : ""}>
+        <option value="user" ${user.role === "user" ? "selected" : ""}>按类型授权</option>
+        <option value="admin" ${user.role === "admin" ? "selected" : ""}>系统管理员</option>
+      </select></td>
       <td><input form="userEdit${user.id}" class="user-password-input" name="password" placeholder="不修改则留空"></td>
       <td>
         <button form="userEdit${user.id}" type="submit">保存</button>
         ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
       </td>
-    </tr>`).join("")}</tbody></table>`;
+    </tr>`).join("")}</tbody></table></div>`;
 }
 
 function renderUserTypePermissions() {
@@ -1339,36 +1340,48 @@ function renderUserTypePermissions() {
     return;
   }
   target.innerHTML = state.userTypes.map((type) => {
+    const isGuestType = Boolean(type.is_guest || type.key === "guest");
     const legacyModules = new Set(type.modules || []);
     const permissions = type.permissions || {};
-    const actions = [
+    const actions = isGuestType ? [["view", "可查看"]] : [
       ["view", "查看"],
       ["create", "新增"],
       ["edit", "编辑"],
       ["delete", "删除"],
     ];
     return `
-      <form class="permission-card user-type-permission-form" data-type-key="${escapeHtml(type.key)}">
-        <div>
-          <strong>${escapeHtml(type.name)}</strong>
-          <p>${escapeHtml(type.description || "")}</p>
+      <form class="permission-card user-type-permission-form ${isGuestType ? "guest-permission-card" : ""}" data-type-key="${escapeHtml(type.key)}">
+        <div class="user-type-config-head">
+          <div class="user-type-identity">
+            <div class="user-type-name-row">
+              <input name="name" value="${escapeHtml(type.name)}" maxlength="30" ${isGuestType ? "disabled" : ""} aria-label="用户类型名称">
+              <span class="pill ${isGuestType ? "guest" : ""}">${isGuestType ? "未登录访问" : `${Number(type.user_count || 0)} 个账号`}</span>
+            </div>
+            <input name="description" value="${escapeHtml(type.description || "")}" maxlength="200" ${isGuestType ? "disabled" : ""} placeholder="补充该类型的适用范围" aria-label="用户类型说明">
+          </div>
+          ${isGuestType
+            ? `<span class="user-type-lock-note">访客仅可配置查看范围</span>`
+            : Number(type.user_count || 0) > 0
+              ? `<button class="secondary user-type-delete-btn" type="button" disabled title="请先迁移该类型下的用户">有用户，不能删除</button>`
+              : `<button class="danger user-type-delete-btn" type="button" data-type-key="${escapeHtml(type.key)}" data-type-name="${escapeHtml(type.name)}">删除类型</button>`}
         </div>
         <div class="permission-matrix-wrap">
           <table class="permission-matrix">
             <thead><tr><th>模块</th>${actions.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead>
             <tbody>${state.moduleCatalog.map((module) => {
               const modulePermissions = permissions[module.key] || {};
+              const guestUnsupported = isGuestType && module.key === "dashboard";
               return `<tr>
-                <th><strong>${escapeHtml(module.name)}</strong><small>${escapeHtml(module.description || "")}</small></th>
+                <th><strong>${escapeHtml(module.name)}</strong><small>${guestUnsupported ? "工作台依赖登录身份，访客不可用" : escapeHtml(module.description || "")}</small></th>
                 ${actions.map(([action, label]) => {
-                  const checked = modulePermissions[action] ?? legacyModules.has(module.key);
-                  return `<td><label class="permission-action-check" title="${escapeHtml(module.name)} · ${label}"><input type="checkbox" name="permission" value="${escapeHtml(module.key)}:${action}" data-permission-module="${escapeHtml(module.key)}" data-permission-action="${action}" ${checked ? "checked" : ""}><span>${label}</span></label></td>`;
+                  const checked = !guestUnsupported && (modulePermissions[action] ?? legacyModules.has(module.key));
+                  return `<td><label class="permission-action-check ${guestUnsupported ? "disabled" : ""}" title="${escapeHtml(module.name)} · ${label}"><input type="checkbox" name="permission" value="${escapeHtml(module.key)}:${action}" data-permission-module="${escapeHtml(module.key)}" data-permission-action="${action}" ${checked ? "checked" : ""} ${guestUnsupported ? "disabled" : ""}><span>${guestUnsupported ? "需登录" : label}</span></label></td>`;
                 }).join("")}
               </tr>`;
             }).join("")}</tbody>
           </table>
         </div>
-        <button type="submit">保存 ${escapeHtml(type.name)} 权限</button>
+        <button type="submit">保存${isGuestType ? "访客范围" : "类型与权限"}</button>
       </form>
     `;
   }).join("");
@@ -3198,9 +3211,10 @@ function updateThankRecipientPicker(picker) {
 }
 
 function canLoadPageData(id) {
-  if (id === "dashboard" || id === "meetings") return !isGuest() && canLoadModule(id);
+  if (id === "dashboard") return !isGuest() && canLoadModule(id);
+  if (id === "meetings") return canLoadModule(id);
   if (id === "users" || id === "system") return isAdminView();
-  if (id === "archive") return !isGuest() && canLoadModule(id);
+  if (id === "archive") return canLoadModule(id);
   return canLoadModule(id);
 }
 
@@ -3236,9 +3250,9 @@ async function refreshAll() {
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
-  if (!isGuest() && canLoadModule("archive")) loaders.push(loadArchive);
+  if (canLoadModule("archive")) loaders.push(loadArchive);
   if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
-  if (!isGuest() && canLoadModule("meetings")) loaders.push(loadMeetings);
+  if (canLoadModule("meetings")) loaders.push(loadMeetings);
   if (isAdminView()) {
     loaders.push(loadUsers, loadSystemAdmin);
   }
@@ -3820,7 +3834,7 @@ function bindEvents() {
   $("#guestBrowseBtn")?.addEventListener("click", async () => {
     state.showLogin = false;
     applyAuthView();
-    switchPage("members");
+    switchPage(firstAccessiblePage());
     await refreshAll();
   });
 
@@ -3864,6 +3878,7 @@ function bindEvents() {
   });
 
   bindForm("#userForm", (data) => api("/api/users", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#userTypeForm", (data) => api("/api/user-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#ruleForm", (data) => api("/api/rules", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#scoreForm", (data) => api("/api/scores", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#meetingForm", (data) => api("/api/meetings", { method: "POST", body: JSON.stringify(data) }));
@@ -4328,6 +4343,16 @@ function bindEvents() {
       return;
     }
     const deleteButton = event.target.closest(".user-delete-btn");
+    const userTypeDelete = event.target.closest(".user-type-delete-btn[data-type-key]");
+    if (userTypeDelete) {
+      const name = userTypeDelete.dataset.typeName || "该用户类型";
+      if (!window.confirm(`确定删除“${name}”吗？删除后不能再分配给新用户。`)) return;
+      api(`/api/user-types/${userTypeDelete.dataset.typeKey}`, { method: "DELETE" })
+        .then(loadUsers)
+        .then(() => toast("用户类型已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
     if (deleteButton) {
       const name = deleteButton.dataset.userName || "该用户";
       if (!window.confirm(`确定删除 ${name} 吗？历史记录会保留，但该账号将无法登录。`)) return;
@@ -4519,14 +4544,18 @@ function bindEvents() {
         });
         const data = await api(`/api/user-types/${permissionForm.dataset.typeKey}/permissions`, {
           method: "PATCH",
-          body: JSON.stringify({ permissions }),
+          body: JSON.stringify({
+            permissions,
+            name: permissionForm.elements.name?.value || undefined,
+            description: permissionForm.elements.description?.value || "",
+          }),
         });
         state.userTypes = data.types || state.userTypes;
         state.moduleCatalog = data.modules || state.moduleCatalog;
         if (data.permissions) state.permissions = data.permissions;
         renderUserTypePermissions();
         applyAuthView();
-        toast("用户类型权限已保存");
+        toast(permissionForm.dataset.typeKey === "guest" ? "访客访问范围已保存" : "用户类型与权限已保存");
         return;
       }
       if (linkEditForm) {
