@@ -15,9 +15,11 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-DATA_DIR = ROOT / "data"
-DB_PATH = DATA_DIR / "weekly_team.db"
-BACKUP_DIR = DATA_DIR / "backups"
+DATA_DIR = Path(os.environ.get("TEAM_LOOP_DATA_DIR") or (ROOT / "data")).resolve()
+DB_PATH = Path(os.environ.get("TEAM_LOOP_DB_PATH") or (DATA_DIR / "weekly_team.db")).resolve()
+BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups")).resolve()
+DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
+RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
 SESSIONS = {}
 
 DEFAULT_SETTINGS = [
@@ -40,6 +42,7 @@ TEAM_REACTIONS = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "
 MODULE_CATALOG = [
     {"key": "members", "name": "团队成员", "description": "成员档案、职责画像和团队对话"},
     {"key": "dashboard", "name": "工作台", "description": "团队关键指标概览"},
+    {"key": "archive", "name": "搜索归档", "description": "跨年度检索会议、对话和早例会事项"},
     {"key": "morning", "name": "早例会", "description": "按人追踪当日事项、风险和下一步"},
     {"key": "meetings", "name": "会议沙盘", "description": "周例会议题、纪要和签到"},
     {"key": "shifts", "name": "机台排班", "description": "白夜班排班和工时统计"},
@@ -48,14 +51,32 @@ MODULE_CATALOG = [
     {"key": "links", "name": "常用链接", "description": "系统、文档和工具入口"},
 ]
 MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
+PERMISSION_ACTIONS = ("view", "create", "edit", "delete")
 PUBLIC_MODULES = {"members", "shifts", "rules", "thanks", "links"}
 DEFAULT_USER_TYPES = [
     ("internal", "内部成员", "项目团队正式成员，默认可查看日常协作模块。", 10, 1),
     ("partner", "合作方", "合作方或外协人员，默认只开放早例会和常用链接。", 20, 0),
 ]
 DEFAULT_TYPE_PERMISSIONS = {
-    "internal": {"members", "dashboard", "morning", "meetings", "shifts", "rules", "thanks", "links"},
+    "internal": {"members", "dashboard", "archive", "morning", "meetings", "shifts", "rules", "thanks", "links"},
     "partner": {"morning", "links"},
+}
+DEFAULT_TYPE_OPERATIONS = {
+    "internal": {
+        "members": (1, 1, 1, 1),
+        "dashboard": (1, 0, 0, 0),
+        "archive": (1, 0, 0, 0),
+        "morning": (1, 1, 1, 1),
+        "meetings": (1, 1, 1, 0),
+        "shifts": (1, 0, 0, 0),
+        "rules": (1, 0, 0, 0),
+        "thanks": (1, 1, 1, 1),
+        "links": (1, 1, 1, 1),
+    },
+    "partner": {
+        "morning": (1, 1, 1, 1),
+        "links": (1, 0, 0, 0),
+    },
 }
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}
 MORNING_PRIORITIES = {"low", "normal", "high"}
@@ -267,15 +288,43 @@ def seed_user_types(conn):
             "UPDATE user_types SET name=?, description=?, sort_order=?, locked=?, active=1 WHERE key=?",
             (name, description, sort_order, locked, key),
         )
-    for type_key, modules in DEFAULT_TYPE_PERMISSIONS.items():
-        for module_key in modules:
+    for type_key, modules in DEFAULT_TYPE_OPERATIONS.items():
+        for module_key, actions in modules.items():
             conn.execute(
                 """
-                INSERT OR IGNORE INTO module_permissions(user_type_key, module_key, can_view, updated_at)
-                VALUES(?,?,1,?)
+                INSERT OR IGNORE INTO module_permissions(
+                    user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+                ) VALUES(?,?,?,?,?,?,?)
                 """,
-                (type_key, module_key, now_iso()),
+                (type_key, module_key, *actions, now_iso()),
             )
+
+
+def migrate_operation_permissions(conn):
+    migration_key = "operation_permissions_v1"
+    if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
+        return
+    conn.execute("UPDATE module_permissions SET can_create=0, can_edit=0, can_delete=0")
+    for type_key, modules in DEFAULT_TYPE_OPERATIONS.items():
+        for module_key, actions in modules.items():
+            conn.execute(
+                """
+                INSERT INTO module_permissions(
+                    user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+                ) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(user_type_key, module_key) DO UPDATE SET
+                    can_view=excluded.can_view,
+                    can_create=excluded.can_create,
+                    can_edit=excluded.can_edit,
+                    can_delete=excluded.can_delete,
+                    updated_at=excluded.updated_at
+                """,
+                (type_key, module_key, *actions, now_iso()),
+            )
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
+        (migration_key, now_iso()),
+    )
 
 
 def seed_morning_items(conn):
@@ -522,6 +571,23 @@ def write_audit(conn, user, action, entity_type, entity_id=None, summary="", met
     )
 
 
+def add_recycle_record(conn, entity_type, entity_id, title, user, payload=None):
+    conn.execute(
+        """
+        INSERT INTO recycle_bin(entity_type, entity_id, title, payload, deleted_by, deleted_at, status)
+        VALUES(?,?,?,?,?,?, 'deleted')
+        """,
+        (
+            entity_type,
+            entity_id,
+            title or f"{entity_type} #{entity_id}",
+            json.dumps(payload or {}, ensure_ascii=False),
+            user["id"],
+            now_iso(),
+        ),
+    )
+
+
 def prune_old_backups(conn):
     retention_days = get_int_setting(conn, "backup_retention_days", 30, minimum=0, maximum=3650)
     if retention_days <= 0:
@@ -623,7 +689,8 @@ def sync_members_with_users(conn):
 
 
 def init_db():
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(
             """
@@ -653,6 +720,9 @@ def init_db():
                 user_type_key TEXT NOT NULL REFERENCES user_types(key) ON DELETE CASCADE,
                 module_key TEXT NOT NULL,
                 can_view INTEGER NOT NULL DEFAULT 1,
+                can_create INTEGER NOT NULL DEFAULT 1,
+                can_edit INTEGER NOT NULL DEFAULT 1,
+                can_delete INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(user_type_key, module_key)
             );
@@ -693,6 +763,8 @@ def init_db():
                 parent_reply_id INTEGER REFERENCES team_post_replies(id) ON DELETE CASCADE,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 content TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL
             );
 
@@ -759,6 +831,8 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'todo',
                 due_date TEXT,
                 created_by INTEGER NOT NULL REFERENCES users(id),
+                deleted_at TEXT,
+                deleted_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL
             );
 
@@ -821,7 +895,34 @@ def init_db():
                 machine_scope TEXT NOT NULL DEFAULT '[]',
                 process_tags TEXT NOT NULL DEFAULT '[]',
                 created_by INTEGER NOT NULL REFERENCES users(id),
+                deleted_at TEXT,
+                deleted_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS recycle_bin (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}',
+                deleted_by INTEGER NOT NULL REFERENCES users(id),
+                deleted_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'deleted',
+                resolved_by INTEGER REFERENCES users(id),
+                resolved_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS reminder_reads (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                reminder_key TEXT NOT NULL,
+                read_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, reminder_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                key TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS link_categories (
@@ -919,19 +1020,34 @@ def init_db():
         ensure_column(conn, "members", "expertise", "TEXT")
         ensure_column(conn, "members", "backup_owner", "TEXT")
         ensure_column(conn, "members", "contact", "TEXT")
+        ensure_column(conn, "module_permissions", "can_create", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "module_permissions", "can_edit", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "module_permissions", "can_delete", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "team_post_replies", "parent_reply_id", "INTEGER")
+        ensure_column(conn, "team_post_replies", "deleted_at", "TEXT")
+        ensure_column(conn, "team_post_replies", "deleted_by", "INTEGER")
         ensure_column(conn, "links", "pinned", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "invalid", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "click_count", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "last_clicked_at", "TEXT")
+        ensure_column(conn, "backups", "verify_status", "TEXT")
+        ensure_column(conn, "backups", "verified_at", "TEXT")
+        ensure_column(conn, "backups", "verify_message", "TEXT")
+        ensure_column(conn, "backups", "restored_at", "TEXT")
+        ensure_column(conn, "backups", "restored_by", "INTEGER")
+        ensure_column(conn, "backups", "restore_message", "TEXT")
         ensure_column(conn, "links", "quality_note", "TEXT")
         ensure_column(conn, "links", "machine_scope", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "links", "process_tags", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "links", "deleted_at", "TEXT")
+        ensure_column(conn, "links", "deleted_by", "INTEGER")
         ensure_column(conn, "meeting_items", "type_id", "INTEGER")
         ensure_column(conn, "meeting_items", "option_id", "INTEGER")
         ensure_column(conn, "meeting_items", "minutes", "TEXT")
         ensure_column(conn, "meeting_items", "open_issues", "TEXT")
         ensure_column(conn, "meeting_items", "next_steps", "TEXT")
+        ensure_column(conn, "meeting_items", "deleted_at", "TEXT")
+        ensure_column(conn, "meeting_items", "deleted_by", "INTEGER")
         ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
         ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
@@ -957,6 +1073,7 @@ def init_db():
         seed_link_categories(conn)
         seed_system_settings(conn)
         seed_user_types(conn)
+        migrate_operation_permissions(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
@@ -1017,7 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_request(self, method):
         parsed = urlparse(self.path)
         try:
-            if parsed.path.startswith("/api/"):
+            if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
                 ensure_daily_backup()
             if parsed.path == "/api/backups/download" and method == "GET":
                 self.send_backup_file(parse_qs(parsed.query))
@@ -1076,7 +1193,7 @@ class Handler(BaseHTTPRequestHandler):
         user = self.current_user(required=False)
         self.require_module(user, "links")
         with connect() as conn:
-            link = conn.execute("SELECT id, title, url, invalid FROM links WHERE id=?", (link_id,)).fetchone()
+            link = conn.execute("SELECT id, title, url, invalid FROM links WHERE id=? AND deleted_at IS NULL", (link_id,)).fetchone()
             if not link:
                 raise AppError(404, "链接不存在")
             if link["invalid"]:
@@ -1172,6 +1289,8 @@ class Handler(BaseHTTPRequestHandler):
             return "users"
         if path.startswith("/api/members") or path.startswith("/api/team-posts"):
             return "members"
+        if path.startswith("/api/archive"):
+            return "archive"
         if path.startswith("/api/morning-items"):
             return "morning"
         if path.startswith("/api/rules") or path.startswith("/api/scores") or path.startswith("/api/dashboards/red-black"):
@@ -1184,14 +1303,16 @@ class Handler(BaseHTTPRequestHandler):
             return "shifts"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
-        if path.startswith("/api/settings") or path.startswith("/api/audit-logs") or path.startswith("/api/backups"):
+        if path.startswith("/api/settings") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
             return "system"
+        if path.startswith("/api/team-replies"):
+            return "members"
         return None
 
-    def require_module(self, user, module_key):
+    def require_module(self, user, module_key, action="view"):
         if not module_key:
             return
-        if module_key in PUBLIC_MODULES and not user:
+        if module_key in PUBLIC_MODULES and not user and action == "view":
             return
         if not user:
             raise AppError(401, "请先登录")
@@ -1199,19 +1320,46 @@ class Handler(BaseHTTPRequestHandler):
             return
         if module_key not in MODULE_KEYS:
             raise AppError(403, "当前账号无权访问该模块")
+        action = action if action in PERMISSION_ACTIONS else "view"
+        column = {
+            "view": "can_view",
+            "create": "can_create",
+            "edit": "can_edit",
+            "delete": "can_delete",
+        }[action]
         with connect() as conn:
             row = conn.execute(
-                """
-                SELECT can_view
+                f"""
+                SELECT can_view, {column} AS allowed
                 FROM module_permissions
-                WHERE user_type_key=? AND module_key=? AND can_view=1
+                WHERE user_type_key=? AND module_key=?
                 """,
                 (user.get("user_type") or "internal", module_key),
             ).fetchone()
-        if not row:
-            raise AppError(403, "当前用户类型无权访问该模块")
+        if not row or not row["can_view"] or not row["allowed"]:
+            action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
+            raise AppError(403, f"当前用户类型无权{action_name}该模块内容")
+
+    def health(self):
+        try:
+            with connect() as conn:
+                conn.execute("SELECT 1").fetchone()
+                check = conn.execute("PRAGMA quick_check").fetchone()[0]
+        except sqlite3.Error as exc:
+            raise AppError(503, f"数据库检查失败：{exc}") from exc
+        if check != "ok":
+            raise AppError(503, f"数据库完整性检查失败：{check}")
+        return {
+            "status": "ok",
+            "environment": DEPLOY_ENV,
+            "release": RELEASE_ID,
+            "database": "ok",
+            "time": now_iso(),
+        }
 
     def route_api(self, method, path, query):
+        if path == "/api/health" and method == "GET":
+            return self.health()
         if path == "/api/login" and method == "POST":
             return self.login()
         if path == "/api/logout" and method == "POST":
@@ -1222,6 +1370,8 @@ class Handler(BaseHTTPRequestHandler):
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
+        action = {"GET": "view", "POST": "create", "PATCH": "edit", "DELETE": "delete"}.get(method, "view")
+        self.require_module(user, self.module_for_path(path), action)
 
         if path == "/api/team-posts":
             if method == "POST":
@@ -1235,10 +1385,13 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[:2] == ["api", "team-replies"] and method == "DELETE":
             return self.delete_team_post_reply(int(parts[2]), user)
 
-        self.require_module(user, self.module_for_path(path))
-
         if path == "/api/me/password" and method == "PATCH":
             return self.change_own_password(user)
+
+        if path == "/api/archive/years" and method == "GET":
+            return self.archive_years(user)
+        if path == "/api/archive/search" and method == "GET":
+            return self.search_archive(user, query)
 
         if path == "/api/user-types" and method == "GET":
             return self.list_user_types()
@@ -1337,6 +1490,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.upsert_attendance(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "meeting-items"] and method == "PATCH":
             return self.update_meeting_item(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "meeting-items"] and method == "DELETE":
+            return self.delete_meeting_item(int(parts[2]), user)
 
         if path == "/api/links":
             if method == "GET":
@@ -1385,6 +1540,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/dashboards/thank-you" and method == "GET":
             return self.thank_you_dashboard(query)
 
+        if path == "/api/reminders" and method == "GET":
+            return self.list_reminders(user)
+        if path == "/api/reminders/read" and method == "PATCH":
+            return self.mark_reminders_read(user)
+
+        if path == "/api/recycle-bin" and method == "GET":
+            return {"items": self.list_recycle_bin()}
+        if len(parts) == 4 and parts[:2] == ["api", "recycle-bin"] and parts[3] == "restore" and method == "POST":
+            return self.restore_recycle_item(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "recycle-bin"] and method == "DELETE":
+            return self.purge_recycle_item(int(parts[2]))
+
         if path == "/api/settings":
             if method == "GET":
                 return {"settings": self.list_settings()}
@@ -1399,6 +1566,10 @@ class Handler(BaseHTTPRequestHandler):
                 return {"backups": self.list_backups()}
             if method == "POST":
                 return self.create_manual_backup()
+        if path == "/api/backups/verify" and method == "POST":
+            return self.verify_backup()
+        if path == "/api/backups/restore" and method == "POST":
+            return self.restore_backup()
 
         raise AppError(404, "接口不存在")
 
@@ -1494,23 +1665,50 @@ class Handler(BaseHTTPRequestHandler):
             )
             permissions = rows_to_list(
                 conn.execute(
-                    "SELECT user_type_key, module_key, can_view FROM module_permissions WHERE can_view=1"
+                    """
+                    SELECT user_type_key, module_key, can_view, can_create, can_edit, can_delete
+                    FROM module_permissions
+                    """
                 ).fetchall()
             )
         permission_map = {}
         for permission in permissions:
-            permission_map.setdefault(permission["user_type_key"], set()).add(permission["module_key"])
+            permission_map.setdefault(permission["user_type_key"], {})[permission["module_key"]] = {
+                "view": bool(permission["can_view"]),
+                "create": bool(permission["can_create"]),
+                "edit": bool(permission["can_edit"]),
+                "delete": bool(permission["can_delete"]),
+            }
         for user_type in types:
-            user_type["modules"] = sorted(permission_map.get(user_type["key"], set()))
+            user_type["permissions"] = permission_map.get(user_type["key"], {})
+            user_type["modules"] = sorted(
+                module for module, actions in user_type["permissions"].items() if actions.get("view")
+            )
         return {"types": types, "modules": MODULE_CATALOG}
 
     def update_user_type_permissions(self, type_key):
         admin = self.require_admin()
         data = read_json(self)
-        modules = data.get("modules") or []
-        if not isinstance(modules, list):
-            raise AppError(400, "模块权限格式不正确")
-        modules = [module for module in modules if module in MODULE_KEYS]
+        raw_permissions = data.get("permissions")
+        if raw_permissions is None:
+            modules = data.get("modules") or []
+            if not isinstance(modules, list):
+                raise AppError(400, "模块权限格式不正确")
+            raw_permissions = {
+                module: {action: True for action in PERMISSION_ACTIONS}
+                for module in modules if module in MODULE_KEYS
+            }
+        if not isinstance(raw_permissions, dict):
+            raise AppError(400, "操作权限格式不正确")
+        normalized = {}
+        for module in MODULE_KEYS:
+            actions = raw_permissions.get(module) or {}
+            if not isinstance(actions, dict):
+                actions = {}
+            values = {action: bool(actions.get(action)) for action in PERMISSION_ACTIONS}
+            if values["create"] or values["edit"] or values["delete"]:
+                values["view"] = True
+            normalized[module] = values
         with connect() as conn:
             user_type = conn.execute(
                 "SELECT key, name FROM user_types WHERE key=? AND active=1",
@@ -1519,15 +1717,24 @@ class Handler(BaseHTTPRequestHandler):
             if not user_type:
                 raise AppError(404, "用户类型不存在")
             conn.execute("DELETE FROM module_permissions WHERE user_type_key=?", (type_key,))
-            for module in modules:
+            for module, actions in normalized.items():
                 conn.execute(
                     """
-                    INSERT INTO module_permissions(user_type_key, module_key, can_view, updated_at)
-                    VALUES(?,?,1,?)
+                    INSERT INTO module_permissions(
+                        user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+                    ) VALUES(?,?,?,?,?,?,?)
                     """,
-                    (type_key, module, now_iso()),
+                    (
+                        type_key,
+                        module,
+                        int(actions["view"]),
+                        int(actions["create"]),
+                        int(actions["edit"]),
+                        int(actions["delete"]),
+                        now_iso(),
+                    ),
                 )
-            write_audit(conn, admin, "user_type.permissions", "user_type", None, "用户类型权限已更新", {"user_type": type_key, "modules": modules}, self.client_address[0])
+            write_audit(conn, admin, "user_type.permissions", "user_type", None, "用户类型权限已更新", {"user_type": type_key, "permissions": normalized}, self.client_address[0])
         return {"message": "用户类型权限已更新", **self.list_user_types(), "permissions": permissions_for(admin)}
 
     def list_users(self):
@@ -1603,11 +1810,19 @@ class Handler(BaseHTTPRequestHandler):
         if user_id == current_user["id"]:
             raise AppError(400, "不能删除当前登录账号")
         with connect() as conn:
-            user = conn.execute("SELECT id, active FROM users WHERE id=?", (user_id,)).fetchone()
+            user = conn.execute("SELECT id, username, display_name, active FROM users WHERE id=?", (user_id,)).fetchone()
             if not user:
                 raise AppError(404, "用户不存在")
             if user["active"] == 0:
                 return {"message": "用户已删除", "users": self.list_users()}
+            add_recycle_record(
+                conn,
+                "user",
+                user_id,
+                user["display_name"] or user["username"],
+                current_user,
+                {"username": user["username"]},
+            )
             conn.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
             conn.execute("UPDATE members SET active=0 WHERE user_id=?", (user_id,))
             write_audit(conn, current_user, "user.delete", "user", user_id, "用户已删除", {}, self.client_address[0])
@@ -1762,7 +1977,7 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT r.*, u.display_name
                     FROM team_post_replies r
                     JOIN users u ON u.id = r.user_id
-                    WHERE r.post_id IN ({placeholders})
+                    WHERE r.post_id IN ({placeholders}) AND r.deleted_at IS NULL
                     ORDER BY r.created_at ASC, r.id ASC
                     """,
                     post_ids,
@@ -1871,7 +2086,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(404, "对话不存在")
             if parent_reply_id is not None:
                 parent = conn.execute(
-                    "SELECT id FROM team_post_replies WHERE id=? AND post_id=?",
+                    "SELECT id FROM team_post_replies WHERE id=? AND post_id=? AND deleted_at IS NULL",
                     (parent_reply_id, post_id),
                 ).fetchone()
                 if not parent:
@@ -1910,7 +2125,7 @@ class Handler(BaseHTTPRequestHandler):
         if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
             raise AppError(400, "回应内容不支持")
         with connect() as conn:
-            reply = conn.execute("SELECT id FROM team_post_replies WHERE id=?", (reply_id,)).fetchone()
+            reply = conn.execute("SELECT id FROM team_post_replies WHERE id=? AND deleted_at IS NULL", (reply_id,)).fetchone()
             if not reply:
                 raise AppError(404, "回复不存在")
             existing = conn.execute(
@@ -1929,13 +2144,15 @@ class Handler(BaseHTTPRequestHandler):
     def delete_team_post_reply(self, reply_id, user):
         with connect() as conn:
             reply = conn.execute(
-                "SELECT id, user_id FROM team_post_replies WHERE id=?",
+                "SELECT id, user_id, content, deleted_at FROM team_post_replies WHERE id=?",
                 (reply_id,),
             ).fetchone()
             if not reply:
                 raise AppError(404, "回复不存在")
             if reply["user_id"] != user["id"] and user.get("role") != "admin":
                 raise AppError(403, "只能删除自己的回复")
+            if reply["deleted_at"]:
+                raise AppError(400, "回复已经在回收站中")
             descendant_ids = [
                 row["id"]
                 for row in conn.execute(
@@ -1953,13 +2170,18 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchall()
             ]
             placeholders = ",".join("?" for _ in descendant_ids)
+            deleted_at = now_iso()
             conn.execute(
-                f"DELETE FROM team_reply_reactions WHERE reply_id IN ({placeholders})",
-                descendant_ids,
+                f"UPDATE team_post_replies SET deleted_at=?, deleted_by=? WHERE id IN ({placeholders})",
+                [deleted_at, user["id"], *descendant_ids],
             )
-            conn.execute(
-                f"DELETE FROM team_post_replies WHERE id IN ({placeholders})",
-                descendant_ids,
+            add_recycle_record(
+                conn,
+                "team_reply",
+                reply_id,
+                (reply["content"] or "团队回复")[:60],
+                user,
+                {"reply_ids": descendant_ids},
             )
             write_audit(
                 conn,
@@ -1971,7 +2193,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"deleted_count": len(descendant_ids)},
                 self.client_address[0],
             )
-        return {"message": "回复已删除", "posts": self.list_team_posts(user)}
+        return {"message": "回复已移入回收站", "posts": self.list_team_posts(user)}
 
     def list_morning_items(self, query):
         item_date = (query.get("date") or [today_iso()])[0] or today_iso()
@@ -2393,6 +2615,7 @@ class Handler(BaseHTTPRequestHandler):
                     LEFT JOIN users c ON c.id = i.created_by
                     LEFT JOIN meeting_topic_types t ON t.id = i.type_id
                     LEFT JOIN meeting_topic_options o ON o.id = i.option_id
+                    WHERE i.deleted_at IS NULL
                     ORDER BY i.created_at
                     """
                 ).fetchall()
@@ -2726,12 +2949,39 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(item_id)
         with connect() as conn:
-            item = conn.execute("SELECT id FROM meeting_items WHERE id=?", (item_id,)).fetchone()
+            item = conn.execute("SELECT id FROM meeting_items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
             conn.execute(f"UPDATE meeting_items SET {', '.join(fields)} WHERE id=?", values)
             write_audit(conn, user, "meeting_item.update", "meeting_item", item_id, "会议议题/纪要已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "会议纪要已保存", "meetings": self.list_meetings({})}
+
+    def delete_meeting_item(self, item_id, user):
+        with connect() as conn:
+            item = conn.execute(
+                "SELECT id, title, deleted_at FROM meeting_items WHERE id=?",
+                (item_id,),
+            ).fetchone()
+            if not item:
+                raise AppError(404, "议题不存在")
+            if item["deleted_at"]:
+                raise AppError(400, "议题已经在回收站中")
+            conn.execute(
+                "UPDATE meeting_items SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now_iso(), user["id"], item_id),
+            )
+            add_recycle_record(conn, "meeting_item", item_id, item["title"], user)
+            write_audit(
+                conn,
+                user,
+                "meeting_item.delete",
+                "meeting_item",
+                item_id,
+                "会议议题已移入回收站",
+                {},
+                self.client_address[0],
+            )
+        return {"message": "会议议题已移入回收站", "meetings": self.list_meetings({})}
 
     def upsert_attendance(self, meeting_id):
         admin = self.require_admin()
@@ -2772,6 +3022,7 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT l.*, u.display_name AS creator
                     FROM links l
                     LEFT JOIN users u ON u.id = l.created_by
+                    WHERE l.deleted_at IS NULL
                     ORDER BY l.invalid ASC, l.pinned DESC, COALESCE(l.click_count, 0) DESC, COALESCE(l.last_clicked_at, '') DESC, l.title
                     """
                 ).fetchall()
@@ -2860,7 +3111,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(link_id)
         with connect() as conn:
-            link = conn.execute("SELECT id, title FROM links WHERE id=?", (link_id,)).fetchone()
+            link = conn.execute("SELECT id, title FROM links WHERE id=? AND deleted_at IS NULL", (link_id,)).fetchone()
             if not link:
                 raise AppError(404, "链接不存在")
             conn.execute(f"UPDATE links SET {', '.join(fields)} WHERE id=?", values)
@@ -2879,10 +3130,23 @@ class Handler(BaseHTTPRequestHandler):
     def delete_link(self, link_id, user):
         operator = self.require_internal_user(user)
         with connect() as conn:
-            link = conn.execute("SELECT id, title FROM links WHERE id=?", (link_id,)).fetchone()
+            link = conn.execute("SELECT id, title, url, deleted_at FROM links WHERE id=?", (link_id,)).fetchone()
             if not link:
                 raise AppError(404, "链接不存在")
-            conn.execute("DELETE FROM links WHERE id=?", (link_id,))
+            if link["deleted_at"]:
+                raise AppError(400, "链接已经在回收站中")
+            conn.execute(
+                "UPDATE links SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now_iso(), operator["id"], link_id),
+            )
+            add_recycle_record(
+                conn,
+                "link",
+                link_id,
+                link["title"],
+                operator,
+                {"url": link["url"]},
+            )
             write_audit(
                 conn,
                 operator,
@@ -2893,7 +3157,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"title": link["title"]},
                 self.client_address[0],
             )
-        return {"message": "链接已删除", "links": self.list_links()}
+        return {"message": "链接已移入回收站", "links": self.list_links()}
 
     def list_link_categories(self):
         with connect() as conn:
@@ -3196,6 +3460,555 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"stars": stars, "weekly": weekly}
 
+    def list_reminders(self, user):
+        if not user:
+            raise AppError(401, "请先登录")
+        today = dt.date.today()
+        soon = (today + dt.timedelta(days=3)).isoformat()
+        today_value = today.isoformat()
+        with connect() as conn:
+            reminders = []
+            morning_rows = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT id, title, status, priority, blocker, due_date, item_date, updated_at
+                    FROM morning_items
+                    WHERE owner_id=? AND active=1 AND status!='done'
+                      AND item_date=?
+                      AND (status='risk' OR priority='high' OR (due_date IS NOT NULL AND due_date<=?))
+                    ORDER BY CASE WHEN status='risk' THEN 0 ELSE 1 END, due_date, id
+                    """,
+                    (user["id"], today_value, soon),
+                ).fetchall()
+            )
+            for item in morning_rows:
+                overdue = bool(item.get("due_date") and item["due_date"] < today_value)
+                reminders.append({
+                    "key": f"morning:{item['id']}:{item.get('updated_at') or ''}",
+                    "type": "morning",
+                    "level": "danger" if overdue or item["status"] == "risk" else "warning",
+                    "title": item["title"],
+                    "detail": item.get("blocker") or (f"截止 {item['due_date']}" if item.get("due_date") else "高优先级事项待推进"),
+                    "date": item.get("due_date") or item["item_date"],
+                    "page": "morning",
+                })
+            meeting_rows = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT i.id, i.title, i.status, i.due_date, m.meeting_date, m.title AS meeting_title
+                    FROM meeting_items i
+                    JOIN meetings m ON m.id=i.meeting_id
+                    WHERE i.owner_id=? AND i.deleted_at IS NULL AND i.status!='done'
+                      AND (
+                        (i.due_date IS NOT NULL AND i.due_date<=?)
+                        OR (m.meeting_date>=? AND m.meeting_date<=?)
+                      )
+                    ORDER BY COALESCE(i.due_date, m.meeting_date), i.id
+                    """,
+                    (user["id"], soon, today_value, soon),
+                ).fetchall()
+            )
+            for item in meeting_rows:
+                due_date = item.get("due_date") or item["meeting_date"]
+                overdue = bool(item.get("due_date") and item["due_date"] < today_value)
+                reminders.append({
+                    "key": f"meeting-item:{item['id']}:{item.get('due_date') or ''}:{item['status']}",
+                    "type": "meeting",
+                    "level": "danger" if overdue else "info",
+                    "title": item["title"],
+                    "detail": f"{item['meeting_title']} · {'已逾期' if overdue else '行动项待处理'}",
+                    "date": due_date,
+                    "page": "meetings",
+                })
+            shift_rows = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT s.id, s.shift_date, s.shift_type, m.name AS machine_name
+                    FROM shifts s
+                    JOIN machines m ON m.id=s.machine_id
+                    WHERE s.user_id=? AND s.shift_date>=? AND s.shift_date<=?
+                    ORDER BY s.shift_date, s.shift_type
+                    """,
+                    (user["id"], today_value, soon),
+                ).fetchall()
+            )
+            for shift in shift_rows:
+                shift_name = "白班" if shift["shift_type"] == "day" else "夜班"
+                reminders.append({
+                    "key": f"shift:{shift['id']}:{shift['shift_date']}:{shift['shift_type']}",
+                    "type": "shift",
+                    "level": "info",
+                    "title": f"{shift['machine_name']} · {shift_name}",
+                    "detail": "近期排班，请提前确认交接安排",
+                    "date": shift["shift_date"],
+                    "page": "shifts",
+                })
+            read_keys = {
+                row["reminder_key"]
+                for row in conn.execute(
+                    "SELECT reminder_key FROM reminder_reads WHERE user_id=?",
+                    (user["id"],),
+                ).fetchall()
+            }
+        allowed_pages = set(permissions_for(user).get("modules") or [])
+        reminders = [item for item in reminders if item.get("page") in allowed_pages]
+        level_order = {"danger": 0, "warning": 1, "info": 2}
+        reminders.sort(key=lambda item: (level_order.get(item["level"], 9), item.get("date") or "", item["title"]))
+        for reminder in reminders:
+            reminder["read"] = reminder["key"] in read_keys
+        return {
+            "items": reminders,
+            "unread": sum(1 for reminder in reminders if not reminder["read"]),
+        }
+
+    def mark_reminders_read(self, user):
+        if not user:
+            raise AppError(401, "请先登录")
+        data = read_json(self)
+        keys = data.get("keys") or []
+        if data.get("all"):
+            keys = [item["key"] for item in self.list_reminders(user)["items"]]
+        if isinstance(keys, str):
+            keys = [keys]
+        if not isinstance(keys, list):
+            raise AppError(400, "提醒标识格式不正确")
+        keys = [str(key)[:240] for key in keys if str(key).strip()]
+        with connect() as conn:
+            for key in keys:
+                conn.execute(
+                    """
+                    INSERT INTO reminder_reads(user_id, reminder_key, read_at)
+                    VALUES(?,?,?)
+                    ON CONFLICT(user_id, reminder_key) DO UPDATE SET read_at=excluded.read_at
+                    """,
+                    (user["id"], key, now_iso()),
+                )
+        return self.list_reminders(user)
+
+    def list_recycle_bin(self):
+        self.require_admin()
+        with connect() as conn:
+            items = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT r.*, u.display_name AS deleted_by_name
+                    FROM recycle_bin r
+                    LEFT JOIN users u ON u.id=r.deleted_by
+                    WHERE r.status='deleted'
+                    ORDER BY r.deleted_at DESC, r.id DESC
+                    """
+                ).fetchall()
+            )
+        labels = {
+            "user": "用户",
+            "link": "常用链接",
+            "team_reply": "团队回复",
+            "meeting_item": "会议议题",
+        }
+        for item in items:
+            item["entity_label"] = labels.get(item["entity_type"], item["entity_type"])
+            try:
+                item["payload"] = json.loads(item.get("payload") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            item["can_purge"] = item["entity_type"] != "user"
+        return items
+
+    def restore_recycle_item(self, recycle_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            item = conn.execute(
+                "SELECT * FROM recycle_bin WHERE id=? AND status='deleted'",
+                (recycle_id,),
+            ).fetchone()
+            if not item:
+                raise AppError(404, "回收站记录不存在")
+            payload = json.loads(item["payload"] or "{}")
+            entity_type = item["entity_type"]
+            if entity_type == "link":
+                conn.execute("UPDATE links SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
+            elif entity_type == "meeting_item":
+                conn.execute("UPDATE meeting_items SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
+            elif entity_type == "team_reply":
+                reply_ids = [int(value) for value in payload.get("reply_ids") or [item["entity_id"]]]
+                placeholders = ",".join("?" for _ in reply_ids)
+                conn.execute(
+                    f"UPDATE team_post_replies SET deleted_at=NULL, deleted_by=NULL WHERE id IN ({placeholders})",
+                    reply_ids,
+                )
+            elif entity_type == "user":
+                conn.execute("UPDATE users SET active=1 WHERE id=?", (item["entity_id"],))
+                conn.execute("UPDATE members SET active=1 WHERE user_id=?", (item["entity_id"],))
+            else:
+                raise AppError(400, "该类型暂不支持恢复")
+            conn.execute(
+                "UPDATE recycle_bin SET status='restored', resolved_by=?, resolved_at=? WHERE id=?",
+                (admin["id"], now_iso(), recycle_id),
+            )
+            write_audit(conn, admin, "recycle.restore", entity_type, item["entity_id"], "回收站内容已恢复", {"recycle_id": recycle_id}, self.client_address[0])
+        return {"message": "内容已恢复", "items": self.list_recycle_bin()}
+
+    def purge_recycle_item(self, recycle_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            item = conn.execute(
+                "SELECT * FROM recycle_bin WHERE id=? AND status='deleted'",
+                (recycle_id,),
+            ).fetchone()
+            if not item:
+                raise AppError(404, "回收站记录不存在")
+            if item["entity_type"] == "user":
+                raise AppError(400, "用户历史记录需要保留，只能停用或恢复账号")
+            payload = json.loads(item["payload"] or "{}")
+            if item["entity_type"] == "link":
+                conn.execute("DELETE FROM links WHERE id=?", (item["entity_id"],))
+            elif item["entity_type"] == "meeting_item":
+                conn.execute("DELETE FROM meeting_items WHERE id=?", (item["entity_id"],))
+            elif item["entity_type"] == "team_reply":
+                reply_ids = [int(value) for value in payload.get("reply_ids") or [item["entity_id"]]]
+                placeholders = ",".join("?" for _ in reply_ids)
+                conn.execute(f"DELETE FROM team_reply_reactions WHERE reply_id IN ({placeholders})", reply_ids)
+                conn.execute(f"DELETE FROM team_post_replies WHERE id IN ({placeholders})", reply_ids)
+            else:
+                raise AppError(400, "该类型暂不支持彻底删除")
+            conn.execute(
+                "UPDATE recycle_bin SET status='purged', resolved_by=?, resolved_at=? WHERE id=?",
+                (admin["id"], now_iso(), recycle_id),
+            )
+            write_audit(conn, admin, "recycle.purge", item["entity_type"], item["entity_id"], "回收站内容已彻底删除", {"recycle_id": recycle_id}, self.client_address[0])
+        return {"message": "内容已彻底删除", "items": self.list_recycle_bin()}
+
+    def can_view_module(self, user, module_key):
+        try:
+            self.require_module(user, module_key, "view")
+            return True
+        except AppError:
+            return False
+
+    def archive_years(self, user):
+        sources = [
+            ("meetings", "会议", "meetings", "meeting_date", "1=1"),
+            ("meeting_items", "会议议题", "meeting_items", "created_at", "deleted_at IS NULL"),
+            ("team_posts", "团队对话", "team_posts", "created_at", "1=1"),
+            ("team_replies", "团队回复", "team_post_replies", "created_at", "deleted_at IS NULL"),
+            ("morning", "早例会事项", "morning_items", "item_date", "active=1"),
+        ]
+        allowed = {
+            "meetings": self.can_view_module(user, "meetings"),
+            "meeting_items": self.can_view_module(user, "meetings"),
+            "team_posts": self.can_view_module(user, "members"),
+            "team_replies": self.can_view_module(user, "members"),
+            "morning": self.can_view_module(user, "morning"),
+        }
+        year_map = {}
+        with connect() as conn:
+            for key, label, table, date_col, where in sources:
+                if not allowed.get(key):
+                    continue
+                rows = conn.execute(
+                    f"""
+                    SELECT substr({date_col}, 1, 4) AS year, COUNT(*) AS count
+                    FROM {table}
+                    WHERE {where} AND {date_col} IS NOT NULL AND length({date_col}) >= 4
+                    GROUP BY substr({date_col}, 1, 4)
+                    """
+                ).fetchall()
+                for row in rows:
+                    year = row["year"]
+                    if not year or not str(year).isdigit():
+                        continue
+                    bucket = year_map.setdefault(year, {"year": year, "total": 0, "types": {}})
+                    bucket["types"][key] = {"label": label, "count": row["count"]}
+                    bucket["total"] += int(row["count"] or 0)
+        return {"years": sorted(year_map.values(), key=lambda item: item["year"], reverse=True)}
+
+    def search_archive(self, user, query):
+        keyword = (query.get("keyword") or [""])[0].strip()
+        year = (query.get("year") or [""])[0].strip()
+        type_filter = (query.get("type") or ["all"])[0].strip() or "all"
+        limit = min(80, max(10, int((query.get("limit") or ["40"])[0] or 40)))
+        if len(keyword) > 80:
+            raise AppError(400, "搜索关键词最多 80 个字符")
+        if year and (not year.isdigit() or len(year) != 4):
+            raise AppError(400, "年份格式不正确")
+        allowed_types = {"all", "meetings", "meeting_items", "team_posts", "team_replies", "morning"}
+        if type_filter not in allowed_types:
+            type_filter = "all"
+        like = f"%{keyword}%"
+        results = []
+
+        def wants(item_type):
+            return type_filter == "all" or type_filter == item_type
+
+        def in_year(column):
+            return f" AND substr({column}, 1, 4)=?" if year else ""
+
+        def add_result(item_type, label, item_id, title, body, item_date, owner="", module=""):
+            text = " ".join([str(title or ""), str(body or ""), str(owner or "")]).strip()
+            if keyword and keyword.lower() not in text.lower():
+                return
+            results.append({
+                "type": item_type,
+                "type_label": label,
+                "id": item_id,
+                "title": title or label,
+                "body": (body or "")[:500],
+                "date": item_date or "",
+                "owner": owner or "",
+                "module": module,
+            })
+
+        with connect() as conn:
+            if wants("meetings") and self.can_view_module(user, "meetings"):
+                params = []
+                where = "1=1"
+                if keyword:
+                    where += " AND (m.title LIKE ? OR COALESCE(m.summary, '') LIKE ?)"
+                    params.extend([like, like])
+                if year:
+                    where += in_year("m.meeting_date")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT m.id, m.title, m.summary, m.meeting_date, u.display_name AS owner
+                    FROM meetings m
+                    LEFT JOIN users u ON u.id = m.created_by
+                    WHERE {where}
+                    ORDER BY m.meeting_date DESC, m.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    add_result("meetings", "会议", row["id"], row["title"], row.get("summary"), row["meeting_date"], row.get("owner"), "meetings")
+
+            if wants("meeting_items") and self.can_view_module(user, "meetings"):
+                params = []
+                where = "i.deleted_at IS NULL"
+                if keyword:
+                    where += " AND (i.title LIKE ? OR COALESCE(i.detail, '') LIKE ? OR COALESCE(i.minutes, '') LIKE ? OR COALESCE(i.open_issues, '') LIKE ? OR COALESCE(i.next_steps, '') LIKE ?)"
+                    params.extend([like, like, like, like, like])
+                if year:
+                    where += in_year("m.meeting_date")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT i.id, i.title, i.detail, i.minutes, i.open_issues, i.next_steps, m.meeting_date, COALESCE(u.display_name, '') AS owner
+                    FROM meeting_items i
+                    JOIN meetings m ON m.id = i.meeting_id
+                    LEFT JOIN users u ON u.id = i.owner_id
+                    WHERE {where}
+                    ORDER BY m.meeting_date DESC, i.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    body = "；".join(filter(None, [row.get("detail"), row.get("minutes"), row.get("open_issues"), row.get("next_steps")]))
+                    add_result("meeting_items", "会议议题", row["id"], row["title"], body, row["meeting_date"], row.get("owner"), "meetings")
+
+            if wants("team_posts") and self.can_view_module(user, "members"):
+                params = []
+                where = "1=1"
+                if keyword:
+                    where += " AND (p.content LIKE ? OR u.display_name LIKE ?)"
+                    params.extend([like, like])
+                if year:
+                    where += in_year("p.created_at")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT p.id, p.kind, p.content, p.created_at, u.display_name AS owner
+                    FROM team_posts p
+                    JOIN users u ON u.id = p.user_id
+                    WHERE {where}
+                    ORDER BY p.created_at DESC, p.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    add_result("team_posts", "团队对话", row["id"], "评论" if row["kind"] == "comment" else "吐槽", row["content"], row["created_at"], row.get("owner"), "members")
+
+            if wants("team_replies") and self.can_view_module(user, "members"):
+                params = []
+                where = "r.deleted_at IS NULL"
+                if keyword:
+                    where += " AND (r.content LIKE ? OR u.display_name LIKE ?)"
+                    params.extend([like, like])
+                if year:
+                    where += in_year("r.created_at")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT r.id, r.content, r.created_at, u.display_name AS owner
+                    FROM team_post_replies r
+                    JOIN users u ON u.id = r.user_id
+                    WHERE {where}
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    add_result("team_replies", "团队回复", row["id"], "回复", row["content"], row["created_at"], row.get("owner"), "members")
+
+            if wants("morning") and self.can_view_module(user, "morning"):
+                params = []
+                where = "i.active=1"
+                if keyword:
+                    where += " AND (i.title LIKE ? OR COALESCE(i.detail, '') LIKE ? OR COALESCE(i.blocker, '') LIKE ? OR u.display_name LIKE ?)"
+                    params.extend([like, like, like, like])
+                if year:
+                    where += in_year("i.item_date")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT i.id, i.title, i.detail, i.blocker, i.item_date, u.display_name AS owner
+                    FROM morning_items i
+                    JOIN users u ON u.id = i.owner_id
+                    WHERE {where}
+                    ORDER BY i.item_date DESC, i.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    body = "；".join(filter(None, [row.get("detail"), row.get("blocker")]))
+                    add_result("morning", "早例会事项", row["id"], row["title"], body, row["item_date"], row.get("owner"), "morning")
+
+        results.sort(key=lambda item: (item.get("date") or "", item.get("id") or 0), reverse=True)
+        return {"results": results[:limit], "keyword": keyword, "year": year, "type": type_filter}
+
+    def backup_path_from_payload(self):
+        data = read_json(self)
+        filename = (data.get("filename") or "").strip()
+        if not filename or "/" in filename or "\\" in filename or not filename.endswith(".db"):
+            raise AppError(400, "备份文件名不合法")
+        file_path = (BACKUP_DIR / filename).resolve()
+        if BACKUP_DIR.resolve() not in file_path.parents or not file_path.exists():
+            raise AppError(404, "备份文件不存在")
+        return filename, file_path
+
+    def inspect_backup_file(self, file_path):
+        required_tables = ["users", "members", "meetings", "meeting_items", "team_posts", "morning_items", "backups"]
+        try:
+            with sqlite3.connect(file_path) as conn:
+                conn.row_factory = sqlite3.Row
+                quick_check = conn.execute("PRAGMA quick_check").fetchone()[0]
+                if quick_check != "ok":
+                    return False, f"完整性检查失败：{quick_check}", {}
+                tables = {
+                    row["name"]
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+                missing = [table for table in required_tables if table not in tables]
+                if missing:
+                    return False, f"缺少关键表：{', '.join(missing)}", {}
+                counts = {
+                    table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in required_tables
+                }
+                return True, "备份可正常打开，关键表完整", counts
+        except sqlite3.Error as exc:
+            return False, f"备份无法读取：{exc}", {}
+
+    def update_backup_check_result(self, filename, ok, message, extra=None):
+        file_path = BACKUP_DIR / filename
+        size = file_path.stat().st_size if file_path.exists() else 0
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO backups(filename, size_bytes, kind, created_at)
+                VALUES(?,?,?,?)
+                """,
+                (filename, size, "manual", now_iso()),
+            )
+            conn.execute(
+                """
+                UPDATE backups
+                SET verify_status=?, verified_at=?, verify_message=?
+                WHERE filename=?
+                """,
+                ("ok" if ok else "failed", now_iso(), message, filename),
+            )
+
+    def verify_backup(self):
+        admin = self.require_admin()
+        filename, file_path = self.backup_path_from_payload()
+        ok, message, counts = self.inspect_backup_file(file_path)
+        self.update_backup_check_result(filename, ok, message, counts)
+        with connect() as conn:
+            write_audit(
+                conn,
+                admin,
+                "backup.verify",
+                "backup",
+                None,
+                "备份校验通过" if ok else "备份校验失败",
+                {"filename": filename, "message": message, "counts": counts},
+                self.client_address[0],
+            )
+        return {"ok": ok, "message": message, "counts": counts, "backups": self.list_backups()}
+
+    def restore_backup(self):
+        admin = self.require_admin()
+        filename, file_path = self.backup_path_from_payload()
+        ok, message, counts = self.inspect_backup_file(file_path)
+        self.update_backup_check_result(filename, ok, message, counts)
+        if not ok:
+            raise AppError(400, f"备份校验未通过，已取消恢复：{message}")
+        pre_restore = create_database_backup(kind="manual", user_id=admin["id"])
+        try:
+            with sqlite3.connect(file_path) as source, sqlite3.connect(DB_PATH) as dest:
+                source.backup(dest)
+            init_db()
+            restore_message = f"已恢复到备份 {filename}；恢复前备份：{pre_restore['filename'] if pre_restore else '未生成'}"
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO backups(filename, size_bytes, kind, created_at, verify_status, verified_at, verify_message)
+                    VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (filename, file_path.stat().st_size, "manual", now_iso(), "ok", now_iso(), message),
+                )
+                conn.execute(
+                    """
+                    UPDATE backups
+                    SET restored_at=?, restored_by=?, restore_message=?
+                    WHERE filename=?
+                    """,
+                    (now_iso(), admin["id"], restore_message, filename),
+                )
+                write_audit(
+                    conn,
+                    admin,
+                    "backup.restore",
+                    "backup",
+                    None,
+                    "数据库已按指定备份恢复",
+                    {"filename": filename, "pre_restore": pre_restore, "counts": counts},
+                    self.client_address[0],
+                )
+        except Exception as exc:
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE backups SET restore_message=? WHERE filename=?",
+                    (f"恢复失败：{exc}", filename),
+                )
+                write_audit(
+                    conn,
+                    admin,
+                    "backup.restore_failed",
+                    "backup",
+                    None,
+                    "数据库恢复失败",
+                    {"filename": filename, "error": str(exc), "pre_restore": pre_restore},
+                    self.client_address[0],
+                )
+            raise AppError(500, f"恢复失败：{exc}") from exc
+        return {"message": restore_message, "backups": self.list_backups(), "pre_restore": pre_restore}
+
     def list_settings(self):
         self.require_admin()
         with connect() as conn:
@@ -3315,6 +4128,11 @@ class Handler(BaseHTTPRequestHandler):
                         "kind": "manual",
                         "creator": "",
                         "created_at": dt.datetime.fromtimestamp(file_path.stat().st_mtime).replace(microsecond=0).isoformat(),
+                        "verify_status": "",
+                        "verified_at": "",
+                        "verify_message": "",
+                        "restored_at": "",
+                        "restore_message": "",
                     }
                 )
         return rows
@@ -3329,26 +4147,49 @@ class Handler(BaseHTTPRequestHandler):
 
 def permissions_for(user):
     is_admin = bool(user and user.get("role") == "admin")
-    if not user:
-        modules = sorted(PUBLIC_MODULES)
+    if is_admin:
+        operations = {
+            module: {action: True for action in PERMISSION_ACTIONS}
+            for module in MODULE_KEYS
+        }
+    elif not user:
+        operations = {
+            module: {
+                "view": module in PUBLIC_MODULES,
+                "create": False,
+                "edit": False,
+                "delete": False,
+            }
+            for module in MODULE_KEYS
+        }
     else:
         with connect() as conn:
-            modules = [
-                row["module_key"]
-                for row in conn.execute(
+            rows = rows_to_list(
+                conn.execute(
                     """
-                    SELECT module_key
+                    SELECT module_key, can_view, can_create, can_edit, can_delete
                     FROM module_permissions
-                    WHERE user_type_key=? AND can_view=1
+                    WHERE user_type_key=?
                     ORDER BY module_key
                     """,
                     (user.get("user_type") or "internal",),
                 ).fetchall()
-            ]
+            )
+        operations = {
+            row["module_key"]: {
+                "view": bool(row["can_view"]),
+                "create": bool(row["can_create"]),
+                "edit": bool(row["can_edit"]),
+                "delete": bool(row["can_delete"]),
+            }
+            for row in rows
+        }
+    modules = sorted(module for module, actions in operations.items() if actions.get("view"))
     return {
         "isAdmin": is_admin,
         "userType": user.get("user_type") if user else "guest",
         "modules": modules,
+        "operations": operations,
         "canManageUsers": is_admin,
         "canPublishRules": is_admin,
         "canRecordScores": is_admin,
@@ -3379,13 +4220,18 @@ def main():
     parser = argparse.ArgumentParser(description="周例会团队协作 Web 项目")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，局域网访问可用 0.0.0.0")
     parser.add_argument("--port", default=8000, type=int, help="监听端口")
+    parser.add_argument("--migrate-only", action="store_true", help="Only initialize and migrate the database")
     args = parser.parse_args()
     init_db()
-    ensure_daily_backup()
+    if args.migrate_only:
+        print(f"Database migration completed: {DB_PATH}")
+        return
+    if DEPLOY_ENV != "gray":
+        ensure_daily_backup()
     os.chdir(ROOT)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"周例会 Web 已启动: http://{args.host}:{args.port}")
-    print("默认账号：admin/admin123，user/user123")
+    print(f"Team Loop 已启动：http://{args.host}:{args.port}")
+    print(f"运行环境：{DEPLOY_ENV}；发布版本：{RELEASE_ID}；数据库：{DB_PATH}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

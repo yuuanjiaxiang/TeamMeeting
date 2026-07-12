@@ -17,6 +17,16 @@
 
 ## 快速启动
 
+开发调试推荐双击：
+
+```text
+start_hot_server.bat
+```
+
+该入口会监听 `server.py`、`static` 和 `previews` 中的 Python、HTML、CSS、JavaScript、JSON 文件。保存文件后会自动重启开发服务，已打开的浏览器页面会在服务恢复后自动刷新。
+
+也可以使用普通启动方式：
+
 ```powershell
 python server.py
 ```
@@ -25,13 +35,6 @@ python server.py
 
 ```text
 http://127.0.0.1:8000
-```
-
-默认账号：
-
-```text
-管理员：admin / admin123
-普通用户：user / user123
 ```
 
 ## 局域网访问
@@ -50,6 +53,8 @@ http://服务器电脑IP:8000
 
 如果无法访问，请检查 Windows 防火墙是否允许 Python 或该端口入站。
 
+热更新仅用于开发环境。`deploy_gray.bat` 和 `promote_production.bat` 创建的灰度、正式服务不会监听源代码变化，避免未验证代码自动进入团队使用环境。
+
 ## 数据位置
 
 首次启动会自动创建 SQLite 数据库：
@@ -59,6 +64,33 @@ data/weekly_team.db
 ```
 
 备份时复制 `data` 目录即可。
+
+## 灰度与正式部署
+
+Windows 推荐使用仓库根目录下的部署脚本。两个环境完全隔离：
+
+- 正式环境：`http://服务器IP:8000/`，使用 `data/weekly_team.db`。
+- 灰度环境：`http://服务器IP:8001/`，使用正式数据库的一致性快照 `data/deploy/gray/weekly_team_gray.db`。
+- 灰度环境中的新增、编辑和删除只影响快照，不会写入正式数据库。
+
+首次启用新的部署方式时，先运行一次 `start_server.bat`，将正式服务纳入版本和进程管理。后续发布流程如下：
+
+1. 双击 `deploy_gray.bat`，创建当前代码的发布快照、复制正式数据库、迁移灰度库并完成冒烟测试。
+2. 在 8001 端口完成功能验证。测试数据可自由修改，因为它不会同步回正式库。
+3. 双击 `promote_production.bat`。脚本会再次检查灰度环境、备份正式库、执行正式库迁移并切换 8000 服务。
+4. 发布异常时会自动恢复数据库；需要人工退回上一正式版本时，双击 `rollback_production.bat`。
+5. 双击 `deployment_status.bat` 可查看正式和灰度环境的版本、端口及进程状态。
+
+也可以在 PowerShell 中直接执行：
+
+```powershell
+.\deploy.ps1 -Action Gray
+.\deploy.ps1 -Action Promote
+.\deploy.ps1 -Action Rollback
+.\deploy.ps1 -Action Status
+```
+
+每次发布的代码快照、运行日志和回滚数据库位于 `data/deploy`。该目录已被 `.gitignore` 排除，不会上传业务数据到 GitHub。灰度验证只适合测试功能与迁移兼容性，不应把灰度库中产生的数据回写正式库。
 
 ## 后续扩展方向
 

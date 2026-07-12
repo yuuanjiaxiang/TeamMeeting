@@ -24,6 +24,10 @@ const state = {
   publicSettings: {},
   backups: [],
   auditLogs: [],
+  recycleBin: [],
+  reminders: [],
+  archiveYears: [],
+  archiveResults: [],
   shifts: [],
   activeShiftPopoverDate: null,
   personalMorningMonthItems: [],
@@ -49,6 +53,7 @@ const state = {
 const pages = [
   ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队对话都在这里。"],
   ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
+  ["archive", "⌕", "搜索归档", "跨年度搜索会议、对话和早例会事项。"],
   ["morning", "☀", "早例会", "按人追踪当天事项、风险和下一步。"],
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
@@ -129,8 +134,15 @@ function canAccessPage(id) {
 }
 
 function canManageLinks() {
-  if (!state.user) return false;
-  return state.user.role === "admin" || (state.user.user_type || "internal") === "internal";
+  return canOperate("links", "edit") || canOperate("links", "delete");
+}
+
+function canOperate(moduleKey, action = "view") {
+  if (isAdminAccount()) return true;
+  if (!state.user) return action === "view" && guestPages.has(moduleKey);
+  const operations = state.permissions?.operations;
+  if (!operations || !operations[moduleKey]) return action === "view" ? canAccessPage(moduleKey) : true;
+  return Boolean(operations[moduleKey][action]);
 }
 
 function firstAccessiblePage() {
@@ -350,15 +362,18 @@ function applyAuthView() {
   $("#logoutBtn")?.classList.toggle("hidden", guest);
   $("#passwordBtn")?.classList.toggle("hidden", guest);
   $("#loginEntryBtn")?.classList.toggle("hidden", !guest || showLogin);
+  $("#reminderBtn")?.classList.toggle("hidden", guest);
   const viewModeBtn = $("#viewModeBtn");
   if (viewModeBtn) {
     viewModeBtn.classList.toggle("hidden", !isAdminAccount());
     viewModeBtn.textContent = isAdminView() ? "切换用户视图" : "切换管理视图";
   }
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
-  $("#teamChatForm")?.classList.toggle("hidden", guest);
-  $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest);
-  $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest);
+  $("#teamChatForm")?.classList.toggle("hidden", guest || !canOperate("members", "create"));
+  $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("thanks", "create"));
+  $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("links", "create"));
+  $("#morningCreatePanel")?.classList.toggle("hidden", guest || !canOperate("morning", "create"));
+  $("#personalMorningCreateForm")?.classList.toggle("hidden", guest || !canOperate("morning", "create"));
   if (!canAccessPage(state.currentPage)) {
     switchPage(firstAccessiblePage());
   } else {
@@ -426,6 +441,12 @@ async function loadReferenceData() {
     }));
   } else {
     state.users = [];
+  }
+  if (!isGuest()) {
+    tasks.push(loadReminders());
+  } else {
+    state.reminders = [];
+    renderReminders(0);
   }
   await Promise.all(tasks);
   if (!isAdminView() && state.members.length) {
@@ -604,6 +625,14 @@ function renderPersonalMorningCard(item) {
   const chain = morningChainId(item);
   const color = personalLineColors[hashIndex(chain, personalLineColors.length)];
   const isActive = state.activePersonalMorningChain === chain;
+  if (!canOperate("morning", "edit")) {
+    return `<article class="personal-reminder-card ${statusClass} ${isActive ? "calendar-focused" : ""}" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
+      <div class="personal-card-head"><div><strong>${escapeHtml(item.title)}</strong><div class="personal-card-meta"><span>${escapeHtml(compactDate(item.start_date || item.item_date))} 起 · ${Number(item.duration_days || 1)} 天</span></div></div><span class="pill">${escapeHtml(statusLabel)}</span></div>
+      ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
+      ${item.blocker ? `<p class="risk-text">风险：${escapeHtml(item.blocker)}</p>` : ""}
+      <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">查看进展</button>
+    </article>`;
+  }
   return `<article class="personal-reminder-card ${statusClass} ${isActive ? "calendar-focused" : ""}" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
     <form class="personal-morning-form" data-item-id="${item.id}">
       <div class="personal-card-head">
@@ -1078,7 +1107,7 @@ function renderMorningBoard() {
 }
 
 function canEditMorningItem(item) {
-  return !state.morningReadOnly && (isAdminView() || Number(item.owner_id) === Number(state.user?.id));
+  return canOperate("morning", "edit") && !state.morningReadOnly && (isAdminView() || Number(item.owner_id) === Number(state.user?.id));
 }
 
 function renderMorningItem(item) {
@@ -1110,7 +1139,7 @@ function renderMorningItem(item) {
           <div class="morning-item-actions">
             <button type="submit">保存</button>
             <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
-            <button class="danger morning-delete-btn" type="button" data-item-id="${item.id}">删除</button>
+            ${canOperate("morning", "delete") ? `<button class="danger morning-delete-btn" type="button" data-item-id="${item.id}">删除</button>` : ""}
           </div>
         </form>
       ` : `
@@ -1294,21 +1323,34 @@ function renderUserTypePermissions() {
     return;
   }
   target.innerHTML = state.userTypes.map((type) => {
-    const selected = new Set(type.modules || []);
+    const legacyModules = new Set(type.modules || []);
+    const permissions = type.permissions || {};
+    const actions = [
+      ["view", "查看"],
+      ["create", "新增"],
+      ["edit", "编辑"],
+      ["delete", "删除"],
+    ];
     return `
       <form class="permission-card user-type-permission-form" data-type-key="${escapeHtml(type.key)}">
         <div>
           <strong>${escapeHtml(type.name)}</strong>
           <p>${escapeHtml(type.description || "")}</p>
         </div>
-        <div class="permission-grid">
-          ${state.moduleCatalog.map((module) => `
-            <label class="permission-check">
-              <input type="checkbox" name="modules" value="${escapeHtml(module.key)}" ${selected.has(module.key) ? "checked" : ""}>
-              <span>${escapeHtml(module.name)}</span>
-              <small>${escapeHtml(module.description || "")}</small>
-            </label>
-          `).join("")}
+        <div class="permission-matrix-wrap">
+          <table class="permission-matrix">
+            <thead><tr><th>模块</th>${actions.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead>
+            <tbody>${state.moduleCatalog.map((module) => {
+              const modulePermissions = permissions[module.key] || {};
+              return `<tr>
+                <th><strong>${escapeHtml(module.name)}</strong><small>${escapeHtml(module.description || "")}</small></th>
+                ${actions.map(([action, label]) => {
+                  const checked = modulePermissions[action] ?? legacyModules.has(module.key);
+                  return `<td><label class="permission-action-check" title="${escapeHtml(module.name)} · ${label}"><input type="checkbox" name="permission" value="${escapeHtml(module.key)}:${action}" data-permission-module="${escapeHtml(module.key)}" data-permission-action="${action}" ${checked ? "checked" : ""}><span>${label}</span></label></td>`;
+                }).join("")}
+              </tr>`;
+            }).join("")}</tbody>
+          </table>
         </div>
         <button type="submit">保存 ${escapeHtml(type.name)} 权限</button>
       </form>
@@ -1318,19 +1360,97 @@ function renderUserTypePermissions() {
 
 async function loadSystemAdmin() {
   if (!isAdminView()) return;
-  const [settings, backups, logs] = await Promise.all([
+  const [settings, backups, logs, recycle] = await Promise.all([
     api("/api/settings"),
     api("/api/backups"),
     api("/api/audit-logs?limit=120"),
+    api("/api/recycle-bin"),
   ]);
   state.settings = settings.settings;
   state.backups = backups.backups;
   state.auditLogs = logs.logs;
+  state.recycleBin = recycle.items || [];
   renderSettings();
   renderBackups();
   renderAuditLogs();
+  renderRecycleBin();
   applyBranding();
   applySettingDefaults();
+}
+
+function renderRecycleBin() {
+  const target = $("#recycleBinList");
+  if (!target) return;
+  target.innerHTML = state.recycleBin.length ? state.recycleBin.map((item) => `
+    <article class="recycle-item">
+      <div class="recycle-item-main">
+        <span class="pill">${escapeHtml(item.entity_label || item.entity_type)}</span>
+        <div>
+          <strong>${escapeHtml(item.title || "未命名内容")}</strong>
+          <small>${escapeHtml(item.deleted_by_name || "系统")} · ${escapeHtml(shortDateTime(item.deleted_at || ""))}</small>
+        </div>
+      </div>
+      <div class="recycle-item-actions">
+        <button class="secondary recycle-restore-btn" type="button" data-recycle-id="${item.id}">恢复</button>
+        ${item.can_purge ? `<button class="danger recycle-purge-btn" type="button" data-recycle-id="${item.id}" data-recycle-title="${escapeHtml(item.title || "该内容")}">彻底删除</button>` : '<span class="pill">保留历史</span>'}
+      </div>
+    </article>`).join("") : '<p class="empty-note">回收站为空</p>';
+}
+
+function renderReminders(unread = state.reminders.filter((item) => !item.read).length) {
+  const badge = $("#reminderBadge");
+  if (badge) {
+    badge.textContent = String(unread);
+    badge.classList.toggle("hidden", unread < 1);
+  }
+  const summary = $("#reminderSummary");
+  if (summary) summary.textContent = unread ? `${unread} 条未读提醒` : "暂无未读提醒";
+  const readAll = $("#reminderReadAllBtn");
+  if (readAll) readAll.disabled = unread < 1;
+  const list = $("#reminderList");
+  if (!list) return;
+  list.innerHTML = state.reminders.length ? state.reminders.map((item) => `
+    <button class="reminder-item reminder-${escapeHtml(item.level || "info")} ${item.read ? "is-read" : ""}" type="button" data-reminder-key="${escapeHtml(item.key)}" data-reminder-page="${escapeHtml(item.page)}">
+      <span class="reminder-dot"></span>
+      <span class="reminder-content">
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.detail || "")}</span>
+        <small>${escapeHtml(shortDate(item.date || ""))}</small>
+      </span>
+    </button>`).join("") : '<p class="empty-note">近期没有需要处理的提醒</p>';
+}
+
+async function loadReminders() {
+  if (isGuest()) return;
+  const data = await api("/api/reminders");
+  state.reminders = data.items || [];
+  renderReminders(Number(data.unread || 0));
+}
+
+function openReminderModal() {
+  const modal = $("#reminderModal");
+  if (!modal || isGuest()) return;
+  renderReminders();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function closeReminderModal() {
+  const modal = $("#reminderModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+async function markRemindersRead(keys = [], all = false) {
+  const data = await api("/api/reminders/read", {
+    method: "PATCH",
+    body: JSON.stringify({ keys, all }),
+  });
+  state.reminders = data.items || [];
+  renderReminders(Number(data.unread || 0));
 }
 
 function renderSettings() {
@@ -1364,20 +1484,86 @@ function renderBackups() {
   const list = $("#backupList");
   if (!list) return;
   list.innerHTML = state.backups.length ? `
-    <table>
-      <thead><tr><th>文件</th><th>类型</th><th>大小</th><th>创建时间</th><th>创建人</th><th>操作</th></tr></thead>
+    <table class="backup-table">
+      <thead><tr><th>文件</th><th>类型</th><th>大小</th><th>创建时间</th><th>校验 / 恢复</th><th>操作</th></tr></thead>
       <tbody>
         ${state.backups.map((backup) => `
           <tr>
             <td>${escapeHtml(backup.filename)}</td>
             <td>${backup.kind === "auto" ? "自动" : "手动"}</td>
             <td>${formatBytes(backup.size_bytes)}</td>
-            <td>${escapeHtml(backup.created_at || "")}</td>
-            <td>${escapeHtml(backup.creator || "系统")}</td>
-            <td><a class="link-url" href="/api/backups/download?file=${encodeURIComponent(backup.filename)}">下载</a></td>
+            <td><strong>${escapeHtml(shortDateTime(backup.created_at || ""))}</strong><small>${escapeHtml(backup.creator || "系统")}</small></td>
+            <td>
+              <div class="backup-status">
+                <span class="pill ${backup.verify_status === "ok" ? "status-done" : backup.verify_status === "failed" ? "status-risk" : ""}">${backup.verify_status === "ok" ? "已校验" : backup.verify_status === "failed" ? "校验失败" : "未校验"}</span>
+                ${backup.verified_at ? `<small>${escapeHtml(shortDateTime(backup.verified_at))}</small>` : ""}
+                ${backup.verify_message ? `<small>${escapeHtml(backup.verify_message)}</small>` : ""}
+                ${backup.restored_at ? `<small class="restore-note">已恢复：${escapeHtml(shortDateTime(backup.restored_at))}</small>` : ""}
+              </div>
+            </td>
+            <td>
+              <div class="backup-actions">
+                <a class="link-url" href="/api/backups/download?file=${encodeURIComponent(backup.filename)}">下载</a>
+                <button class="secondary backup-verify-btn" type="button" data-backup-file="${escapeHtml(backup.filename)}">校验</button>
+                <button class="danger backup-restore-btn" type="button" data-backup-file="${escapeHtml(backup.filename)}">恢复</button>
+              </div>
+            </td>
           </tr>`).join("")}
       </tbody>
     </table>` : "<p>暂无备份</p>";
+}
+
+function renderArchiveYears() {
+  const list = $("#archiveYearList");
+  const yearFilter = $("#archiveYearFilter");
+  if (yearFilter) {
+    const current = yearFilter.value;
+    yearFilter.innerHTML = `<option value="">全部年份</option>${state.archiveYears.map((item) => `<option value="${escapeHtml(item.year)}">${escapeHtml(item.year)} 年</option>`).join("")}`;
+    yearFilter.value = current;
+  }
+  if (!list) return;
+  list.innerHTML = state.archiveYears.length ? state.archiveYears.map((item) => {
+    const types = Object.values(item.types || {});
+    return `<button class="archive-year-card" type="button" data-archive-year="${escapeHtml(item.year)}">
+      <strong>${escapeHtml(item.year)}</strong>
+      <span>${Number(item.total || 0)} 条记录</span>
+      <small>${types.map((type) => `${escapeHtml(type.label)} ${Number(type.count || 0)}`).join(" · ")}</small>
+    </button>`;
+  }).join("") : `<p class="empty-note">暂无可归档数据</p>`;
+}
+
+function renderArchiveResults() {
+  const list = $("#archiveSearchResults");
+  const summary = $("#archiveSearchSummary");
+  if (summary) {
+    summary.textContent = state.archiveResults.length ? `共找到 ${state.archiveResults.length} 条结果` : "输入关键词或选择年份后搜索";
+  }
+  if (!list) return;
+  list.innerHTML = state.archiveResults.length ? state.archiveResults.map((item) => `
+    <article class="archive-result-item">
+      <div class="archive-result-meta">
+        <span class="pill">${escapeHtml(item.type_label || item.type)}</span>
+        <span>${escapeHtml(shortDate(item.date || ""))}</span>
+        ${item.owner ? `<span>${escapeHtml(item.owner)}</span>` : ""}
+      </div>
+      <h3>${escapeHtml(item.title || "未命名内容")}</h3>
+      ${item.body ? `<p>${escapeHtml(item.body)}</p>` : ""}
+    </article>
+  `).join("") : `<p class="empty-note">暂无搜索结果</p>`;
+}
+
+async function loadArchive() {
+  const data = await api("/api/archive/years");
+  state.archiveYears = data.years || [];
+  renderArchiveYears();
+  renderArchiveResults();
+}
+
+async function searchArchive(form) {
+  const params = new URLSearchParams(fullFormData(form));
+  const data = await api(`/api/archive/search?${params.toString()}`);
+  state.archiveResults = data.results || [];
+  renderArchiveResults();
 }
 
 function renderAuditLogs() {
@@ -1514,7 +1700,13 @@ function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
     target.innerHTML = `<p class="empty-note">${year} 年暂无积分数据。</p>`;
     return;
   }
+  const maxMonthly = Math.max(1, ...rows.flatMap((row) => Object.values(row.months || {}).flatMap((value) => [Number(value.red || 0), Number(value.black || 0)])));
   target.innerHTML = `
+    <div class="annual-score-legend">
+      <span class="annual-legend-item red"><i></i>红榜积分</span>
+      <span class="annual-legend-item black"><i></i>黑榜积分</span>
+      <small>按年度红榜积分从高到低排列，红黑榜不相互抵扣</small>
+    </div>
     <table class="annual-score-table">
       <thead>
         <tr>
@@ -1524,17 +1716,23 @@ function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
         </tr>
       </thead>
       <tbody>
-        ${rows.map((row) => {
+        ${rows.map((row, rowIndex) => {
           const monthsData = row.months || {};
           return `<tr>
-            <th class="member-col">${escapeHtml(row.display_name || "未命名")}</th>
+            <th class="member-col"><div class="annual-member-cell"><span class="annual-member-rank">${rowIndex + 1}</span><span>${escapeHtml(row.display_name || "未命名")}</span></div></th>
             ${months.map((month) => {
               const value = monthsData[String(month)] || {};
               const red = Number(value.red || 0);
               const black = Number(value.black || 0);
-              return `<td><div class="score-split-cell"><span class="score-red">红 ${red}</span><span class="score-black">黑 ${black}</span></div></td>`;
+              if (!red && !black) return `<td><span class="annual-score-empty">—</span></td>`;
+              const redStrength = 0.55 + Math.min(1, red / maxMonthly) * 0.35;
+              const blackStrength = 0.55 + Math.min(1, black / maxMonthly) * 0.35;
+              return `<td><div class="annual-month-score">
+                ${red ? `<span class="score-red" style="--score-strength:${redStrength}"><b>红</b>${red}</span>` : ""}
+                ${black ? `<span class="score-black" style="--score-strength:${blackStrength}"><b>黑</b>${black}</span>` : ""}
+              </div></td>`;
             }).join("")}
-            <td class="total-col"><div class="score-split-cell"><span class="score-red">红 ${Number(row.total_red || 0)}</span><span class="score-black">黑 ${Number(row.total_black || 0)}</span></div></td>
+            <td class="total-col"><div class="annual-total-score"><span class="score-red"><b>红榜</b>${Number(row.total_red || 0)}</span><span class="score-black"><b>黑榜</b>${Number(row.total_black || 0)}</span></div></td>
           </tr>`;
         }).join("")}
       </tbody>
@@ -1653,6 +1851,7 @@ function renderPresetTopicForm(meeting) {
 }
 
 function renderCustomTopicForm(meeting) {
+  if (!canOperate("meetings", "create")) return '<p class="empty-note">当前用户类型仅可查看会议议题。</p>';
   const topics = meetingTopicTypes(meeting);
   if (!topics.length) return "<p>本场会议尚未设置主题，暂不能添加议题。</p>";
   return `
@@ -1694,9 +1893,12 @@ function renderMeetingItem(item) {
     ${thankYouTopic ? `
       <div class="topic-auto-summary">
         Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
-      </div>` : `
-      ${renderMeetingMinuteSummary(item)}
-      <button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "编辑纪要" : "记录纪要"}</button>`}
+      </div>` : renderMeetingMinuteSummary(item)}
+    ${(canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
+      <div class="topic-item-actions">
+        ${!thankYouTopic && canOperate("meetings", "edit") ? `<button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "编辑纪要" : "记录纪要"}</button>` : ""}
+        ${canOperate("meetings", "delete") ? `<button class="danger meeting-item-delete-btn" type="button" data-item-id="${item.id}" data-item-title="${escapeHtml(item.title)}">删除议题</button>` : ""}
+      </div>` : ""}
   </div>`;
 }
 
@@ -2244,11 +2446,19 @@ async function copyMeetingMinutes(html, text) {
 function openMailDraft(subject) {
   const params = new URLSearchParams({ subject });
   const mailto = `mailto:?${params.toString()}`;
+  const launcher = document.createElement("a");
+  launcher.href = mailto;
+  launcher.target = "_self";
+  launcher.style.display = "none";
+  launcher.setAttribute("aria-hidden", "true");
   try {
-    window.location.href = mailto;
+    document.body.appendChild(launcher);
+    launcher.click();
     return { ok: true };
   } catch (error) {
     return { ok: false, reason: errorReason(error) };
+  } finally {
+    launcher.remove();
   }
 }
 
@@ -2607,7 +2817,9 @@ function renderLinks() {
     ].filter(Boolean).join(" ").toLowerCase();
     return hitCategory && hitStatus && (!keyword || text.includes(keyword));
   }).sort(compareLinksForDisplay);
-  const canManage = canManageLinks();
+  const canEdit = canOperate("links", "edit");
+  const canDelete = canOperate("links", "delete");
+  const canManage = canEdit || canDelete;
   const manageHeader = canManage ? "<th>操作</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
     <table class="link-list-table ${canManage ? "has-manage" : ""}">
@@ -2646,8 +2858,8 @@ function renderLinks() {
                 <div class="link-action-menu-wrap">
                   <button class="link-action-menu-toggle" type="button" data-link-menu-toggle data-link-id="${link.id}" aria-label="更多操作" title="更多操作" aria-expanded="false">⋯</button>
                   <div class="link-action-menu hidden" data-link-menu="${link.id}">
-                    <button class="link-edit-btn" type="button" data-link-id="${link.id}">编辑链接</button>
-                    <button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>
+                    ${canEdit ? `<button class="link-edit-btn" type="button" data-link-id="${link.id}">编辑链接</button>` : ""}
+                    ${canDelete ? `<button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>` : ""}
                   </div>
                 </div>
                 ${isAdminView() ? `<form class="link-quality-form" data-link-id="${link.id}">
@@ -2842,10 +3054,10 @@ async function loadThanks() {
     <div class="item thank-item">
       <div class="thank-item-head">
         <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
-        ${canManageThankVote(vote) ? `
+        ${canManageThankVote(vote) && (canOperate("thanks", "edit") || canOperate("thanks", "delete")) ? `
           <div class="thank-item-actions">
-            <button class="secondary thank-edit-btn" type="button" data-vote-id="${vote.id}" data-evidence="${escapeHtml(vote.evidence || "")}">编辑</button>
-            <button class="danger thank-delete-btn" type="button" data-vote-id="${vote.id}" data-vote-title="${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}">删除</button>
+            ${canOperate("thanks", "edit") ? `<button class="secondary thank-edit-btn" type="button" data-vote-id="${vote.id}" data-evidence="${escapeHtml(vote.evidence || "")}">编辑</button>` : ""}
+            ${canOperate("thanks", "delete") ? `<button class="danger thank-delete-btn" type="button" data-vote-id="${vote.id}" data-vote-title="${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}">删除</button>` : ""}
           </div>` : ""}
       </div>
       <p>${escapeHtml(vote.evidence)}</p>
@@ -2883,6 +3095,7 @@ function updateThankRecipientPicker(picker) {
 function canLoadPageData(id) {
   if (id === "dashboard" || id === "meetings") return !isGuest() && canLoadModule(id);
   if (id === "users" || id === "system") return isAdminView();
+  if (id === "archive") return !isGuest() && canLoadModule(id);
   return canLoadModule(id);
 }
 
@@ -2894,6 +3107,7 @@ async function refreshPageData(id = state.currentPage) {
   const loaders = {
     members: loadMembers,
     dashboard: loadDashboard,
+    archive: loadArchive,
     morning: loadMorning,
     meetings: loadMeetings,
     shifts: loadShifts,
@@ -2917,6 +3131,7 @@ async function refreshAll() {
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
+  if (!isGuest() && canLoadModule("archive")) loaders.push(loadArchive);
   if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
   if (!isGuest() && canLoadModule("meetings")) loaders.push(loadMeetings);
   if (isAdminView()) {
@@ -2996,7 +3211,7 @@ async function submitUserEditForm(form) {
 
 function renderReactionControls(targetType, targetId, reactions = []) {
   const renderCount = (item) => `${renderReactionMark(item.reaction)} <span>+${Number(item.count || 0)}</span>`;
-  if (isGuest()) {
+  if (isGuest() || !canOperate("members", "create")) {
     if (!reactions.length) return "";
     return `<div class="chat-reactions readonly">
       ${reactions.map((item) => `<span class="chat-reaction-count">${renderCount(item)}</span>`).join("")}
@@ -3135,15 +3350,15 @@ function renderTeamReplies(post, replies = post.replies || [], depth = 0) {
         <p>${escapeHtml(reply.content)}</p>
         <small>${escapeHtml(reply.display_name)} · ${escapeHtml(shortDateTime(reply.created_at || ""))}</small>
         ${renderReactionControls("reply", reply.id, reply.reactions || [])}
-        ${isGuest() ? "" : `
+        ${isGuest() || !canOperate("members", "create") ? "" : `
           <div class="chat-reply-actions">
             <button type="button" class="chat-reply-toggle" data-post-id="${post.id}" data-parent-reply-id="${reply.id}">回复</button>
-            ${(reply.mine || isAdminView()) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : ""}
+            ${(canOperate("members", "delete") && (reply.mine || isAdminView())) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : ""}
           </div>
           <form class="chat-reply-form hidden" data-post-id="${post.id}">
             <input name="parent_reply_id" type="hidden" value="${reply.id}">
             <input name="content" placeholder="回复 ${escapeHtml(reply.display_name)}，最多 200 字" maxlength="200" required>
-            <button>发送</button>
+            <button type="submit">发送</button>
           </form>`}
         ${renderTeamReplies(post, reply.replies || [], depth + 1)}
       </div>`).join("")}
@@ -3162,12 +3377,12 @@ function renderTeamChat(posts, preserveScroll = false) {
       <small>${escapeHtml(post.display_name)} · ${escapeHtml(post.created_at || "")}</small>
       ${renderTeamReactions(post)}
       ${renderTeamReplies(post)}
-      ${isGuest() ? "" : `
+      ${isGuest() || !canOperate("members", "create") ? "" : `
         <div class="chat-reply-tools">
           <button type="button" class="chat-reply-toggle" data-post-id="${post.id}">回复</button>
           <form class="chat-reply-form hidden" data-post-id="${post.id}">
             <input name="content" placeholder="回复这条对话，最多 200 字" maxlength="200" required>
-            <button>发送</button>
+            <button type="submit">发送</button>
           </form>
         </div>`}
     </div>`).join("") : "<p>还没有团队对话，来开个头。</p>";
@@ -3270,7 +3485,7 @@ function closeLinkDeleteModal() {
 }
 
 function openLinkDeleteModal(linkId) {
-  if (!canManageLinks()) return;
+  if (!canOperate("links", "delete")) return;
   const link = state.links.find((item) => Number(item.id) === Number(linkId));
   const modal = $("#linkDeleteModal");
   if (!link || !modal) return;
@@ -3285,7 +3500,7 @@ function openLinkDeleteModal(linkId) {
 }
 
 function openLinkEditModal(linkId) {
-  if (!canManageLinks()) return;
+  if (!canOperate("links", "edit")) return;
   const link = state.links.find((item) => Number(item.id) === Number(linkId));
   const modal = $("#linkEditModal");
   const form = $("#linkEditForm");
@@ -3306,7 +3521,7 @@ function openLinkEditModal(linkId) {
 }
 
 async function submitLinkEditForm(form) {
-  if (!canManageLinks()) throw new Error("当前账号无权维护常用链接");
+  if (!canOperate("links", "edit")) throw new Error("当前账号无权编辑常用链接");
   const payload = prepareLinkPayload(fullFormData(form));
   const data = await api(`/api/links/${form.dataset.linkId}`, {
     method: "PATCH",
@@ -3318,7 +3533,7 @@ async function submitLinkEditForm(form) {
 }
 
 async function deleteLink(linkId) {
-  if (!canManageLinks()) throw new Error("当前账号无权删除常用链接");
+  if (!canOperate("links", "delete")) throw new Error("当前账号无权删除常用链接");
   const data = await api(`/api/links/${linkId}`, { method: "DELETE" });
   state.links = data.links || state.links.filter((item) => Number(item.id) !== Number(linkId));
   renderLinks();
@@ -3353,7 +3568,7 @@ function openMemberEditModal(memberId) {
 }
 
 function renderMemberCard(member, memberIndex = 0, memberCount = 1) {
-  const canEdit = isAdminView() || member.user_id === state.user?.id;
+  const canEdit = canOperate("members", "edit") && (isAdminView() || member.user_id === state.user?.id);
   const skills = member.skills || [];
   const tags = member.tags || [];
   const responsibilities = filledText(member.responsibilities);
@@ -3513,6 +3728,12 @@ function bindEvents() {
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#reminderBtn")?.addEventListener("click", () => {
+    loadReminders().then(openReminderModal).catch((error) => toast(error.message));
+  });
+  $("#reminderReadAllBtn")?.addEventListener("click", () => {
+    markRemindersRead([], true).catch((error) => toast(error.message));
+  });
   $("#themeSelect").addEventListener("change", (event) => {
     setUiTheme(event.target.value);
     const label = event.target.selectedOptions?.[0]?.textContent || "新主题";
@@ -3566,6 +3787,17 @@ function bindEvents() {
   bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
+  $("#archiveSearchForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await searchArchive(event.currentTarget);
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  $("#archiveRefreshBtn")?.addEventListener("click", () => {
+    loadArchive().then(() => toast("归档已刷新")).catch((error) => toast(error.message));
+  });
 
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
   $("#linkStatusFilter").addEventListener("change", renderLinks);
@@ -3632,6 +3864,7 @@ function bindEvents() {
       closeLinkEditModal();
       closeLinkDeleteModal();
       closeLinkActionMenus();
+      closeReminderModal();
       closeShiftPopover();
       return;
     }
@@ -3648,6 +3881,99 @@ function bindEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
+    const permissionCheckbox = event.target.closest("[data-permission-action]");
+    if (permissionCheckbox) {
+      const form = permissionCheckbox.closest(".user-type-permission-form");
+      const moduleKey = permissionCheckbox.dataset.permissionModule;
+      if (permissionCheckbox.checked && permissionCheckbox.dataset.permissionAction !== "view") {
+        const viewCheckbox = $(`[data-permission-module="${moduleKey}"][data-permission-action="view"]`, form);
+        if (viewCheckbox) viewCheckbox.checked = true;
+      }
+      if (!permissionCheckbox.checked && permissionCheckbox.dataset.permissionAction === "view") {
+        $$(`[data-permission-module="${moduleKey}"]`, form).forEach((input) => { input.checked = false; });
+      }
+      return;
+    }
+    if (event.target.closest("[data-reminder-close]") || event.target === $("#reminderModal")) {
+      closeReminderModal();
+      return;
+    }
+    const reminderItem = event.target.closest("[data-reminder-key]");
+    if (reminderItem) {
+      const page = reminderItem.dataset.reminderPage;
+      markRemindersRead([reminderItem.dataset.reminderKey])
+        .then(() => {
+          closeReminderModal();
+          switchPage(page);
+          return refreshPageData(page);
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const archiveYear = event.target.closest("[data-archive-year]");
+    if (archiveYear) {
+      const form = $("#archiveSearchForm");
+      if (form) {
+        form.elements.year.value = archiveYear.dataset.archiveYear || "";
+        searchArchive(form).catch((error) => toast(error.message));
+      }
+      return;
+    }
+    const backupVerify = event.target.closest(".backup-verify-btn");
+    if (backupVerify) {
+      api("/api/backups/verify", {
+        method: "POST",
+        body: JSON.stringify({ filename: backupVerify.dataset.backupFile }),
+      })
+        .then((data) => {
+          state.backups = data.backups || state.backups;
+          renderBackups();
+          toast(data.message || "备份校验完成");
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const backupRestore = event.target.closest(".backup-restore-btn");
+    if (backupRestore) {
+      const filename = backupRestore.dataset.backupFile || "";
+      if (!window.confirm(`确定恢复到备份「${filename}」吗？系统会先生成恢复前备份，然后覆盖当前数据库。`)) return;
+      api("/api/backups/restore", {
+        method: "POST",
+        body: JSON.stringify({ filename }),
+      })
+        .then((data) => {
+          state.backups = data.backups || state.backups;
+          renderBackups();
+          toast(data.message || "数据库已恢复");
+          return refreshAll();
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const recycleRestore = event.target.closest(".recycle-restore-btn");
+    if (recycleRestore) {
+      api(`/api/recycle-bin/${recycleRestore.dataset.recycleId}/restore`, { method: "POST" })
+        .then((data) => {
+          state.recycleBin = data.items || [];
+          renderRecycleBin();
+          return refreshAll();
+        })
+        .then(() => toast("内容已恢复"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const recyclePurge = event.target.closest(".recycle-purge-btn");
+    if (recyclePurge) {
+      if (!window.confirm(`确定彻底删除「${recyclePurge.dataset.recycleTitle || "该内容"}」吗？此操作无法恢复。`)) return;
+      api(`/api/recycle-bin/${recyclePurge.dataset.recycleId}`, { method: "DELETE" })
+        .then((data) => {
+          state.recycleBin = data.items || [];
+          renderRecycleBin();
+          toast("内容已彻底删除");
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
     if (!event.target.closest("#shiftCalendar")) {
       closeShiftPopover();
     }
@@ -3717,6 +4043,18 @@ function bindEvents() {
     const meetingMinuteButton = event.target.closest(".meeting-minute-btn");
     if (meetingMinuteButton) {
       openMeetingMinuteModal(meetingMinuteButton.dataset.itemId);
+      return;
+    }
+    const meetingItemDelete = event.target.closest(".meeting-item-delete-btn");
+    if (meetingItemDelete) {
+      if (!window.confirm(`确定删除议题「${meetingItemDelete.dataset.itemTitle || "该议题"}」吗？删除后可在回收站恢复。`)) return;
+      api(`/api/meeting-items/${meetingItemDelete.dataset.itemId}`, { method: "DELETE" })
+        .then((data) => {
+          state.meetings = data.meetings || state.meetings;
+          renderMeetings();
+          toast("议题已移入回收站");
+        })
+        .catch((error) => toast(error.message));
       return;
     }
     const morningHistoryButton = event.target.closest(".morning-history-btn");
@@ -3827,10 +4165,24 @@ function bindEvents() {
     }
     const chatReplyToggle = event.target.closest(".chat-reply-toggle");
     if (chatReplyToggle) {
-      const container = chatReplyToggle.closest(".chat-reply") || chatReplyToggle.closest(".chat-bubble");
-      const form = [...(container?.children || [])].find((child) => child.matches?.(".chat-reply-form"));
-      form?.classList.toggle("hidden");
-      form?.elements.content?.focus();
+      const actionGroup = chatReplyToggle.closest(".chat-reply-actions, .chat-reply-tools");
+      const inlineForm = chatReplyToggle.nextElementSibling?.matches?.(".chat-reply-form")
+        ? chatReplyToggle.nextElementSibling
+        : null;
+      const adjacentForm = actionGroup?.nextElementSibling?.matches?.(".chat-reply-form")
+        ? actionGroup.nextElementSibling
+        : null;
+      const form = inlineForm || adjacentForm || actionGroup?.querySelector?.(":scope > .chat-reply-form");
+      if (!form) {
+        toast("回复框加载失败，请刷新页面后重试");
+        return;
+      }
+      const willOpen = form.classList.contains("hidden");
+      document.querySelectorAll(".chat-reply-form:not(.hidden)").forEach((openForm) => {
+        if (openForm !== form) openForm.classList.add("hidden");
+      });
+      form.classList.toggle("hidden", !willOpen);
+      if (willOpen) form.elements.content?.focus();
       return;
     }
     const chatReplyDelete = event.target.closest(".chat-reply-delete");
@@ -3994,10 +4346,19 @@ function bindEvents() {
         return;
       }
       if (permissionForm) {
-        const modules = new FormData(permissionForm).getAll("modules");
+        const permissions = {};
+        state.moduleCatalog.forEach((module) => {
+          permissions[module.key] = { view: false, create: false, edit: false, delete: false };
+        });
+        new FormData(permissionForm).getAll("permission").forEach((value) => {
+          const [moduleKey, action] = String(value).split(":");
+          if (permissions[moduleKey] && Object.hasOwn(permissions[moduleKey], action)) {
+            permissions[moduleKey][action] = true;
+          }
+        });
         const data = await api(`/api/user-types/${permissionForm.dataset.typeKey}/permissions`, {
           method: "PATCH",
-          body: JSON.stringify({ modules }),
+          body: JSON.stringify({ permissions }),
         });
         state.userTypes = data.types || state.userTypes;
         state.moduleCatalog = data.modules || state.moduleCatalog;
@@ -4118,4 +4479,30 @@ async function boot() {
   }
 }
 
-boot();
+async function startDevelopmentHotReload() {
+  let baselineRelease = null;
+  try {
+    const health = await api("/api/health");
+    if (health.environment !== "development") return;
+    baselineRelease = health.release;
+  } catch {
+    return;
+  }
+  window.setInterval(async () => {
+    try {
+      const response = await fetch(`/api/health?reload=${Date.now()}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (!response.ok) return;
+      const health = await response.json();
+      if (health.environment === "development" && health.release && health.release !== baselineRelease) {
+        window.location.reload();
+      }
+    } catch {
+      // The development server is briefly unavailable while the watcher restarts it.
+    }
+  }, 1200);
+}
+
+boot().finally(startDevelopmentHotReload);

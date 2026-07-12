@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260711-member-links-menu" />
+    <link rel="stylesheet" href="/style.css?v=20260712-archive-restore-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -63,6 +63,9 @@
                 <label>开始<input id="fromDate" type="date" /></label>
                 <label>结束<input id="toDate" type="date" /></label>
               </div>
+              <button id="reminderBtn" class="secondary reminder-button hidden" type="button" aria-label="打开提醒中心">
+                提醒 <span id="reminderBadge" class="reminder-badge hidden">0</span>
+              </button>
               <button id="refreshBtn" class="secondary">刷新</button>
             </div>
           </header>
@@ -86,6 +89,23 @@
                   <button type="submit">保存新密码</button>
                 </div>
               </form>
+            </div>
+          </div>
+
+          <div id="reminderModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="reminderTitle" aria-hidden="true">
+            <div class="modal-card reminder-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="reminderTitle">提醒中心</h2>
+                  <p>集中查看近期风险、行动项和排班安排。</p>
+                </div>
+                <button class="modal-close" type="button" data-reminder-close aria-label="关闭">×</button>
+              </div>
+              <div class="reminder-toolbar">
+                <span id="reminderSummary">暂无未读提醒</span>
+                <button id="reminderReadAllBtn" class="secondary" type="button">全部已读</button>
+              </div>
+              <div id="reminderList" class="reminder-list"></div>
             </div>
           </div>
           <div id="memberEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="memberEditTitle">
@@ -288,6 +308,45 @@
                 <div id="thanksRank" class="rank-list"></div>
               </section>
             </div>
+          </section>
+
+          <section id="archive" class="page">
+            <section class="panel archive-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>年度归档</h2>
+                  <p>按年份汇总会议、团队对话和早例会事项，数据多起来后先从这里定位时间范围。</p>
+                </div>
+                <button id="archiveRefreshBtn" class="secondary" type="button">刷新归档</button>
+              </div>
+              <div id="archiveYearList" class="archive-year-list"></div>
+            </section>
+
+            <section class="panel archive-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>全局搜索</h2>
+                  <p>可搜索会议主题/纪要、团队对话/回复、早例会事项和风险说明。</p>
+                </div>
+              </div>
+              <form id="archiveSearchForm" class="archive-search-form">
+                <input name="keyword" placeholder="输入关键词，例如：TOPTB、交接、温控、质量复盘" />
+                <select name="year" id="archiveYearFilter">
+                  <option value="">全部年份</option>
+                </select>
+                <select name="type">
+                  <option value="all">全部内容</option>
+                  <option value="meetings">会议</option>
+                  <option value="meeting_items">会议议题/纪要</option>
+                  <option value="team_posts">团队对话</option>
+                  <option value="team_replies">团队回复</option>
+                  <option value="morning">早例会事项</option>
+                </select>
+                <button type="submit">搜索</button>
+              </form>
+              <div id="archiveSearchSummary" class="archive-search-summary"></div>
+              <div id="archiveSearchResults" class="archive-result-list"></div>
+            </section>
           </section>
 
           <section id="morning" class="page">
@@ -650,7 +709,7 @@
               <div class="panel-title">
                 <div>
                   <h2>用户类型权限</h2>
-                  <p>角色决定能不能管理，用户类型决定普通视图能看见哪些模块。合作方可只开放早例会、常用链接等模块。</p>
+                  <p>按用户类型配置每个模块的查看、新增、编辑和删除权限；勾选操作权限时会自动开放查看权限。</p>
                 </div>
               </div>
               <div id="userTypePermissionList" class="permission-list"></div>
@@ -666,6 +725,16 @@
                 </div>
               </div>
               <form id="settingsForm" class="settings-form"></form>
+            </section>
+
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>回收站</h2>
+                  <p>误删的用户、链接、团队回复和会议议题可在这里恢复。</p>
+                </div>
+              </div>
+              <div id="recycleBinList" class="recycle-list"></div>
             </section>
 
             <div class="split admin-only">
@@ -696,6 +765,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260711-member-links-menu"></script>
+    <script type="module" src="/app.js?v=20260712-archive-restore-v1"></script>
   </body>
 </html>
