@@ -1,0 +1,4 @@
+interface:
+  display_name: "Team Loop Maintainer"
+  short_description: "Safely extend, test, and deploy the Team Loop application"
+  default_prompt: "Use $team-loop-maintainer to implement and verify a Team Loop change."

@@ -1,97 +1,64 @@
-# 周例会 Web 项目
+# Team Loop
 
-一个适合技术项目团队使用的轻量周例会工作台。后端使用 Python 标准库 + SQLite，前端使用原生 HTML/CSS/JS，无需安装第三方依赖，方便在 Windows 上快速部署，并支持局域网其他用户访问。
+Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端仅使用 Python 标准库和 SQLite，前端使用原生 HTML/CSS/JavaScript，适合在 Windows 单机或局域网环境快速部署。
 
-## 已包含功能
+## 主要能力
 
-- 用户管理：管理员、普通用户两类角色，页面和接口都会按角色控制权限；管理员可软删除用户，历史记录会保留。
-- 团队成员：成员档案放在首屏，并与用户管理保持一致；新增用户自动生成成员档案，删除用户会同步隐藏对应成员；管理员可维护所有成员标签和职责，个人可维护自己的标签和职责；支持本地图片转自定义头像；评论/吐槽集中在团队对话聊天流展示。
-- 会议沙盘：管理员维护议题类型和预设议题，支持按 1/2/3/4 周周期，或按每月第 1/2/3/4 周、倒数第 2 周、最后 1 周批量生成周例会；成员可提交自定义议题，每个议题可填写会议纪要，并一键生成会议邮件草稿。
-- 参会签到：管理员登记出席、请假、缺席、迟到，并维护迟到乐捐及完成状态。
-- 机台排班：使用月度日历展示每天白班/夜班，管理员可按日期范围批量添加排班、删除单条排班，并按时间统计工时；普通成员只读查看并高亮自己的班次。
-- 红黑榜：管理员发布规则内容、记录个人积分，支持按时间筛选和排行看板。
-- 常用链接：全员可归档团队常用系统、文档、工具入口；管理员维护分类下拉框和链接质量，支持置顶、失效标记、点击统计、适用机台/流程标签、分类和关键词搜索。
-- Thank You：每人每周最多感谢 3 位成员，必须填写事实依据，支持看板和 Thank You 之星统计。
-- 团队画像：成员可维护技能、负责机台、擅长问题、备用负责人和联系方式，管理员可统一维护。
-- 系统管理：管理员可维护全局配置、查看审计日志、手动备份数据库；系统每天自动生成一次数据库备份。
+- 团队成员、用户类型、模块级与操作级权限管理
+- 个人工作台和跨日继承的早例会事项
+- 会议沙盘、周期议题、会前材料、签到、纪要与邮件模板
+- 白夜班月历排班、批量排班和工时统计
+- 红黑榜细则、月度/年度积分看板
+- Thank You 多人感谢、月度/年度排名
+- 常用链接归档、搜索、标签、质量和访问量管理
+- 团队对话、楼中回复和快捷表情回应
+- 全局搜索、年度归档、审计日志、备份校验与恢复
+- 灰度发布、正式发布和数据库回滚
 
-## 快速启动
+## 五分钟启动
 
-开发调试推荐双击：
+1. 安装 Python 3.10 或更高版本。
+2. 双击 `start_hot_server.bat` 启动开发模式，或双击 `start_server.bat` 启动正式模式。
+3. 浏览器访问 `http://127.0.0.1:8000/`。
+4. 首次登录后，由管理员在“用户管理”和“系统管理”中完成账号、权限与系统名称配置。
 
-```text
-start_hot_server.bat
-```
+项目不依赖 pip 或 npm 安装。首次启动会自动创建并迁移 `data/weekly_team.db`。
 
-该入口会监听 `server.py`、`static` 和 `previews` 中的 Python、HTML、CSS、JavaScript、JSON 文件。保存文件后会自动重启开发服务，已打开的浏览器页面会在服务恢复后自动刷新。
+## 文档入口
 
-也可以使用普通启动方式：
+- [文档导航](docs/README.md)
+- [使用手册](docs/USER_GUIDE.md)
+- [Windows 部署与运维](docs/DEPLOYMENT.md)
+- [二次开发指南](docs/DEVELOPMENT.md)
+- [HTTP API 参考](docs/API.md)
+- [数据库与备份](docs/DATABASE.md)
+- [常见问题](docs/TROUBLESHOOTING.md)
+- [Team Loop 维护 Skill](skills/team-loop-maintainer/SKILL.md)
 
-```powershell
-python server.py
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:8000
-```
-
-## 局域网访问
-
-在服务器电脑上运行：
+## 常用命令
 
 ```powershell
+# 开发热更新
+python scripts\dev_server.py --host 0.0.0.0 --port 8000
+
+# 单次启动
 python server.py --host 0.0.0.0 --port 8000
+
+# 只执行数据库迁移
+python server.py --migrate-only
+
+# 部署灰度环境
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gray
+
+# 灰度提升为正式版本
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Promote
+
+# 查看部署状态
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Status
 ```
 
-其他用户访问：
+正式环境默认使用 8000 端口，灰度环境默认使用 8001 端口。灰度数据库是正式数据库的一致性快照，灰度操作不会写回正式数据库。
 
-```text
-http://服务器电脑IP:8000
-```
+## 数据安全
 
-如果无法访问，请检查 Windows 防火墙是否允许 Python 或该端口入站。
-
-热更新仅用于开发环境。`deploy_gray.bat` 和 `promote_production.bat` 创建的灰度、正式服务不会监听源代码变化，避免未验证代码自动进入团队使用环境。
-
-## 数据位置
-
-首次启动会自动创建 SQLite 数据库：
-
-```text
-data/weekly_team.db
-```
-
-备份时复制 `data` 目录即可。
-
-## 灰度与正式部署
-
-Windows 推荐使用仓库根目录下的部署脚本。两个环境完全隔离：
-
-- 正式环境：`http://服务器IP:8000/`，使用 `data/weekly_team.db`。
-- 灰度环境：`http://服务器IP:8001/`，使用正式数据库的一致性快照 `data/deploy/gray/weekly_team_gray.db`。
-- 灰度环境中的新增、编辑和删除只影响快照，不会写入正式数据库。
-
-首次启用新的部署方式时，先运行一次 `start_server.bat`，将正式服务纳入版本和进程管理。后续发布流程如下：
-
-1. 双击 `deploy_gray.bat`，创建当前代码的发布快照、复制正式数据库、迁移灰度库并完成冒烟测试。
-2. 在 8001 端口完成功能验证。测试数据可自由修改，因为它不会同步回正式库。
-3. 双击 `promote_production.bat`。脚本会再次检查灰度环境、备份正式库、执行正式库迁移并切换 8000 服务。
-4. 发布异常时会自动恢复数据库；需要人工退回上一正式版本时，双击 `rollback_production.bat`。
-5. 双击 `deployment_status.bat` 可查看正式和灰度环境的版本、端口及进程状态。
-
-也可以在 PowerShell 中直接执行：
-
-```powershell
-.\deploy.ps1 -Action Gray
-.\deploy.ps1 -Action Promote
-.\deploy.ps1 -Action Rollback
-.\deploy.ps1 -Action Status
-```
-
-每次发布的代码快照、运行日志和回滚数据库位于 `data/deploy`。该目录已被 `.gitignore` 排除，不会上传业务数据到 GitHub。灰度验证只适合测试功能与迁移兼容性，不应把灰度库中产生的数据回写正式库。
-
-## 后续扩展方向
-
-当前项目把接口、数据表和页面模块按业务功能拆开，后续可以逐步替换为 Flask/FastAPI、增加附件上传、接入企业微信/钉钉通知，或改造成前后端分离部署。
+业务数据库、备份、发布快照和运行日志都位于 `data/`，并由 `.gitignore` 排除。不要把真实数据库、导出的审计记录或包含员工信息的截图提交到 GitHub。
