@@ -1048,11 +1048,19 @@ def init_db():
         ensure_column(conn, "meeting_items", "next_steps", "TEXT")
         ensure_column(conn, "meeting_items", "deleted_at", "TEXT")
         ensure_column(conn, "meeting_items", "deleted_by", "INTEGER")
+        ensure_column(conn, "meeting_items", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "meeting_items", "duration_minutes", "INTEGER NOT NULL DEFAULT 10")
+        ensure_column(conn, "meeting_items", "expected_output", "TEXT")
+        ensure_column(conn, "meeting_items", "materials", "TEXT")
+        ensure_column(conn, "meeting_items", "carried_from_id", "INTEGER")
         ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
         ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "meeting_topic_options", "recurrence_type", "TEXT NOT NULL DEFAULT 'weekly'")
         ensure_column(conn, "meeting_topic_options", "recurrence_value", "TEXT NOT NULL DEFAULT '1'")
+        ensure_column(conn, "meeting_topic_options", "duration_minutes", "INTEGER NOT NULL DEFAULT 10")
+        ensure_column(conn, "meeting_topic_options", "expected_output", "TEXT")
+        ensure_column(conn, "meeting_topic_options", "materials", "TEXT")
         ensure_column(conn, "morning_items", "priority", "TEXT NOT NULL DEFAULT 'normal'")
         ensure_column(conn, "morning_items", "blocker", "TEXT")
         ensure_column(conn, "morning_items", "due_date", "TEXT")
@@ -1065,6 +1073,9 @@ def init_db():
         conn.execute("UPDATE meeting_topic_options SET recurrence_type='weekly' WHERE recurrence_type IS NULL OR recurrence_type=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
+        conn.execute("UPDATE meetings SET status='scheduled' WHERE status='open' OR status IS NULL OR status=''")
+        conn.execute("UPDATE meetings SET status='completed' WHERE status='closed'")
+        conn.execute("UPDATE meeting_items SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE users SET user_type='internal' WHERE user_type IS NULL OR user_type=''")
         conn.execute("UPDATE members SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
@@ -1469,8 +1480,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_meeting(user)
         if path == "/api/meetings/bulk-generate" and method == "POST":
             return self.bulk_generate_meetings()
+        if len(parts) == 3 and parts[:2] == ["api", "meetings"] and method == "PATCH":
+            return self.update_meeting(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "topics" and method == "PATCH":
             return self.update_meeting_topics(int(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "copy-agenda" and method == "POST":
+            return self.copy_previous_meeting_agenda(int(parts[2]))
         if path == "/api/meeting-topics":
             if method == "GET":
                 return self.list_meeting_topics()
@@ -1486,12 +1501,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.delete_meeting_topic_option(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "items" and method == "POST":
             return self.create_meeting_item(int(parts[2]), user)
+        if len(parts) == 5 and parts[:2] == ["api", "meetings"] and parts[3:] == ["items", "reorder"] and method == "POST":
+            return self.reorder_meeting_items(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "attendance" and method == "POST":
             return self.upsert_attendance(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "meeting-items"] and method == "PATCH":
             return self.update_meeting_item(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "meeting-items"] and method == "DELETE":
             return self.delete_meeting_item(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "meeting-items"] and parts[3] == "carry-forward" and method == "POST":
+            return self.carry_forward_meeting_item(int(parts[2]))
 
         if path == "/api/links":
             if method == "GET":
@@ -2616,7 +2635,7 @@ class Handler(BaseHTTPRequestHandler):
                     LEFT JOIN meeting_topic_types t ON t.id = i.type_id
                     LEFT JOIN meeting_topic_options o ON o.id = i.option_id
                     WHERE i.deleted_at IS NULL
-                    ORDER BY i.created_at
+                    ORDER BY i.meeting_id, i.sort_order, i.created_at
                     """
                 ).fetchall()
             )
@@ -2681,13 +2700,95 @@ class Handler(BaseHTTPRequestHandler):
             default_title = get_setting_value(conn, "meeting_default_title", "周例会")
             cursor = conn.execute(
                 "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                (data.get("meeting_date") or today_iso(), data.get("title") or default_title, data.get("summary") or "", "open", user["id"], now_iso()),
+                (data.get("meeting_date") or today_iso(), data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], now_iso()),
             )
             meeting_id = cursor.lastrowid
             for topic_id in data.get("topic_type_ids") or []:
                 link_meeting_topic(conn, meeting_id, topic_id, user["id"])
             write_audit(conn, user, "meeting.create", "meeting", meeting_id, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
         return {"message": "会议已创建", "meetings": self.list_meetings({})}
+
+    def update_meeting(self, meeting_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        allowed_statuses = {"draft", "scheduled", "in_progress", "completed", "archived"}
+        fields = []
+        values = []
+        for key in ("meeting_date", "title", "summary"):
+            if key in data:
+                value = str(data.get(key) or "").strip()
+                if key in ("meeting_date", "title") and not value:
+                    raise AppError(400, "会议日期和标题不能为空")
+                fields.append(f"{key}=?")
+                values.append(value)
+        if "status" in data:
+            status = str(data.get("status") or "").strip()
+            if status not in allowed_statuses:
+                raise AppError(400, "会议状态不正确")
+            fields.append("status=?")
+            values.append(status)
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        values.append(meeting_id)
+        with connect() as conn:
+            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            conn.execute(f"UPDATE meetings SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(conn, admin, "meeting.update", "meeting", meeting_id, "会议状态或信息已更新", {"fields": list(data.keys())}, self.client_address[0])
+        return {"message": "会议已更新", "meetings": self.list_meetings({})}
+
+    def copy_previous_meeting_agenda(self, meeting_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            meeting = conn.execute("SELECT * FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议不能调整议题")
+            previous = conn.execute(
+                "SELECT id FROM meetings WHERE meeting_date<? AND title=? ORDER BY meeting_date DESC, id DESC LIMIT 1",
+                (meeting["meeting_date"], meeting["title"]),
+            ).fetchone()
+            if not previous:
+                previous = conn.execute(
+                    "SELECT id FROM meetings WHERE meeting_date<? ORDER BY meeting_date DESC, id DESC LIMIT 1",
+                    (meeting["meeting_date"],),
+                ).fetchone()
+            if not previous:
+                raise AppError(400, "没有可沿用的历史会议")
+            source_items = conn.execute(
+                "SELECT * FROM meeting_items WHERE meeting_id=? AND deleted_at IS NULL ORDER BY sort_order, id",
+                (previous["id"],),
+            ).fetchall()
+            existing_titles = {
+                row["title"] for row in conn.execute(
+                    "SELECT title FROM meeting_items WHERE meeting_id=? AND deleted_at IS NULL", (meeting_id,)
+                ).fetchall()
+            }
+            copied = 0
+            for item in source_items:
+                if item["title"] in existing_titles:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO meeting_items(
+                        meeting_id, section, title, detail, minutes, owner_id, status, due_date,
+                        created_by, created_at, type_id, option_id, sort_order, duration_minutes,
+                        expected_output, materials, carried_from_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        meeting_id, item["section"], item["title"], item["detail"] or "", "",
+                        item["owner_id"], "todo", None, admin["id"], now_iso(), item["type_id"],
+                        item["option_id"], item["sort_order"], item["duration_minutes"] or 10,
+                        item["expected_output"] or "", item["materials"] or "", item["id"],
+                    ),
+                )
+                link_meeting_topic(conn, meeting_id, item["type_id"], admin["id"])
+                copied += 1
+            write_audit(conn, admin, "meeting.copy_agenda", "meeting", meeting_id, "已沿用上场会议议题", {"source_meeting_id": previous["id"], "copied": copied}, self.client_address[0])
+        return {"message": f"已沿用 {copied} 个议题", "meetings": self.list_meetings({})}
 
     def update_meeting_topics(self, meeting_id):
         admin = self.require_admin()
@@ -2704,9 +2805,11 @@ class Handler(BaseHTTPRequestHandler):
             if value not in normalized:
                 normalized.append(value)
         with connect() as conn:
-            meeting = conn.execute("SELECT id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议不能调整主题，请先重新开启")
             active = {
                 row["id"]
                 for row in conn.execute(
@@ -2765,7 +2868,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     cursor = conn.execute(
                         "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                        (meeting_date, title, summary, "open", admin["id"], now_iso()),
+                        (meeting_date, title, summary, "scheduled", admin["id"], now_iso()),
                     )
                     meeting_id = cursor.lastrowid
                     created_meetings += 1
@@ -2782,8 +2885,9 @@ class Handler(BaseHTTPRequestHandler):
                         """
                         INSERT INTO meeting_items(
                             meeting_id, section, title, detail, minutes, owner_id, status,
-                            due_date, created_by, created_at, type_id, option_id
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                            due_date, created_by, created_at, type_id, option_id, sort_order,
+                            duration_minutes, expected_output, materials
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             meeting_id,
@@ -2798,6 +2902,10 @@ class Handler(BaseHTTPRequestHandler):
                             now_iso(),
                             option["type_id"],
                             option["id"],
+                            option["sort_order"] or 0,
+                            option["duration_minutes"] or 10,
+                            option["expected_output"] or "",
+                            option["materials"] or "",
                         ),
                     )
                     link_meeting_topic(conn, meeting_id, option["type_id"], admin["id"])
@@ -2861,8 +2969,8 @@ class Handler(BaseHTTPRequestHandler):
         recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
         with connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO meeting_topic_options(type_id, title, default_detail, owner_id, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active) VALUES(?,?,?,?,?,?,?,?,1)",
-                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", data.get("owner_id") or None, recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0)),
+                "INSERT INTO meeting_topic_options(type_id, title, default_detail, owner_id, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active, duration_minutes, expected_output, materials) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)",
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", data.get("owner_id") or None, recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0), max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
             )
             write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_type": recurrence_type, "recurrence_value": recurrence_value}, self.client_address[0])
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
@@ -2872,10 +2980,13 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
-        for key in ("type_id", "title", "default_detail", "owner_id", "sort_order", "active"):
+        for key in ("type_id", "title", "default_detail", "owner_id", "sort_order", "active", "duration_minutes", "expected_output", "materials"):
             if key in data:
                 fields.append(f"{key}=?")
-                values.append(data[key] or None if key == "owner_id" else data[key])
+                value = data[key] or None if key == "owner_id" else data[key]
+                if key == "duration_minutes":
+                    value = max(1, min(180, int(value or 10)))
+                values.append(value)
         if any(key in data for key in ("recurrence_rule", "recurrence_type", "recurrence_value", "recurrence_weeks")):
             recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
             fields.extend(["recurrence_weeks=?", "recurrence_type=?", "recurrence_value=?"])
@@ -2922,15 +3033,27 @@ class Handler(BaseHTTPRequestHandler):
                     detail = detail or option["default_detail"] or ""
                     if not data.get("owner_id"):
                         data["owner_id"] = option["owner_id"]
+                    if not data.get("duration_minutes"):
+                        data["duration_minutes"] = option["duration_minutes"] or 10
+                    if not data.get("expected_output"):
+                        data["expected_output"] = option["expected_output"] or ""
+                    if not data.get("materials"):
+                        data["materials"] = option["materials"] or ""
             elif type_id:
                 topic_type = conn.execute("SELECT name FROM meeting_topic_types WHERE id=?", (type_id,)).fetchone()
                 if topic_type:
                     section = topic_type["name"]
             if not title:
                 raise AppError(400, "议题标题不能为空")
+            meeting = conn.execute("SELECT status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议不能新增议题，请先重新开启")
+            next_order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 10 FROM meeting_items WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
             cursor = conn.execute(
-                "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id),
+                "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id, sort_order, duration_minutes, expected_output, materials) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id, next_order, max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
             )
             link_meeting_topic(conn, meeting_id, type_id, user["id"])
             write_audit(conn, user, "meeting_item.create", "meeting_item", cursor.lastrowid, "会议议题已添加", {"meeting_id": meeting_id, "title": title}, self.client_address[0])
@@ -2941,31 +3064,107 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         fields = []
         values = []
-        for key in ("minutes", "detail", "open_issues", "next_steps", "status", "owner_id", "due_date"):
+        for key in ("minutes", "detail", "open_issues", "next_steps", "status", "owner_id", "due_date", "duration_minutes", "expected_output", "materials", "sort_order"):
             if key in data:
                 fields.append(f"{key}=?")
-                values.append(data[key] or None if key in ("owner_id", "due_date") else data[key])
+                value = data[key] or None if key in ("owner_id", "due_date") else data[key]
+                if key == "duration_minutes":
+                    value = max(1, min(180, int(value or 10)))
+                values.append(value)
         if not fields:
             raise AppError(400, "没有可更新字段")
         values.append(item_id)
         with connect() as conn:
-            item = conn.execute("SELECT id FROM meeting_items WHERE id=? AND deleted_at IS NULL", (item_id,)).fetchone()
+            item = conn.execute("SELECT i.id, m.status AS meeting_status FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
+            if item["meeting_status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议内容已锁定，请先重新开启")
             conn.execute(f"UPDATE meeting_items SET {', '.join(fields)} WHERE id=?", values)
             write_audit(conn, user, "meeting_item.update", "meeting_item", item_id, "会议议题/纪要已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "会议纪要已保存", "meetings": self.list_meetings({})}
 
+    def reorder_meeting_items(self, meeting_id):
+        user = self.current_user()
+        data = read_json(self)
+        item_ids = data.get("item_ids") or []
+        try:
+            item_ids = [int(item_id) for item_id in item_ids]
+        except (TypeError, ValueError):
+            raise AppError(400, "议题排序数据不正确")
+        if not item_ids:
+            raise AppError(400, "没有可排序的议题")
+        with connect() as conn:
+            meeting = conn.execute("SELECT status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议内容已锁定")
+            valid_ids = {
+                row["id"] for row in conn.execute(
+                    "SELECT id FROM meeting_items WHERE meeting_id=? AND deleted_at IS NULL", (meeting_id,)
+                ).fetchall()
+            }
+            if set(item_ids) != valid_ids:
+                raise AppError(400, "议题排序列表不完整，请刷新后重试")
+            for index, item_id in enumerate(item_ids):
+                conn.execute("UPDATE meeting_items SET sort_order=? WHERE id=?", ((index + 1) * 10, item_id))
+            write_audit(conn, user, "meeting_items.reorder", "meeting", meeting_id, "会议议题顺序已调整", {"item_ids": item_ids}, self.client_address[0])
+        return {"message": "议题顺序已保存", "meetings": self.list_meetings({})}
+
+    def carry_forward_meeting_item(self, item_id):
+        user = self.current_user()
+        with connect() as conn:
+            item = conn.execute(
+                "SELECT i.*, m.meeting_date, m.title AS meeting_title FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if not item:
+                raise AppError(404, "议题不存在")
+            next_meeting = conn.execute(
+                "SELECT id FROM meetings WHERE meeting_date>? AND status NOT IN ('completed','archived') ORDER BY meeting_date, id LIMIT 1",
+                (item["meeting_date"],),
+            ).fetchone()
+            if not next_meeting:
+                raise AppError(400, "暂无下一场可承接的会议，请先创建会议")
+            existing = conn.execute(
+                "SELECT id FROM meeting_items WHERE meeting_id=? AND (carried_from_id=? OR title=?) AND deleted_at IS NULL",
+                (next_meeting["id"], item_id, item["title"]),
+            ).fetchone()
+            if existing:
+                raise AppError(400, "该议题已经顺延到下一场会议")
+            next_order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 10 FROM meeting_items WHERE meeting_id=?", (next_meeting["id"],)).fetchone()[0]
+            cursor = conn.execute(
+                """
+                INSERT INTO meeting_items(
+                    meeting_id, section, title, detail, minutes, owner_id, status, due_date,
+                    created_by, created_at, type_id, option_id, sort_order, duration_minutes,
+                    expected_output, materials, carried_from_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    next_meeting["id"], item["section"], item["title"], item["detail"] or "", "",
+                    item["owner_id"], "todo", item["due_date"], user["id"], now_iso(), item["type_id"],
+                    item["option_id"], next_order, item["duration_minutes"] or 10,
+                    item["expected_output"] or "", item["materials"] or "", item_id,
+                ),
+            )
+            link_meeting_topic(conn, next_meeting["id"], item["type_id"], user["id"])
+            write_audit(conn, user, "meeting_item.carry_forward", "meeting_item", cursor.lastrowid, "议题已顺延到下一场会议", {"source_item_id": item_id, "target_meeting_id": next_meeting["id"]}, self.client_address[0])
+        return {"message": "议题已顺延到下一场会议", "meetings": self.list_meetings({})}
+
     def delete_meeting_item(self, item_id, user):
         with connect() as conn:
             item = conn.execute(
-                "SELECT id, title, deleted_at FROM meeting_items WHERE id=?",
+                "SELECT i.id, i.title, i.deleted_at, m.status AS meeting_status FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=?",
                 (item_id,),
             ).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
             if item["deleted_at"]:
                 raise AppError(400, "议题已经在回收站中")
+            if item["meeting_status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议内容已锁定，请先重新开启")
             conn.execute(
                 "UPDATE meeting_items SET deleted_at=?, deleted_by=? WHERE id=?",
                 (now_iso(), user["id"], item_id),

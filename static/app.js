@@ -926,6 +926,22 @@ const meetingItemStatusMeta = {
   done: ["已完成", "status-done"],
 };
 
+const meetingStatusMeta = {
+  draft: ["草稿", "会前整理", "status-draft"],
+  scheduled: ["待召开", "准备材料", "status-scheduled"],
+  in_progress: ["进行中", "聚焦讨论", "status-in-progress"],
+  completed: ["已结束", "纪要锁定", "status-completed"],
+  archived: ["已归档", "只读保存", "status-archived"],
+};
+
+function normalizedMeetingStatus(status) {
+  return meetingStatusMeta[status] ? status : "scheduled";
+}
+
+function meetingIsLocked(meeting) {
+  return ["completed", "archived"].includes(normalizedMeetingStatus(meeting?.status));
+}
+
 function renderMorningStatusOptions(selected) {
   return Object.entries(morningStatusMeta)
     .map(([value, meta]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${meta[0]}</option>`)
@@ -1825,6 +1841,9 @@ function renderTopicPresetList() {
           <input name="title" value="${escapeHtml(option.title)}" placeholder="议题名称" required>
           <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
           <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人")}</select>
+          <input name="duration_minutes" type="number" min="1" max="180" value="${Number(option.duration_minutes || 10)}" title="预计时长（分钟）">
+          <input name="expected_output" value="${escapeHtml(option.expected_output || "")}" placeholder="期望产出">
+          <input name="materials" value="${escapeHtml(option.materials || "")}" placeholder="会前材料">
           <input name="default_detail" value="${escapeHtml(option.default_detail || "")}" placeholder="默认说明">
           <button>保存</button>
           <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
@@ -1844,6 +1863,9 @@ function renderPresetTopicForm(meeting) {
       <select name="option_id" data-meeting-option-select><option value="">自定义议题</option>${options.map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}</select>
       <input name="title" placeholder="自定义标题，选择预设时可留空" />
       <select name="owner_id">${renderUserOptions(null)}</select>
+      <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
+      <input name="expected_output" placeholder="期望产出，例如形成结论" />
+      <input name="materials" placeholder="会前材料、数据或链接" />
       <input name="due_date" type="date" />
       <textarea name="detail" placeholder="议题说明、背景、结论或行动要求"></textarea>
       <button>添加到本次例会</button>
@@ -1859,6 +1881,9 @@ function renderCustomTopicForm(meeting) {
       <select name="type_id" required>${topicOptionsForMeeting(meeting)}</select>
       <input name="title" placeholder="自定义议题标题" required />
       <select name="owner_id">${renderUserOptions(null)}</select>
+      <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
+      <input name="expected_output" placeholder="期望产出，例如同步信息" />
+      <input name="materials" placeholder="会前材料、数据或链接" />
       <textarea name="detail" placeholder="补充议题背景、希望讨论的问题或建议结论"></textarea>
       <button>提交自定义议题</button>
     </form>`;
@@ -1879,27 +1904,45 @@ function renderMeetingMinuteSummary(item) {
     </div>`;
 }
 
-function renderMeetingItem(item) {
+function renderMeetingItem(item, meeting) {
   const meta = [
     item.owner_name || "",
     item.created_by_name ? `提交：${item.created_by_name}` : "",
     item.due_date ? `截止：${item.due_date}` : "",
   ].filter(Boolean).join(" · ");
   const thankYouTopic = isThankYouTopic(item);
-  return `<div class="topic-item">
-    <strong>${escapeHtml(item.title)}</strong>
+  const locked = meetingIsLocked(meeting);
+  const prepared = Boolean(item.materials);
+  return `<article class="topic-item meeting-agenda-item ${locked ? "is-locked" : ""}" style="--agenda-color:${escapeHtml(item.type_color || "#64748b")}" data-meeting-item-id="${item.id}" draggable="${!locked && canOperate("meetings", "edit") ? "true" : "false"}">
+    <div class="agenda-item-head">
+      <span class="agenda-drag-handle" title="拖动调整顺序" aria-hidden="true">⋮⋮</span>
+      <div class="agenda-item-title">
+        <span class="agenda-type-badge" style="--agenda-color:${escapeHtml(item.type_color || "#64748b")}">${escapeHtml(item.type_name || item.section || "议题")}</span>
+        <strong>${escapeHtml(item.title)}</strong>${item.carried_from_id ? `<span class="agenda-source-badge">上场顺延</span>` : ""}
+      </div>
+      <span class="agenda-duration">${Number(item.duration_minutes || 10)} 分钟</span>
+    </div>
     ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
     ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+    <div class="agenda-prep-grid">
+      <div><span>期望产出</span><strong>${escapeHtml(item.expected_output || "待补充")}</strong></div>
+      <div class="${prepared ? "is-ready" : "is-missing"}"><span>会前材料</span><strong>${escapeHtml(item.materials || "待准备")}</strong></div>
+    </div>
     ${thankYouTopic ? `
       <div class="topic-auto-summary">
         Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
       </div>` : renderMeetingMinuteSummary(item)}
-    ${(canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
-      <div class="topic-item-actions">
-        ${!thankYouTopic && canOperate("meetings", "edit") ? `<button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "编辑纪要" : "记录纪要"}</button>` : ""}
-        ${canOperate("meetings", "delete") ? `<button class="danger meeting-item-delete-btn" type="button" data-item-id="${item.id}" data-item-title="${escapeHtml(item.title)}">删除议题</button>` : ""}
+    ${locked ? `<div class="agenda-locked-note">会议已结束，内容只读</div>` : (canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
+      <div class="topic-item-actions agenda-actions">
+        ${!thankYouTopic && canOperate("meetings", "edit") ? `
+          <button class="meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="decision">记结论</button>
+          <button class="secondary meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="risk">记风险</button>
+          <button class="secondary meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="confirm">待确认</button>
+          <button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "完整编辑" : "记录纪要"}</button>
+          <button class="secondary meeting-carry-btn" type="button" data-item-id="${item.id}">顺延</button>` : ""}
+        ${canOperate("meetings", "delete") ? `<button class="danger meeting-item-delete-btn" type="button" data-item-id="${item.id}" data-item-title="${escapeHtml(item.title)}">删除</button>` : ""}
       </div>` : ""}
-  </div>`;
+  </article>`;
 }
 
 function findMeetingItemContext(itemId) {
@@ -1918,7 +1961,7 @@ function closeMeetingMinuteModal() {
   document.body.classList.remove("modal-open");
 }
 
-function openMeetingMinuteModal(itemId) {
+function openMeetingMinuteModal(itemId, mode = "minutes") {
   const { meeting, item } = findMeetingItemContext(itemId);
   const modal = $("#meetingMinuteModal");
   const form = $("#meetingMinuteForm");
@@ -1931,6 +1974,9 @@ function openMeetingMinuteModal(itemId) {
   form.elements.status.innerHTML = renderMeetingItemStatusOptions(item.status || "todo");
   form.elements.status.value = item.status || "todo";
   form.elements.due_date.value = item.due_date || "";
+  form.elements.duration_minutes.value = Number(item.duration_minutes || 10);
+  form.elements.expected_output.value = item.expected_output || "";
+  form.elements.materials.value = item.materials || "";
   form.elements.minutes.value = item.minutes || "";
   form.elements.open_issues.value = item.open_issues || "";
   form.elements.next_steps.value = item.next_steps || "";
@@ -1947,31 +1993,21 @@ function openMeetingMinuteModal(itemId) {
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
+  const prefixes = { risk: "【风险】", confirm: "【待确认】", decision: "【结论】" };
+  if (prefixes[mode] && !form.elements.minutes.value.includes(prefixes[mode])) {
+    form.elements.minutes.value = `${form.elements.minutes.value ? `${form.elements.minutes.value}\n` : ""}${prefixes[mode]}`;
+  }
   form.elements.minutes.focus();
+  form.elements.minutes.setSelectionRange(form.elements.minutes.value.length, form.elements.minutes.value.length);
 }
 
 function renderTopicBoard(meeting) {
-  const typed = new Set();
-  const topics = meetingTopicTypes(meeting);
-  if (!topics.length && !meeting.items.length) {
+  if (!meetingTopicTypes(meeting).length && !meeting.items.length) {
     return `<div class="topic-board-empty">本场会议尚未设置主题。</div>`;
   }
-  const columns = topics.map((topic) => {
-    const items = meeting.items.filter((item) => Number(item.type_id) === Number(topic.id) || item.section === topic.name);
-    items.forEach((item) => typed.add(item.id));
-    return `<section class="topic-column">
-      <h4><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</h4>
-      ${items.length ? items.map(renderMeetingItem).join("") : "<p>暂无议题</p>"}
-    </section>`;
-  });
-  const others = meeting.items.filter((item) => !typed.has(item.id));
-  if (others.length) {
-    columns.push(`<section class="topic-column">
-      <h4><span class="topic-dot"></span>其他议题</h4>
-      ${others.map(renderMeetingItem).join("")}
-    </section>`);
-  }
-  return `<div class="topic-board">${columns.join("")}</div>`;
+  return meeting.items.length
+    ? `<div class="meeting-agenda-list" data-meeting-agenda-list="${meeting.id}">${meeting.items.map((item) => renderMeetingItem(item, meeting)).join("")}</div>`
+    : `<div class="topic-board-empty">主题已设置，暂时还没有议题。</div>`;
 }
 
 function renderAttendance(meeting) {
@@ -2566,7 +2602,7 @@ function renderMeetingList(meetings) {
   });
   list.innerHTML = visibleMeetings.length ? visibleMeetings.map((meeting) => `
     <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
-      <span>${escapeHtml(shortDate(meeting.meeting_date))}</span>
+      <span class="meeting-list-meta"><span>${escapeHtml(shortDate(meeting.meeting_date))}</span><em class="meeting-status-dot ${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][2]}">${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][0]}</em></span>
       <strong>${escapeHtml(meeting.title)}</strong>
       <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
     </button>`).join("") : `<p>${range.label}暂无后续会议。</p>`;
@@ -2589,6 +2625,45 @@ function renderMeetingTopicScopeForm(meeting) {
     </form>`;
 }
 
+function renderMeetingFlow(meeting) {
+  const current = normalizedMeetingStatus(meeting.status);
+  const entries = Object.entries(meetingStatusMeta);
+  const currentIndex = entries.findIndex(([status]) => status === current);
+  return `<div class="meeting-flow" aria-label="会议阶段">
+    ${entries.map(([status, meta], index) => `
+      <button type="button" class="meeting-flow-step ${index < currentIndex ? "is-past" : ""} ${status === current ? "is-current" : ""}" data-meeting-status="${status}" data-meeting-id="${meeting.id}" ${!isAdminView() ? "disabled" : ""}>
+        <span>${index + 1}</span>
+        <strong>${meta[0]}</strong>
+        <small>${meta[1]}</small>
+      </button>`).join("")}
+  </div>`;
+}
+
+function meetingReadiness(meeting) {
+  const items = meeting.items || [];
+  const prepared = items.filter((item) => item.materials).length;
+  const owned = items.filter((item) => item.owner_id).length;
+  const minuted = items.filter((item) => isThankYouTopic(item) || item.minutes).length;
+  return {
+    prepared,
+    owned,
+    minuted,
+    total: items.length,
+    minutes: items.reduce((sum, item) => sum + Number(item.duration_minutes || 10), 0),
+  };
+}
+
+function renderMeetingReadiness(meeting) {
+  const readiness = meetingReadiness(meeting);
+  const ratio = (value) => readiness.total ? Math.round(value / readiness.total * 100) : 0;
+  return `<div class="meeting-readiness">
+    <div><span>预计时长</span><strong>${readiness.minutes} 分钟</strong><small>按当前议题时间盒</small></div>
+    <div><span>负责人明确</span><strong>${readiness.owned}/${readiness.total}</strong><small>${ratio(readiness.owned)}% 已分配</small></div>
+    <div><span>材料就绪</span><strong>${readiness.prepared}/${readiness.total}</strong><small>${ratio(readiness.prepared)}% 已准备</small></div>
+    <div><span>纪要完成</span><strong>${readiness.minuted}/${readiness.total}</strong><small>${ratio(readiness.minuted)}% 已记录</small></div>
+  </div>`;
+}
+
 function renderMeetingDetail(meeting) {
   const detail = $("#meetingDetail");
   if (!detail) return;
@@ -2600,58 +2675,56 @@ function renderMeetingDetail(meeting) {
       </div>`;
     return;
   }
+  const status = meetingStatusMeta[normalizedMeetingStatus(meeting.status)];
+  const locked = meetingIsLocked(meeting);
   detail.innerHTML = `
     <div class="meeting-detail-head">
       <div>
-        <h2>${escapeHtml(meeting.title)}</h2>
+        <div class="meeting-title-line"><h2>${escapeHtml(meeting.title)}</h2><span class="meeting-status-badge ${status[2]}">${status[0]}</span></div>
         <p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
       </div>
       <div class="meeting-meta-actions">
         <span class="pill">${escapeHtml(meeting.creator || "")}</span>
+        ${isAdminView() && !locked ? `<button class="secondary meeting-copy-agenda-btn" type="button" data-meeting-id="${meeting.id}">沿用上场议题</button>` : ""}
         <button class="button-link meeting-email-btn" type="button" data-meeting-id="${meeting.id}">生成会议邮件</button>
       </div>
     </div>
 
-    <div class="meeting-kpis">
-      <div><span>议题</span><strong>${meeting.items.length}</strong></div>
-      <div><span>已签到</span><strong>${(meeting.attendance || []).length}</strong></div>
-      <div><span>未补纪要</span><strong>${meeting.items.filter((item) => !item.minutes).length}</strong></div>
-    </div>
-
-    <section class="detail-section attendance-board-section">
-      <div class="section-headline">
-        <h3>本月参会看板</h3>
-        <span>${state.meetings.length} 场会议</span>
-      </div>
-      ${renderAttendanceDashboard(state.meetings)}
-    </section>
+    ${renderMeetingFlow(meeting)}
+    ${renderMeetingReadiness(meeting)}
 
     <section class="detail-section">
       <h3>本场会议主题</h3>
       <p>每场会议单独配置主题，议题看板只展示本场会议选中的主题。</p>
-      <div class="admin-only">${renderMeetingTopicScopeForm(meeting)}</div>
+      <div class="admin-only">${locked ? `<p class="agenda-locked-note">会议已结束，重新开启后可调整主题。</p>` : renderMeetingTopicScopeForm(meeting)}</div>
       ${!isAdminView() && meetingTopicTypes(meeting).length ? `<div class="chip-list">${meetingTopicTypes(meeting).map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</span>`).join("")}</div>` : ""}
     </section>
 
     <section class="detail-section">
-      <h3>议题与纪要</h3>
+      <div class="section-headline"><div><h3>议程与纪要</h3><p>按讨论顺序排列；管理员可直接拖动议题调整顺序。</p></div><span>${meeting.items.length} 个议题</span></div>
       ${renderTopicBoard(meeting)}
     </section>
 
-    <div class="meeting-detail-grid">
+    <div class="meeting-detail-grid ${locked ? "is-locked" : ""}">
       <section class="detail-card">
         <h3>成员自定义议题</h3>
-        ${renderCustomTopicForm(meeting)}
+        ${locked ? `<p class="agenda-locked-note">会议已结束，不能继续添加议题。</p>` : renderCustomTopicForm(meeting)}
       </section>
       <section class="detail-card admin-only">
         <h3>管理员添加预设议题</h3>
-        ${renderPresetTopicForm(meeting)}
+        ${locked ? `<p class="agenda-locked-note">会议已结束，不能继续添加议题。</p>` : renderPresetTopicForm(meeting)}
       </section>
       <section class="detail-card">
         <h3>参会签到</h3>
         ${isAdminView() ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
       </section>
-    </div>`;
+    </div>
+
+    <details class="detail-section meeting-secondary-section">
+      <summary>查看本月参会看板</summary>
+      <div class="section-headline"><h3>本月参会看板</h3><span>${state.meetings.length} 场会议</span></div>
+      ${renderAttendanceDashboard(state.meetings)}
+    </details>`;
   $$(".admin-only", detail).forEach((el) => el.classList.toggle("hidden", !isAdminView()));
 }
 
@@ -2694,6 +2767,38 @@ function setMeetingListScope(scope) {
   renderMeetingCalendar(state.meetings);
   renderMeetingList(state.meetings);
   renderMeetingDetail(selectedMeeting || null);
+}
+
+async function updateMeetingStatus(meetingId, status) {
+  const meta = meetingStatusMeta[status];
+  if (!meta) return;
+  if (["completed", "archived"].includes(status) && !window.confirm(`确定将会议设为“${meta[0]}”吗？议题和纪要将进入只读状态。`)) return;
+  const data = await api(`/api/meetings/${meetingId}`, { method: "PATCH", body: JSON.stringify({ status }) });
+  state.meetings = data.meetings || state.meetings;
+  await loadMeetings();
+  toast(`会议已切换为${meta[0]}`);
+}
+
+async function reorderMeetingAgenda(meetingId, sourceId, targetId) {
+  const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
+  if (!meeting || Number(sourceId) === Number(targetId)) return;
+  const items = [...meeting.items];
+  const from = items.findIndex((item) => Number(item.id) === Number(sourceId));
+  const to = items.findIndex((item) => Number(item.id) === Number(targetId));
+  if (from < 0 || to < 0) return;
+  const [moved] = items.splice(from, 1);
+  items.splice(to, 0, moved);
+  meeting.items = items;
+  renderMeetingDetail(meeting);
+  try {
+    const data = await api(`/api/meetings/${meetingId}/items/reorder`, { method: "POST", body: JSON.stringify({ item_ids: items.map((item) => item.id) }) });
+    state.meetings = data.meetings || state.meetings;
+    renderMeetingDetail(state.meetings.find((entry) => Number(entry.id) === Number(meetingId)));
+    toast("议题顺序已保存");
+  } catch (error) {
+    await loadMeetings();
+    throw error;
+  }
 }
 
 function renderAttendanceReadonly(meeting) {
@@ -4045,15 +4150,43 @@ function bindEvents() {
       openMeetingMinuteModal(meetingMinuteButton.dataset.itemId);
       return;
     }
+    const meetingQuickNote = event.target.closest(".meeting-quick-note-btn");
+    if (meetingQuickNote) {
+      openMeetingMinuteModal(meetingQuickNote.dataset.itemId, meetingQuickNote.dataset.noteMode);
+      return;
+    }
+    const meetingCarry = event.target.closest(".meeting-carry-btn");
+    if (meetingCarry) {
+      if (!window.confirm("将该议题顺延到下一场会议吗？当前会议记录会保留。")) return;
+      api(`/api/meeting-items/${meetingCarry.dataset.itemId}/carry-forward`, { method: "POST" })
+        .then((data) => { state.meetings = data.meetings || state.meetings; return loadMeetings(); })
+        .then(() => toast("议题已顺延到下一场会议"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const meetingStatus = event.target.closest(".meeting-flow-step[data-meeting-status]");
+    if (meetingStatus && !meetingStatus.disabled) {
+      updateMeetingStatus(meetingStatus.dataset.meetingId, meetingStatus.dataset.meetingStatus).catch((error) => toast(error.message));
+      return;
+    }
+    const meetingCopyAgenda = event.target.closest(".meeting-copy-agenda-btn");
+    if (meetingCopyAgenda) {
+      if (!window.confirm("沿用最近一场同名会议的议题和会前准备信息吗？重复标题会自动跳过。")) return;
+      api(`/api/meetings/${meetingCopyAgenda.dataset.meetingId}/copy-agenda`, { method: "POST" })
+        .then((data) => { state.meetings = data.meetings || state.meetings; return loadMeetings(); })
+        .then(() => toast("已沿用上场会议议题"))
+        .catch((error) => toast(error.message));
+      return;
+    }
     const meetingItemDelete = event.target.closest(".meeting-item-delete-btn");
     if (meetingItemDelete) {
       if (!window.confirm(`确定删除议题「${meetingItemDelete.dataset.itemTitle || "该议题"}」吗？删除后可在回收站恢复。`)) return;
       api(`/api/meeting-items/${meetingItemDelete.dataset.itemId}`, { method: "DELETE" })
         .then((data) => {
           state.meetings = data.meetings || state.meetings;
-          renderMeetings();
-          toast("议题已移入回收站");
+          return loadMeetings();
         })
+        .then(() => toast("议题已移入回收站"))
         .catch((error) => toast(error.message));
       return;
     }
@@ -4277,6 +4410,34 @@ function bindEvents() {
       selectShiftDay(shiftCell);
       return;
     }
+  });
+
+  let draggedMeetingItemId = null;
+  document.body.addEventListener("dragstart", (event) => {
+    const item = event.target.closest(".meeting-agenda-item[draggable='true']");
+    if (!item) return;
+    draggedMeetingItemId = item.dataset.meetingItemId;
+    item.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedMeetingItemId);
+  });
+  document.body.addEventListener("dragover", (event) => {
+    const item = event.target.closest(".meeting-agenda-item[draggable='true']");
+    if (!item || !draggedMeetingItemId) return;
+    event.preventDefault();
+    $$(".meeting-agenda-item.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
+    if (item.dataset.meetingItemId !== draggedMeetingItemId) item.classList.add("is-drop-target");
+  });
+  document.body.addEventListener("drop", (event) => {
+    const item = event.target.closest(".meeting-agenda-item[draggable='true']");
+    const list = item?.closest("[data-meeting-agenda-list]");
+    if (!item || !list || !draggedMeetingItemId) return;
+    event.preventDefault();
+    reorderMeetingAgenda(list.dataset.meetingAgendaList, draggedMeetingItemId, item.dataset.meetingItemId).catch((error) => toast(error.message));
+  });
+  document.body.addEventListener("dragend", () => {
+    draggedMeetingItemId = null;
+    $$(".meeting-agenda-item.is-dragging, .meeting-agenda-item.is-drop-target").forEach((entry) => entry.classList.remove("is-dragging", "is-drop-target"));
   });
 
   document.body.addEventListener("change", (event) => {

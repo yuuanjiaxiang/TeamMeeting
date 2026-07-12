@@ -243,6 +243,7 @@ function Start-Gray {
         throw "Production database does not exist: $ProductionDb"
     }
     $release = New-Release
+    Stop-Environment -Name "gray" -Port $GrayPort -AllowTeamLoopTakeover
     Invoke-DbSnapshot -Source $ProductionDb -Target $GrayDb
     Invoke-Migration -ReleasePath $release.Path -DatabasePath $GrayDb -Environment "gray" -ReleaseId $release.Id
     Start-Environment -Name "gray" -ReleasePath $release.Path -DatabasePath $GrayDb -Environment "gray" -ReleaseId $release.Id -Port $GrayPort | Out-Null

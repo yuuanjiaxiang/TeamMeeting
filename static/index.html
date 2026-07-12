@@ -159,7 +159,7 @@
               <div class="modal-head">
                 <div>
                   <h2 id="meetingMinuteTitle">记录会议纪要</h2>
-                  <p id="meetingMinuteSubtitle">按议题补充纪要、遗留问题和下一步动作。</p>
+                  <p id="meetingMinuteSubtitle">会前补充准备信息，会中记录本议题结论。</p>
                 </div>
                 <button class="modal-close" type="button" data-meeting-minute-close aria-label="关闭">×</button>
               </div>
@@ -173,6 +173,11 @@
                     <option value="done">已完成</option>
                   </select></label>
                   <label>到期时间<input name="due_date" type="date" /></label>
+                </div>
+                <div class="meeting-prep-fields">
+                  <label>预计时长（分钟）<input name="duration_minutes" type="number" min="1" max="180" value="10" /></label>
+                  <label>期望产出<input name="expected_output" placeholder="例如：形成结论、确认方案" /></label>
+                  <label>会前材料<input name="materials" placeholder="文档、链接或数据准备情况" /></label>
                 </div>
                 <label>会议纪要<textarea name="minutes" placeholder="记录本议题结论、确认事项或关键讨论过程"></textarea></label>
                 <label>遗留问题<textarea name="open_issues" placeholder="还有哪些未解决问题、风险或待确认信息"></textarea></label>
@@ -514,6 +519,9 @@
                     <option value="monthly_week:last">每月最后 1 周</option>
                   </select>
                   <select name="owner_id" data-owner-users></select>
+                  <input name="duration_minutes" type="number" min="1" max="180" value="10" placeholder="预计分钟" />
+                  <input name="expected_output" placeholder="期望产出，例如形成结论" />
+                  <input name="materials" placeholder="会前材料或链接" />
                   <textarea name="default_detail" placeholder="默认说明，可留空"></textarea>
                   <button>新增选项</button>
                 </form>
