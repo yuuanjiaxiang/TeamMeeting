@@ -62,6 +62,8 @@ TeamMeeting/
 
 全局数据存放在 `state`。切换页面时会重新调用模块 loader，以获取最新数据。写操作完成后优先只刷新受影响模块；跨模块数据同步时使用 `refreshAll()`。
 
+公共时间筛选由 `setDefaultDates()` 初始化为当月首日至今天，不要在单独页面重复覆盖。排班日期范围分别使用 `selectedShiftDate` 和 `selectedShiftEndDate`；月历重绘不得把用户选择的结束日期强制重置为开始日期。
+
 所有来自用户或接口的文本在插入 HTML 字符串前必须经过 `escapeHtml()`。日期统一使用 `YYYY-MM-DD`，显示时使用 `shortDate()` 或 `shortDateTime()`。
 
 ### 表单和弹窗

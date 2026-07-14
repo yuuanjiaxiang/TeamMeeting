@@ -24,6 +24,8 @@
 - Verify the local full Emoji picker loads, searches, sends an arbitrary Emoji, and can remove the reaction without external network access.
 - Toggle black-score summary and detail visibility independently; verify non-admin APIs and UI hide the configured data while administrators still see and can restore it.
 - Verify the score page defaults to the current month, detail rows are newest-first and scroll, and a member click opens only that member's full history.
+- Verify shared date filters default to the first day of the current month through today.
+- Submit a multi-day shift batch and confirm the calendar refreshes while the selected end date remains unchanged; selecting a different day should reset the range.
 - Test desktop and narrow viewport for UI changes.
 - Verify gray writes do not appear in production.
 - Re-run Gray once when deployment scripts or migrations changed; repeated deployment must work on Windows.

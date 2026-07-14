@@ -1051,6 +1051,9 @@ main {
 .annual-score-wrap {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  padding-bottom: 12px;
+  scrollbar-gutter: stable;
+  overscroll-behavior-x: contain;
 }
 
 .annual-score-legend {
@@ -1093,6 +1096,7 @@ main {
 .annual-score-table {
   min-width: 980px;
   table-layout: fixed;
+  margin-bottom: 2px;
 }
 
 .annual-score-table th,
@@ -1101,6 +1105,13 @@ main {
   vertical-align: middle;
   white-space: nowrap;
   height: 54px;
+}
+
+.annual-score-table tbody tr:last-child > th,
+.annual-score-table tbody tr:last-child > td {
+  height: 62px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
 }
 
 .annual-score-table thead th {

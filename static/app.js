@@ -39,6 +39,7 @@ const state = {
   morningDate: iso(new Date()),
   shiftMonth: new Date(),
   selectedShiftDate: iso(new Date()),
+  selectedShiftEndDate: iso(new Date()),
   meetingMonth: new Date(),
   meetingListScope: "week",
   selectedMeetingDate: iso(new Date()),
@@ -46,7 +47,6 @@ const state = {
   thankYear: new Date().getFullYear(),
   thankScope: "month",
   thankMonth: new Date().getMonth() + 1,
-  rulesPeriodInitialized: false,
   viewMode: safeStorageGet("teamLoopViewMode", "admin"),
   showLogin: false,
   uiTheme: safeStorageGet("teamLoopThemeVersion", "") === uiThemeVersion
@@ -292,8 +292,9 @@ function monthEnd(date) {
 }
 
 function setDefaultDates() {
-  const today = iso(new Date());
-  $("#fromDate").value = $("#fromDate").value || mondayOf(today);
+  const now = new Date();
+  const today = iso(now);
+  $("#fromDate").value = $("#fromDate").value || iso(monthStart(now));
   $("#toDate").value = $("#toDate").value || today;
   $$('input[type="date"]').forEach((input) => {
     if (!input.value) input.value = today;
@@ -301,7 +302,7 @@ function setDefaultDates() {
   const shiftStartDate = $('input[name="shift_start_date"]');
   const shiftEndDate = $('input[name="shift_end_date"]');
   if (shiftStartDate) shiftStartDate.value = state.selectedShiftDate;
-  if (shiftEndDate && !shiftEndDate.value) shiftEndDate.value = state.selectedShiftDate;
+  if (shiftEndDate && !shiftEndDate.value) shiftEndDate.value = state.selectedShiftEndDate;
   const meetingDate = $('input[name="meeting_date"]');
   if (meetingDate) meetingDate.value = state.selectedMeetingDate;
   const morningDate = $("#morningDate");
@@ -515,12 +516,6 @@ function switchPage(id) {
     $("#loginView")?.classList.add("hidden");
     $("#appView")?.classList.remove("hidden");
     $("#loginEntryBtn")?.classList.remove("hidden");
-  }
-  if (id === "rules" && !state.rulesPeriodInitialized) {
-    const now = new Date();
-    $("#fromDate").value = iso(monthStart(now));
-    $("#toDate").value = iso(now);
-    state.rulesPeriodInitialized = true;
   }
   state.currentPage = id;
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
@@ -3590,7 +3585,7 @@ function renderCalendar() {
   const shiftStartInput = $('input[name="shift_start_date"]');
   const shiftEndInput = $('input[name="shift_end_date"]');
   if (shiftStartInput) shiftStartInput.value = state.selectedShiftDate;
-  if (shiftEndInput) shiftEndInput.value = state.selectedShiftDate;
+  if (shiftEndInput) shiftEndInput.value = state.selectedShiftEndDate;
 
   const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
   const cells = [];
@@ -3619,6 +3614,7 @@ function selectShiftDay(cell) {
   if (!cell) return;
   const date = cell.dataset.date;
   state.selectedShiftDate = date;
+  state.selectedShiftEndDate = date;
   state.activeShiftPopoverDate = cell.classList.contains("has-shifts") ? date : null;
   renderCalendar();
 }
@@ -4365,7 +4361,6 @@ function bindEvents() {
       state.user = data.user;
       state.permissions = data.permissions;
       state.permissionPreview = null;
-      state.rulesPeriodInitialized = false;
       state.showLogin = false;
       applyAuthView();
       await refreshAll();
@@ -4493,7 +4488,10 @@ function bindEvents() {
   bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(prepareLinkPayload(data)) }));
   bindForm("#linkCategoryForm", (data) => api("/api/link-categories", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#machineForm", (data) => api("/api/machines", { method: "POST", body: JSON.stringify(data) }));
-  bindForm("#shiftForm", (data) => api("/api/shifts", { method: "POST", body: JSON.stringify(data) }));
+  bindForm("#shiftForm", (data) => {
+    state.selectedShiftEndDate = data.shift_end_date || data.shift_start_date || state.selectedShiftDate;
+    return api("/api/shifts", { method: "POST", body: JSON.stringify(data) });
+  });
   bindForm("#thankForm", (_, form) => api("/api/thank-you", { method: "POST", body: JSON.stringify(thankFormPayload(form)) }));
   bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));

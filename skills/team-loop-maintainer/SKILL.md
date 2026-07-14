@@ -58,6 +58,8 @@ Use these references conditionally:
 
 - Keep users and member profiles consistent.
 - Keep workbench and morning-meeting data synchronized.
+- Keep shared date filters initialized to the current month without page-specific overrides.
+- Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.
 - Keep meeting state locks enforced by the server.
 - Keep meeting creation controlled by `meetings.create`, while first-level topic categories and second-level preset maintenance remain administrator-only.
 - Keep the full chat Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
