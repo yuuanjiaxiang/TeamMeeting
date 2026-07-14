@@ -41,7 +41,7 @@ TeamMeeting/
 4. 公开接口直接执行；受保护接口先读取会话并校验模块及操作权限。
 5. 业务方法通过 `connect()` 访问 SQLite。
 6. 写操作调用 `write_audit()` 记录审计日志。
-7. 前端更新 `state` 并调用对应 `render*()` 函数重绘模块。
+7. 前端更新 `state` 并调用对应 `render*()` 函数重绘模块；页面重新获得焦点、重新显示或切换模块时会同步认证与最新数据。
 
 接口统一返回 JSON。业务异常使用 `AppError(status, message)`，前端通过 Toast 展示 `error` 字段。
 
@@ -108,6 +108,18 @@ if path == "/api/example":
 
 新增模块时应同时定义 `view/create/edit/delete` 的初始权限。用户类型可由管理员动态创建、改名和删除，业务代码不得依赖类型名称或固定类型 key。`guest` 是保留的只读模板，不能分配给账号，也不能获得写权限。管理员切换用户视图只影响前端展示，服务端仍识别管理员账号，因此危险操作必须有显式确认。
 
+模块权限和业务参与资格不是同一概念。团队成员、早例会、红黑榜和 Thank You 使用 `user_types` 上独立的 `include_in_*` 字段；查询当前名单和创建新事实时均需在服务端校验。调整参与资格不得删除历史事项、积分或感谢记录。
+
+用户类型与早例会事项采用乐观并发控制。前端更新时传 `expected_version`；服务端使用 `WHERE version=?` 原子更新，冲突返回 409 并要求客户端刷新。批量排班也必须先完成整批冲突校验再写入，避免部分成功。
+
+登录会话持久化在 SQLite 中，只保存令牌摘要。新增认证功能时同时考虑超时、撤销、密码修改后的其他设备退出、失败次数锁定和 401 后前端自动回到登录视图。
+
+团队对话的完整 Emoji 选择器和中文数据都放在 `static/vendor/emoji-picker-element/` 与 `static/vendor/emoji-picker-element-data/`。部署环境不得依赖 CDN；修改选择器后应在断网或仅局域网条件下验证表情分类、搜索、发送和再次点击撤销。
+
+会议创建遵循 `meetings.create` 操作权限，不应写死为管理员；一级议题分类和二级预设议题的维护仍是管理员能力。创建会议后通过 `/api/meetings/{id}/agenda-options` 批量加入预设议题并指定责任人。`meetings.start_time` 使用 `HH:MM`，为空表示未指定开始时间。
+
+红黑榜黑榜可见性必须在服务端和前端同时执行。普通用户调用 `/api/scores` 或 `/api/dashboards/red-black` 时，服务端根据两个 `red_black_show_black_*` 配置裁剪结果；前端隐藏只用于管理员切换用户视图时保持一致体验，不能替代接口过滤。
+
 ### 数据写入
 
 - 使用 SQL 参数绑定，禁止拼接用户输入；
@@ -154,7 +166,7 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py
 node --check static\app.js
 git diff --check
 ```
@@ -163,12 +175,19 @@ git diff --check
 
 - 管理员视图与用户视图；
 - 至少两种自定义用户类型及不同操作权限；
+- 批量调整账号类型，以及四类业务参与名单互相独立；
 - 访客动态只读范围；
 - 删除仍有用户的类型时必须被服务端阻止；
 - 页面刷新与页面切换后的数据一致性；
 - 桌面宽屏、窄屏和手机宽度；
 - 写操作成功、失败、重复点击及空数据状态；
 - 灰度迁移、健康检查和冒烟测试。
+
+安全与并发改动还应在灰度执行：
+
+```powershell
+python scripts\safety_feature_test.py --base-url http://127.0.0.1:8001 --database data\deploy\gray\weekly_team_gray.db
+```
 
 ## 9. 发布边界
 

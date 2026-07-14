@@ -8,6 +8,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 import uuid
@@ -20,7 +21,6 @@ DB_PATH = Path(os.environ.get("TEAM_LOOP_DB_PATH") or (DATA_DIR / "weekly_team.d
 BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups")).resolve()
 DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
 RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
-SESSIONS = {}
 
 DEFAULT_SETTINGS = [
     ("app_brand_name", "系统名称", "Team Loop", "text", "左侧顶部显示的系统名称"),
@@ -28,12 +28,18 @@ DEFAULT_SETTINGS = [
     ("meeting_default_title", "默认会议标题", "周例会", "text", "创建会议和批量生成时使用的默认标题"),
     ("meeting_bulk_default_weeks", "批量生成周数", "4", "number", "会议沙盘批量生成默认覆盖的周数"),
     ("shift_default_hours", "默认班次小时", "12", "number", "新增排班时默认计入的工时"),
+    ("shift_max_daily_hours", "单人每日最大工时", "24", "number", "新增排班时用于阻止同一成员当天工时超限"),
     ("thank_you_weekly_limit", "每周 Thank You 上限", "3", "number", "每位成员每周最多感谢的人数"),
     ("red_score_default_points", "红榜默认分值", "1", "number", "记录红榜积分时的默认分值"),
     ("black_score_default_points", "黑榜默认分值", "1", "number", "记录黑榜积分时的默认分值"),
+    ("red_black_show_black_points", "显示黑榜积分", "1", "boolean", "是否向普通用户展示黑榜汇总积分"),
+    ("red_black_show_black_details", "显示黑榜明细", "1", "boolean", "是否向普通用户展示黑榜积分明细"),
     ("late_donation_label", "迟到乐捐说明", "迟到要乐捐", "text", "参会签到中迟到乐捐的口径说明"),
     ("backup_auto_enabled", "每日自动备份", "1", "boolean", "启用后系统每天自动生成一次数据库备份"),
     ("backup_retention_days", "备份保留天数", "30", "number", "自动清理超过该天数的备份，0 表示不清理"),
+    ("session_timeout_minutes", "登录有效时长（分钟）", "480", "number", "无操作超过该时长后需要重新登录"),
+    ("login_max_attempts", "登录失败次数上限", "5", "number", "同一账号和地址连续失败达到上限后临时锁定"),
+    ("login_lock_minutes", "登录锁定时长（分钟）", "15", "number", "触发失败次数上限后的临时锁定时间"),
 ]
 
 MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate", "last"}
@@ -52,6 +58,12 @@ MODULE_CATALOG = [
 ]
 MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
 PERMISSION_ACTIONS = ("view", "create", "edit", "delete")
+PARTICIPATION_SCOPES = {
+    "members": ("include_in_members", "团队成员"),
+    "morning": ("include_in_morning", "早例会跟踪"),
+    "rules": ("include_in_rules", "红黑榜名单"),
+    "thanks": ("include_in_thanks", "Thank You 名单"),
+}
 DEFAULT_USER_TYPE_KEY = "default"
 GUEST_USER_TYPE_KEY = "guest"
 LEGACY_GUEST_MODULES = {"members", "shifts", "rules", "thanks", "links"}
@@ -192,6 +204,17 @@ def make_hash(password, salt=None):
 def verify_password(password, salt, password_hash):
     _, hashed = make_hash(password, salt)
     return hmac.compare_digest(hashed, password_hash)
+
+
+def token_digest(token):
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def parse_iso_datetime(value):
+    try:
+        return dt.datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
 
 
 def row_to_dict(row):
@@ -499,9 +522,12 @@ def ensure_morning_carryover(conn, item_date):
             """
             SELECT i.*
             FROM morning_items i
+            JOIN users owner ON owner.id=i.owner_id AND owner.active=1
+            LEFT JOIN user_types owner_type ON owner_type.key=owner.user_type
             WHERE i.item_date < ?
               AND i.active=1
               AND i.status!='done'
+              AND COALESCE(owner_type.include_in_morning, 1)=1
               AND NOT EXISTS (
                   SELECT 1
                   FROM morning_items newer
@@ -749,6 +775,11 @@ def init_db():
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 locked INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                include_in_members INTEGER NOT NULL DEFAULT 1,
+                include_in_morning INTEGER NOT NULL DEFAULT 1,
+                include_in_rules INTEGER NOT NULL DEFAULT 1,
+                include_in_thanks INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
 
@@ -987,6 +1018,28 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                username TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                window_started_at TEXT NOT NULL,
+                locked_until TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(username, ip_address)
+            );
+
             CREATE TABLE IF NOT EXISTS thank_you_votes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 voter_id INTEGER NOT NULL REFERENCES users(id),
@@ -1013,6 +1066,7 @@ def init_db():
                 updated_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
                 active INTEGER NOT NULL DEFAULT 1
             );
 
@@ -1049,6 +1103,11 @@ def init_db():
             """
         )
         ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'default'")
+        ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "user_types", "include_in_rules", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "user_types", "include_in_thanks", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "members", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "members", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "members", "skills", "TEXT NOT NULL DEFAULT '[]'")
@@ -1089,6 +1148,7 @@ def init_db():
         ensure_column(conn, "meeting_items", "expected_output", "TEXT")
         ensure_column(conn, "meeting_items", "materials", "TEXT")
         ensure_column(conn, "meeting_items", "carried_from_id", "INTEGER")
+        ensure_column(conn, "meetings", "start_time", "TEXT")
         ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
         ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
@@ -1105,7 +1165,11 @@ def init_db():
         ensure_column(conn, "morning_items", "carried_from_date", "TEXT")
         ensure_column(conn, "morning_items", "updated_by", "INTEGER")
         ensure_column(conn, "morning_items", "updated_at", "TEXT")
+        ensure_column(conn, "morning_items", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "morning_items", "active", "INTEGER NOT NULL DEFAULT 1")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active ON auth_sessions(user_id, revoked_at, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
         conn.execute("UPDATE meeting_topic_options SET recurrence_type='weekly' WHERE recurrence_type IS NULL OR recurrence_type=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
@@ -1120,6 +1184,14 @@ def init_db():
         seed_link_categories(conn)
         seed_system_settings(conn)
         seed_user_types(conn)
+        conn.execute(
+            """
+            UPDATE user_types
+            SET include_in_members=0, include_in_morning=0, include_in_rules=0, include_in_thanks=0
+            WHERE key=?
+            """,
+            (GUEST_USER_TYPE_KEY,),
+        )
         migrate_dynamic_user_types(conn)
         migrate_operation_permissions(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1279,26 +1351,51 @@ class Handler(BaseHTTPRequestHandler):
     def current_user(self, required=True):
         cookies = parse_cookies(self.headers.get("Cookie"))
         token = cookies.get("weekly_session")
-        user_id = SESSIONS.get(token)
-        if not user_id:
-            if required:
-                raise AppError(401, "请先登录")
-            return None
+        digest = token_digest(token)
+        now = dt.datetime.now().replace(microsecond=0)
         with connect() as conn:
-            user = conn.execute(
+            session = conn.execute(
                 """
-                SELECT u.id, u.username, u.display_name, u.role, u.user_type, t.name AS user_type_name, u.active, u.created_at
-                FROM users u
-                LEFT JOIN user_types t ON t.key = u.user_type
-                WHERE u.id=? AND u.active=1
+                SELECT s.id, s.user_id, s.last_seen_at, s.expires_at
+                FROM auth_sessions s
+                WHERE s.token_hash=? AND s.revoked_at IS NULL
                 """,
-                (user_id,),
-            ).fetchone()
+                (digest,),
+            ).fetchone() if token else None
+            if session and (parse_iso_datetime(session["expires_at"]) or now) <= now:
+                conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE id=?", (now_iso(), session["id"]))
+                session = None
+            user = None
+            if session:
+                user = conn.execute(
+                    """
+                    SELECT u.id, u.username, u.display_name, u.role, u.user_type,
+                           t.name AS user_type_name,
+                           COALESCE(t.include_in_members, 1) AS eligible_members,
+                           COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                           COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                           COALESCE(t.include_in_thanks, 1) AS eligible_thanks,
+                           u.active, u.created_at
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key = u.user_type
+                    WHERE u.id=? AND u.active=1
+                    """,
+                    (session["user_id"],),
+                ).fetchone()
+                if user:
+                    self.current_session_id = session["id"]
+                    last_seen = parse_iso_datetime(session["last_seen_at"])
+                    if not last_seen or (now - last_seen).total_seconds() >= 60:
+                        timeout = get_int_setting(conn, "session_timeout_minutes", 480, minimum=15, maximum=43200)
+                        conn.execute(
+                            "UPDATE auth_sessions SET last_seen_at=?, expires_at=? WHERE id=?",
+                            (now.isoformat(), (now + dt.timedelta(minutes=timeout)).isoformat(), session["id"]),
+                        )
+                else:
+                    conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE id=?", (now_iso(), session["id"]))
         if not user:
-            if token in SESSIONS:
-                del SESSIONS[token]
             if required:
-                raise AppError(401, "登录状态已失效")
+                raise AppError(401, "登录状态已失效，请重新登录")
             return None
         return dict(user)
 
@@ -1397,6 +1494,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/me" and method == "GET":
             user = self.current_user(required=False)
             return {"user": user, "permissions": permissions_for(user), "settings": self.public_settings()}
+        if path == "/api/sessions" and method == "GET":
+            return self.list_sessions(self.current_user())
+        if len(path.strip("/").split("/")) == 3 and path.startswith("/api/sessions/") and method == "DELETE":
+            return self.revoke_session(int(path.rsplit("/", 1)[1]), self.current_user())
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
         parts = path.strip("/").split("/")
@@ -1430,6 +1531,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_user_type()
         if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "permissions" and method == "PATCH":
             return self.update_user_type_permissions(parts[2])
+        if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "impact" and method == "POST":
+            return self.user_type_impact(parts[2])
         if len(parts) == 3 and parts[:2] == ["api", "user-types"] and method == "DELETE":
             return self.delete_user_type(parts[2])
 
@@ -1438,6 +1541,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"users": self.list_users()}
             if method == "POST":
                 return self.create_user()
+        if path == "/api/users/bulk-type" and method == "PATCH":
+            return self.bulk_update_user_type(user)
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "PATCH":
             return self.update_user(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "DELETE":
@@ -1510,6 +1615,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.update_meeting_topics(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "copy-agenda" and method == "POST":
             return self.copy_previous_meeting_agenda(int(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "agenda-options" and method == "POST":
+            return self.add_meeting_preset_items(int(parts[2]))
         if path == "/api/meeting-topics":
             if method == "GET":
                 return self.list_meeting_topics()
@@ -1572,7 +1679,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/thank-you":
             if method == "GET":
-                return {"votes": self.list_thank_you(query)}
+                return {"votes": self.list_thank_you(query), "users": self.list_participating_users("thanks")}
             if method == "POST":
                 return self.create_thank_you(user)
         if len(parts) == 3 and parts[:2] == ["api", "thank-you"]:
@@ -1620,39 +1727,139 @@ class Handler(BaseHTTPRequestHandler):
         data = read_json(self)
         username = (data.get("username") or "").strip()
         password = data.get("password") or ""
+        ip_address = self.client_address[0]
+        now = dt.datetime.now().replace(microsecond=0)
         with connect() as conn:
+            max_attempts = get_int_setting(conn, "login_max_attempts", 5, minimum=3, maximum=20)
+            lock_minutes = get_int_setting(conn, "login_lock_minutes", 15, minimum=1, maximum=1440)
+            attempt = conn.execute(
+                "SELECT * FROM login_attempts WHERE username=? AND ip_address=?",
+                (username.lower(), ip_address),
+            ).fetchone()
+            locked_until = parse_iso_datetime(attempt["locked_until"]) if attempt else None
+            if locked_until and locked_until > now:
+                remaining = max(1, int((locked_until - now).total_seconds() / 60) + 1)
+                raise AppError(429, f"登录失败次数过多，请 {remaining} 分钟后再试")
             user = conn.execute(
                 """
-                SELECT u.*, t.name AS user_type_name
+                SELECT u.*, t.name AS user_type_name,
+                       COALESCE(t.include_in_members, 1) AS eligible_members,
+                       COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                       COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                       COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                 FROM users u
                 LEFT JOIN user_types t ON t.key = u.user_type
                 WHERE u.username=? AND u.active=1
                 """,
                 (username,),
             ).fetchone()
-        if not user or not verify_password(password, user["salt"], user["password_hash"]):
-            raise AppError(401, "账号或密码错误")
-        token = secrets.token_urlsafe(32)
-        SESSIONS[token] = user["id"]
-        safe_user = {key: user[key] for key in ("id", "username", "display_name", "role", "user_type", "user_type_name", "active", "created_at")}
-        with connect() as conn:
+            if not user or not verify_password(password, user["salt"], user["password_hash"]):
+                window_start = parse_iso_datetime(attempt["window_started_at"]) if attempt else None
+                if not window_start or (now - window_start).total_seconds() > lock_minutes * 60:
+                    failed_count = 1
+                    window_start = now
+                else:
+                    failed_count = int(attempt["failed_count"] or 0) + 1
+                next_lock = now + dt.timedelta(minutes=lock_minutes) if failed_count >= max_attempts else None
+                conn.execute(
+                    """
+                    INSERT INTO login_attempts(username, ip_address, failed_count, window_started_at, locked_until, updated_at)
+                    VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(username, ip_address) DO UPDATE SET
+                        failed_count=excluded.failed_count,
+                        window_started_at=excluded.window_started_at,
+                        locked_until=excluded.locked_until,
+                        updated_at=excluded.updated_at
+                    """,
+                    (username.lower(), ip_address, failed_count, window_start.isoformat(), next_lock.isoformat() if next_lock else None, now.isoformat()),
+                )
+                conn.commit()
+                remaining = max(0, max_attempts - failed_count)
+                if next_lock:
+                    raise AppError(429, f"登录失败次数过多，账号已临时锁定 {lock_minutes} 分钟")
+                raise AppError(401, f"账号或密码错误，还可尝试 {remaining} 次")
+            conn.execute("DELETE FROM login_attempts WHERE username=? AND ip_address=?", (username.lower(), ip_address))
+            timeout = get_int_setting(conn, "session_timeout_minutes", 480, minimum=15, maximum=43200)
+            token = secrets.token_urlsafe(32)
+            expires_at = now + dt.timedelta(minutes=timeout)
+            cursor = conn.execute(
+                """
+                INSERT INTO auth_sessions(token_hash, user_id, ip_address, user_agent, created_at, last_seen_at, expires_at)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (token_digest(token), user["id"], ip_address, (self.headers.get("User-Agent") or "")[:500], now.isoformat(), now.isoformat(), expires_at.isoformat()),
+            )
+            self.current_session_id = cursor.lastrowid
+            conn.execute("DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL AND revoked_at<?", ((now - dt.timedelta(days=30)).isoformat(),))
+            safe_user = {
+                key: user[key]
+                for key in (
+                    "id", "username", "display_name", "role", "user_type", "user_type_name",
+                    "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
+                    "active", "created_at",
+                )
+            }
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
         return {
             "user": safe_user,
             "permissions": permissions_for(safe_user),
             "message": "登录成功",
-            "_headers": {"Set-Cookie": f"weekly_session={token}; Path=/; HttpOnly; SameSite=Lax"},
+            "_headers": {"Set-Cookie": f"weekly_session={token}; Path=/; Max-Age={timeout * 60}; HttpOnly; SameSite=Strict"},
         }
 
     def logout(self):
         cookies = parse_cookies(self.headers.get("Cookie"))
         token = cookies.get("weekly_session")
-        if token in SESSIONS:
-            del SESSIONS[token]
+        if token:
+            with connect() as conn:
+                conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL", (now_iso(), token_digest(token)))
         return {
             "message": "已退出",
-            "_headers": {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"},
+            "_headers": {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"},
         }
+
+    def list_sessions(self, user):
+        now = now_iso()
+        with connect() as conn:
+            conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE revoked_at IS NULL AND expires_at<=?", (now, now))
+            sessions = rows_to_list(conn.execute(
+                """
+                SELECT id, ip_address, user_agent, created_at, last_seen_at, expires_at
+                FROM auth_sessions
+                WHERE user_id=? AND revoked_at IS NULL AND expires_at>?
+                ORDER BY last_seen_at DESC
+                """,
+                (user["id"], now),
+            ).fetchall())
+        current_id = getattr(self, "current_session_id", None)
+        for session in sessions:
+            session["current"] = session["id"] == current_id
+            agent = session.get("user_agent") or "未知设备"
+            if "Mobile" in agent or "Android" in agent or "iPhone" in agent:
+                session["device"] = "手机浏览器"
+            elif "Windows" in agent:
+                session["device"] = "Windows 浏览器"
+            elif "Macintosh" in agent:
+                session["device"] = "Mac 浏览器"
+            else:
+                session["device"] = "浏览器会话"
+        return {"sessions": sessions}
+
+    def revoke_session(self, session_id, user):
+        with connect() as conn:
+            session = conn.execute(
+                "SELECT id, user_id, revoked_at FROM auth_sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if not session or session["user_id"] != user["id"]:
+                raise AppError(404, "会话不存在")
+            conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now_iso(), session_id))
+            write_audit(conn, user, "auth.session_revoke", "session", session_id, "用户撤销了登录会话", {}, self.client_address[0])
+        current = session_id == getattr(self, "current_session_id", None)
+        result = {"message": "会话已退出", "current_revoked": current}
+        if current:
+            result["_headers"] = {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"}
+        return result
 
     def change_own_password(self, user):
         data = read_json(self)
@@ -1679,8 +1886,12 @@ class Handler(BaseHTTPRequestHandler):
                 "UPDATE users SET salt=?, password_hash=? WHERE id=?",
                 (salt, password_hash, user["id"]),
             )
+            conn.execute(
+                "UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND id<>? AND revoked_at IS NULL",
+                (now_iso(), user["id"], getattr(self, "current_session_id", -1)),
+            )
             write_audit(conn, user, "user.password", "user", user["id"], "用户修改了自己的密码", {}, self.client_address[0])
-        return {"message": "密码已更新"}
+        return {"message": "密码已更新，其他设备已退出登录"}
 
     def send_json(self, data, status=200, headers=None):
         headers = headers or {}
@@ -1732,11 +1943,99 @@ class Handler(BaseHTTPRequestHandler):
             }
         for user_type in types:
             user_type["is_guest"] = user_type["key"] == GUEST_USER_TYPE_KEY
+            user_type["participation"] = {
+                scope: bool(user_type[column])
+                for scope, (column, _) in PARTICIPATION_SCOPES.items()
+            }
             user_type["permissions"] = permission_map.get(user_type["key"], {})
             user_type["modules"] = sorted(
                 module for module, actions in user_type["permissions"].items() if actions.get("view")
             )
+            with connect() as conn:
+                user_type["assigned_users"] = [row["display_name"] for row in conn.execute(
+                    "SELECT display_name FROM users WHERE user_type=? AND active=1 ORDER BY display_name LIMIT 8",
+                    (user_type["key"],),
+                ).fetchall()]
         return {"types": types, "modules": MODULE_CATALOG}
+
+    def normalize_user_type_participation(self, type_key, raw_participation, current=None):
+        current = current or {}
+        raw_participation = raw_participation if isinstance(raw_participation, dict) else {}
+        normalized = {}
+        for scope, (column, _) in PARTICIPATION_SCOPES.items():
+            value = raw_participation.get(scope, current.get(column, True))
+            normalized[scope] = False if type_key == GUEST_USER_TYPE_KEY else bool(value)
+        return normalized
+
+    def normalize_user_type_permissions(self, type_key, raw_permissions):
+        if not isinstance(raw_permissions, dict):
+            raise AppError(400, "操作权限格式不正确")
+        normalized = {}
+        for module in MODULE_KEYS:
+            actions = raw_permissions.get(module) or {}
+            if not isinstance(actions, dict):
+                actions = {}
+            values = {action: bool(actions.get(action)) for action in PERMISSION_ACTIONS}
+            if values["create"] or values["edit"] or values["delete"]:
+                values["view"] = True
+            if type_key == GUEST_USER_TYPE_KEY:
+                values["create"] = False
+                values["edit"] = False
+                values["delete"] = False
+            normalized[module] = values
+        if type_key == GUEST_USER_TYPE_KEY:
+            normalized["dashboard"] = {action: False for action in PERMISSION_ACTIONS}
+            if not any(actions["view"] for actions in normalized.values()):
+                raise AppError(400, "访客至少需要保留一个可查看模块")
+        return normalized
+
+    def user_type_impact(self, type_key):
+        self.require_admin()
+        data = read_json(self)
+        normalized = self.normalize_user_type_permissions(type_key, data.get("permissions") or {})
+        with connect() as conn:
+            user_type = conn.execute("SELECT * FROM user_types WHERE key=? AND active=1", (type_key,)).fetchone()
+            if not user_type:
+                raise AppError(404, "用户类型不存在")
+            existing = {
+                row["module_key"]: {action: bool(row[f"can_{action}"]) for action in PERMISSION_ACTIONS}
+                for row in conn.execute("SELECT * FROM module_permissions WHERE user_type_key=?", (type_key,)).fetchall()
+            }
+            users = [row["display_name"] for row in conn.execute(
+                "SELECT display_name FROM users WHERE user_type=? AND active=1 ORDER BY display_name",
+                (type_key,),
+            ).fetchall()]
+        changed = []
+        for module in MODULE_CATALOG:
+            before = existing.get(module["key"], {action: False for action in PERMISSION_ACTIONS})
+            after = normalized[module["key"]]
+            for action in PERMISSION_ACTIONS:
+                if before.get(action) != after.get(action):
+                    changed.append({
+                        "module": module["key"],
+                        "module_name": module["name"],
+                        "action": action,
+                        "enabled": after[action],
+                    })
+        participation = self.normalize_user_type_participation(
+            type_key,
+            data.get("participation"),
+            dict(user_type),
+        )
+        participation_changed = []
+        for scope, (column, label) in PARTICIPATION_SCOPES.items():
+            before = bool(user_type[column])
+            after = participation[scope]
+            if before != after:
+                participation_changed.append({"scope": scope, "name": label, "enabled": after})
+        return {
+            "user_type": type_key,
+            "version": user_type["version"],
+            "affected_count": len(users),
+            "affected_users": users[:12],
+            "changed": changed,
+            "participation_changed": participation_changed,
+        }
 
     def create_user_type(self):
         admin = self.require_admin()
@@ -1762,18 +2061,16 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM user_types WHERE key<>?",
                 (GUEST_USER_TYPE_KEY,),
             ).fetchone()[0]
-            conn.execute(
-                "INSERT INTO user_types(key, name, description, sort_order, locked, active, created_at) VALUES(?,?,?,?,0,1,?)",
-                (type_key, name, description, sort_order, now_iso()),
-            )
+            source_type = None
             source_permissions = {}
             if copy_from:
                 source = conn.execute(
-                    "SELECT key FROM user_types WHERE key=? AND active=1",
+                    "SELECT * FROM user_types WHERE key=? AND active=1",
                     (copy_from,),
                 ).fetchone()
                 if not source:
                     raise AppError(400, "复制来源用户类型不存在")
+                source_type = source
                 source_permissions = {
                     row["module_key"]: row
                     for row in conn.execute(
@@ -1781,6 +2078,20 @@ class Handler(BaseHTTPRequestHandler):
                         (copy_from,),
                     ).fetchall()
                 }
+            participation_values = [
+                int(bool(source_type[column])) if source_type else 1
+                for column, _ in PARTICIPATION_SCOPES.values()
+            ]
+            conn.execute(
+                """
+                INSERT INTO user_types(
+                    key, name, description, sort_order, locked, active,
+                    include_in_members, include_in_morning, include_in_rules, include_in_thanks,
+                    created_at
+                ) VALUES(?,?,?,?,0,1,?,?,?,?,?)
+                """,
+                (type_key, name, description, sort_order, *participation_values, now_iso()),
+            )
             for module_key in MODULE_KEYS:
                 source = source_permissions.get(module_key)
                 actions = (
@@ -1812,32 +2123,17 @@ class Handler(BaseHTTPRequestHandler):
                 module: {action: True for action in PERMISSION_ACTIONS}
                 for module in modules if module in MODULE_KEYS
             }
-        if not isinstance(raw_permissions, dict):
-            raise AppError(400, "操作权限格式不正确")
-        normalized = {}
-        for module in MODULE_KEYS:
-            actions = raw_permissions.get(module) or {}
-            if not isinstance(actions, dict):
-                actions = {}
-            values = {action: bool(actions.get(action)) for action in PERMISSION_ACTIONS}
-            if values["create"] or values["edit"] or values["delete"]:
-                values["view"] = True
-            if type_key == GUEST_USER_TYPE_KEY:
-                values["create"] = False
-                values["edit"] = False
-                values["delete"] = False
-            normalized[module] = values
-        if type_key == GUEST_USER_TYPE_KEY:
-            normalized["dashboard"] = {action: False for action in PERMISSION_ACTIONS}
-            if not any(actions["view"] for actions in normalized.values()):
-                raise AppError(400, "访客至少需要保留一个可查看模块")
+        normalized = self.normalize_user_type_permissions(type_key, raw_permissions)
+        expected_version = data.get("expected_version")
         with connect() as conn:
             user_type = conn.execute(
-                "SELECT key, name, description FROM user_types WHERE key=? AND active=1",
+                "SELECT * FROM user_types WHERE key=? AND active=1",
                 (type_key,),
             ).fetchone()
             if not user_type:
                 raise AppError(404, "用户类型不存在")
+            if expected_version is not None and int(expected_version) != int(user_type["version"]):
+                raise AppError(409, "该用户类型刚刚被其他管理员修改，请刷新后核对最新权限")
             if type_key != GUEST_USER_TYPE_KEY:
                 name = str(data.get("name") or user_type["name"] or "").strip()
                 description = str(data.get("description", user_type["description"] or "") or "").strip()
@@ -1851,10 +2147,31 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if duplicate:
                     raise AppError(400, "用户类型名称已存在")
-                conn.execute(
-                    "UPDATE user_types SET name=?, description=? WHERE key=?",
-                    (name, description, type_key),
-                )
+            participation = self.normalize_user_type_participation(
+                type_key,
+                data.get("participation"),
+                dict(user_type),
+            )
+            updated = conn.execute(
+                """
+                UPDATE user_types
+                SET name=?, description=?, include_in_members=?, include_in_morning=?,
+                    include_in_rules=?, include_in_thanks=?, version=version+1
+                WHERE key=? AND version=?
+                """,
+                (
+                    name if type_key != GUEST_USER_TYPE_KEY else user_type["name"],
+                    description if type_key != GUEST_USER_TYPE_KEY else user_type["description"],
+                    int(participation["members"]),
+                    int(participation["morning"]),
+                    int(participation["rules"]),
+                    int(participation["thanks"]),
+                    type_key,
+                    user_type["version"],
+                ),
+            )
+            if updated.rowcount != 1:
+                raise AppError(409, "该用户类型刚刚被其他管理员修改，请刷新后重试")
             conn.execute("DELETE FROM module_permissions WHERE user_type_key=?", (type_key,))
             for module, actions in normalized.items():
                 conn.execute(
@@ -1873,7 +2190,16 @@ class Handler(BaseHTTPRequestHandler):
                         now_iso(),
                     ),
                 )
-            write_audit(conn, admin, "user_type.permissions", "user_type", None, "用户类型权限已更新", {"user_type": type_key, "permissions": normalized}, self.client_address[0])
+            write_audit(
+                conn,
+                admin,
+                "user_type.permissions",
+                "user_type",
+                None,
+                "用户类型权限与参与范围已更新",
+                {"user_type": type_key, "permissions": normalized, "participation": participation},
+                self.client_address[0],
+            )
         return {"message": "用户类型权限已更新", **self.list_user_types(), "permissions": permissions_for(admin)}
 
     def delete_user_type(self, type_key):
@@ -1911,7 +2237,13 @@ class Handler(BaseHTTPRequestHandler):
             return rows_to_list(
                 conn.execute(
                     """
-                    SELECT u.id, u.username, u.display_name, u.role, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name, u.active, u.created_at
+                    SELECT u.id, u.username, u.display_name, u.role, u.user_type,
+                           COALESCE(t.name, u.user_type) AS user_type_name,
+                           COALESCE(t.include_in_members, 1) AS eligible_members,
+                           COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                           COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                           COALESCE(t.include_in_thanks, 1) AS eligible_thanks,
+                           u.active, u.created_at
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
                     WHERE u.active=1
@@ -1919,6 +2251,84 @@ class Handler(BaseHTTPRequestHandler):
                     """
                 ).fetchall()
             )
+
+    def list_participating_users(self, scope):
+        if scope not in PARTICIPATION_SCOPES:
+            raise AppError(400, "参与范围不正确")
+        column = PARTICIPATION_SCOPES[scope][0]
+        with connect() as conn:
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.id, u.username, u.display_name, u.user_type,
+                           COALESCE(t.name, u.user_type) AS user_type_name
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.active=1 AND COALESCE(t.{column}, 1)=1
+                    ORDER BY t.sort_order, u.display_name
+                    """
+                ).fetchall()
+            )
+
+    def bulk_update_user_type(self, admin):
+        self.require_admin()
+        data = read_json(self)
+        raw_user_ids = data.get("user_ids") or []
+        if not isinstance(raw_user_ids, list):
+            raise AppError(400, "批量用户列表格式不正确")
+        user_ids = []
+        for raw_id in raw_user_ids:
+            try:
+                user_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if user_id not in user_ids:
+                user_ids.append(user_id)
+        if not user_ids:
+            raise AppError(400, "请至少选择一个账号")
+        if len(user_ids) > 200:
+            raise AppError(400, "单次最多调整 200 个账号")
+        user_type = str(data.get("user_type") or "").strip()
+        if not user_type or user_type == GUEST_USER_TYPE_KEY:
+            raise AppError(400, "请选择可分配的用户类型")
+        placeholders = ",".join("?" for _ in user_ids)
+        with connect() as conn:
+            target_type = conn.execute(
+                "SELECT key, name FROM user_types WHERE key=? AND active=1",
+                (user_type,),
+            ).fetchone()
+            if not target_type:
+                raise AppError(404, "目标用户类型不存在")
+            users = rows_to_list(
+                conn.execute(
+                    f"SELECT id, display_name FROM users WHERE active=1 AND id IN ({placeholders})",
+                    user_ids,
+                ).fetchall()
+            )
+            if len(users) != len(user_ids):
+                raise AppError(400, "部分账号不存在或已停用，请刷新后重试")
+            conn.execute(
+                f"UPDATE users SET user_type=? WHERE active=1 AND id IN ({placeholders})",
+                [user_type, *user_ids],
+            )
+            for user_id in user_ids:
+                sync_member_for_user(conn, user_id)
+            write_audit(
+                conn,
+                admin,
+                "user.bulk_type",
+                "user",
+                None,
+                "批量调整用户类型",
+                {
+                    "user_ids": user_ids,
+                    "user_names": [item["display_name"] for item in users],
+                    "user_type": user_type,
+                    "user_type_name": target_type["name"],
+                },
+                self.client_address[0],
+            )
+        return {"message": f"已调整 {len(user_ids)} 个账号", "users": self.list_users()}
 
     def create_user(self):
         admin = self.require_admin()
@@ -2005,10 +2415,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             conn.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
             conn.execute("UPDATE members SET active=0 WHERE user_id=?", (user_id,))
+            conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now_iso(), user_id))
             write_audit(conn, current_user, "user.delete", "user", user_id, "用户已删除", {}, self.client_address[0])
-        for token, session_user_id in list(SESSIONS.items()):
-            if session_user_id == user_id:
-                del SESSIONS[token]
         return {"message": "用户已删除", "users": self.list_users()}
 
     def list_members(self):
@@ -2019,7 +2427,8 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT m.*, u.display_name AS linked_user, u.username AS account
                     FROM members m
                     JOIN users u ON u.id = m.user_id
-                    WHERE m.active=1 AND u.active=1
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE m.active=1 AND u.active=1 AND COALESCE(t.include_in_members, 1)=1
                     ORDER BY CASE WHEN m.sort_order=0 THEN m.id ELSE m.sort_order END, m.id
                     """
                 ).fetchall()
@@ -2391,9 +2800,10 @@ class Handler(BaseHTTPRequestHandler):
                            COALESCE(root.item_date, i.item_date) AS start_date
                     FROM morning_items i
                     JOIN users owner ON owner.id = i.owner_id
+                    LEFT JOIN user_types owner_type ON owner_type.key=owner.user_type
                     LEFT JOIN users updater ON updater.id = i.updated_by
                     LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
-                    WHERE i.active=1 AND i.item_date=?
+                    WHERE i.active=1 AND i.item_date=? AND COALESCE(owner_type.include_in_morning, 1)=1
                     ORDER BY owner.display_name, CASE i.status WHEN 'risk' THEN 0 WHEN 'doing' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, i.updated_at DESC
                     """,
                     (item_date,),
@@ -2411,7 +2821,7 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT u.id, u.username, u.display_name, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
-                    WHERE u.active=1
+                    WHERE u.active=1 AND COALESCE(t.include_in_morning, 1)=1
                     ORDER BY t.sort_order, u.id
                     """
                 ).fetchall()
@@ -2500,8 +2910,17 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "已结束日期不能新增早例会事项")
         due_date = data.get("due_date") or item_date
         with connect() as conn:
-            if not conn.execute("SELECT id FROM users WHERE id=? AND active=1", (owner_id,)).fetchone():
-                raise AppError(404, "负责人不存在")
+            owner = conn.execute(
+                """
+                SELECT u.id
+                FROM users u
+                LEFT JOIN user_types t ON t.key=u.user_type
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1
+                """,
+                (owner_id,),
+            ).fetchone()
+            if not owner:
+                raise AppError(400, "该账号未纳入早例会跟踪名单")
             cursor = conn.execute(
                 """
                 INSERT INTO morning_items(owner_id, item_date, title, detail, status, priority, blocker, due_date, updated_by, created_at, updated_at, active)
@@ -2546,8 +2965,9 @@ class Handler(BaseHTTPRequestHandler):
             values.append(int(data["owner_id"]))
         if not fields:
             raise AppError(400, "没有可更新字段")
-        fields.extend(["updated_by=?", "updated_at=?"])
-        values.extend([user["id"], now_iso(), item_id])
+        expected_version = data.get("expected_version")
+        fields.extend(["updated_by=?", "updated_at=?", "version=version+1"])
+        values.extend([user["id"], now_iso()])
         with connect() as conn:
             item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
             if not item:
@@ -2556,12 +2976,32 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "已结束日期不能修改")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
                 raise AppError(403, "只能更新自己的早例会事项")
-            conn.execute(f"UPDATE morning_items SET {', '.join(fields)} WHERE id=?", values)
+            if "owner_id" in data and user["role"] == "admin":
+                eligible_owner = conn.execute(
+                    """
+                    SELECT u.id FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1
+                    """,
+                    (int(data["owner_id"]),),
+                ).fetchone()
+                if not eligible_owner:
+                    raise AppError(400, "该账号未纳入早例会跟踪名单")
+            if expected_version is not None and int(expected_version) != int(item["version"]):
+                raise AppError(409, "该事项已被其他人更新，请刷新后查看最新进展再修改")
+            updated = conn.execute(
+                f"UPDATE morning_items SET {', '.join(fields)} WHERE id=? AND version=?",
+                [*values, item_id, item["version"]],
+            )
+            if updated.rowcount != 1:
+                raise AppError(409, "该事项已被其他人更新，请刷新后重试")
             write_audit(conn, user, "morning.update", "morning_item", item_id, "早例会事项已更新", {"fields": list(data.keys())}, self.client_address[0])
             date_row = conn.execute("SELECT item_date FROM morning_items WHERE id=?", (item_id,)).fetchone()
         return {"message": "早例会事项已更新", **self.list_morning_items({"date": [date_row["item_date"]]})}
 
     def delete_morning_item(self, item_id, user):
+        data = read_json(self)
+        expected_version = data.get("expected_version")
         with connect() as conn:
             item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
             if not item:
@@ -2570,12 +3010,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "已结束日期不能删除")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
                 raise AppError(403, "只能删除自己的早例会事项")
+            if expected_version is not None and int(expected_version) != int(item["version"]):
+                raise AppError(409, "该事项已被其他人更新，请刷新后确认后再删除")
             chain_id = item["root_id"] or item["id"]
             updated_at = now_iso()
             cursor = conn.execute(
                 """
                 UPDATE morning_items
-                SET active=0, updated_by=?, updated_at=?
+                SET active=0, updated_by=?, updated_at=?, version=version+1
                 WHERE active=1
                   AND item_date>=?
                   AND COALESCE(root_id, id)=?
@@ -2621,7 +3063,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_scores(self, query):
         where, params = date_filter(query, "s.score_date")
+        user = self.current_user(required=False)
         with connect() as conn:
+            show_black_details = bool(user and user.get("role") == "admin") or get_setting_value(
+                conn, "red_black_show_black_details", "1"
+            ) == "1"
+            clauses = [where]
+            if query.get("user_id") and query["user_id"][0]:
+                try:
+                    user_id = int(query["user_id"][0])
+                except (TypeError, ValueError):
+                    raise AppError(400, "成员参数不正确")
+                clauses.append("s.user_id=?")
+                params.append(user_id)
+            if not show_black_details:
+                clauses.append("s.kind='red'")
             return rows_to_list(
                 conn.execute(
                     f"""
@@ -2629,7 +3085,7 @@ class Handler(BaseHTTPRequestHandler):
                     FROM red_black_scores s
                     JOIN users u ON u.id = s.user_id
                     LEFT JOIN red_black_rules r ON r.id = s.rule_id
-                    WHERE {where}
+                    WHERE {' AND '.join(clauses)}
                     ORDER BY s.score_date DESC, s.created_at DESC
                     """,
                     params,
@@ -2643,6 +3099,17 @@ class Handler(BaseHTTPRequestHandler):
         if data.get("kind") == "black":
             points = -points
         with connect() as conn:
+            eligible = conn.execute(
+                """
+                SELECT u.id
+                FROM users u
+                LEFT JOIN user_types t ON t.key=u.user_type
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                """,
+                (data.get("user_id"),),
+            ).fetchone()
+            if not eligible:
+                raise AppError(400, "该账号未纳入红黑榜名单")
             cursor = conn.execute(
                 "INSERT INTO red_black_scores(user_id, rule_id, kind, points, reason, score_date, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (data.get("user_id"), data.get("rule_id") or None, data.get("kind"), points, data.get("reason") or "", data.get("score_date") or today_iso(), admin["id"], now_iso()),
@@ -2667,8 +3134,15 @@ class Handler(BaseHTTPRequestHandler):
             if score_date != today_iso():
                 raise AppError(400, "积分日期只能保持当天")
             user_id = int(data.get("user_id") or score["user_id"])
-            if not conn.execute("SELECT id FROM users WHERE id=? AND active=1", (user_id,)).fetchone():
-                raise AppError(404, "成员不存在")
+            if not conn.execute(
+                """
+                SELECT u.id FROM users u
+                LEFT JOIN user_types t ON t.key=u.user_type
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                """,
+                (user_id,),
+            ).fetchone():
+                raise AppError(400, "该账号未纳入红黑榜名单")
             rule_id = data.get("rule_id") or None
             if rule_id:
                 rule = conn.execute("SELECT id, kind FROM red_black_rules WHERE id=? AND active=1", (rule_id,)).fetchone()
@@ -2692,10 +3166,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def red_black_dashboard(self, query):
         where, params = date_filter(query, "s.score_date")
+        user = self.current_user(required=False)
         with connect() as conn:
+            show_black_points = bool(user and user.get("role") == "admin") or get_setting_value(
+                conn, "red_black_show_black_points", "1"
+            ) == "1"
             users = rows_to_list(
                 conn.execute(
-                    "SELECT id, display_name FROM users WHERE active=1 ORDER BY display_name"
+                    """
+                    SELECT u.id, u.display_name FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                    ORDER BY u.display_name
+                    """
                 ).fetchall()
             )
             totals = rows_to_list(
@@ -2705,8 +3188,9 @@ class Handler(BaseHTTPRequestHandler):
                            SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
                            SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
                     LEFT JOIN red_black_scores s ON s.user_id = u.id AND {where}
-                    WHERE u.active=1
+                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1
                     GROUP BY u.id
                     ORDER BY red_points DESC, black_points ASC, u.display_name
                     """,
@@ -2766,7 +3250,23 @@ class Handler(BaseHTTPRequestHandler):
             annual_map.values(),
             key=lambda item: (-int(item["total_red"] or 0), int(item["total_black"] or 0), item["display_name"]),
         )
-        return {"totals": totals, "timeline": timeline, "annual": annual}
+        if not show_black_points:
+            for item in totals:
+                item["black_points"] = 0
+            for item in timeline:
+                item["black_points"] = 0
+            for item in annual:
+                item["total_black"] = 0
+                for month in item["months"].values():
+                    month["black"] = 0
+            totals.sort(key=lambda item: (-int(item["red_points"] or 0), item["display_name"]))
+            annual.sort(key=lambda item: (-int(item["total_red"] or 0), item["display_name"]))
+        return {
+            "totals": totals,
+            "timeline": timeline,
+            "annual": annual,
+            "show_black_points": show_black_points,
+        }
 
     def list_meetings(self, query):
         where, params = date_filter(query, "m.meeting_date")
@@ -2855,19 +3355,21 @@ class Handler(BaseHTTPRequestHandler):
         return meetings
 
     def create_meeting(self, user):
-        self.require_admin()
         data = read_json(self)
+        start_time = str(data.get("start_time") or "").strip()
+        if start_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start_time):
+            raise AppError(400, "会议开始时间格式不正确")
         with connect() as conn:
             default_title = get_setting_value(conn, "meeting_default_title", "周例会")
             cursor = conn.execute(
-                "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                (data.get("meeting_date") or today_iso(), data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], now_iso()),
+                "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?,?)",
+                (data.get("meeting_date") or today_iso(), start_time or None, data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], now_iso()),
             )
             meeting_id = cursor.lastrowid
             for topic_id in data.get("topic_type_ids") or []:
                 link_meeting_topic(conn, meeting_id, topic_id, user["id"])
             write_audit(conn, user, "meeting.create", "meeting", meeting_id, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
-        return {"message": "会议已创建", "meetings": self.list_meetings({})}
+        return {"message": "会议已创建", "meeting_id": meeting_id, "meetings": self.list_meetings({})}
 
     def update_meeting(self, meeting_id):
         admin = self.require_admin()
@@ -2875,13 +3377,15 @@ class Handler(BaseHTTPRequestHandler):
         allowed_statuses = {"draft", "scheduled", "in_progress", "completed", "archived"}
         fields = []
         values = []
-        for key in ("meeting_date", "title", "summary"):
+        for key in ("meeting_date", "start_time", "title", "summary"):
             if key in data:
                 value = str(data.get(key) or "").strip()
                 if key in ("meeting_date", "title") and not value:
                     raise AppError(400, "会议日期和标题不能为空")
+                if key == "start_time" and value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                    raise AppError(400, "会议开始时间格式不正确")
                 fields.append(f"{key}=?")
-                values.append(value)
+                values.append(value or None if key == "start_time" else value)
         if "status" in data:
             status = str(data.get("status") or "").strip()
             if status not in allowed_statuses:
@@ -3005,6 +3509,9 @@ class Handler(BaseHTTPRequestHandler):
             default_weeks = get_int_setting(conn, "meeting_bulk_default_weeks", 4, minimum=1, maximum=52)
             weeks = max(1, min(52, int(data.get("weeks") or default_weeks)))
             title = (data.get("title") or get_setting_value(conn, "meeting_default_title", "周例会")).strip()
+            start_time = str(data.get("start_time") or "").strip()
+            if start_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", start_time):
+                raise AppError(400, "会议开始时间格式不正确")
             options = rows_to_list(
                 conn.execute(
                     """
@@ -3028,8 +3535,8 @@ class Handler(BaseHTTPRequestHandler):
                     meeting_id = meeting["id"]
                 else:
                     cursor = conn.execute(
-                        "INSERT INTO meetings(meeting_date, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?)",
-                        (meeting_date, title, summary, "scheduled", admin["id"], now_iso()),
+                        "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?,?)",
+                        (meeting_date, start_time or None, title, summary, "scheduled", admin["id"], now_iso()),
                     )
                     meeting_id = cursor.lastrowid
                     created_meetings += 1
@@ -3219,6 +3726,110 @@ class Handler(BaseHTTPRequestHandler):
             link_meeting_topic(conn, meeting_id, type_id, user["id"])
             write_audit(conn, user, "meeting_item.create", "meeting_item", cursor.lastrowid, "会议议题已添加", {"meeting_id": meeting_id, "title": title}, self.client_address[0])
         return {"message": "议题已添加", "meetings": self.list_meetings({})}
+
+    def add_meeting_preset_items(self, meeting_id):
+        actor = self.current_user()
+        data = read_json(self)
+        requested = data.get("items") or []
+        if not isinstance(requested, list) or not requested:
+            raise AppError(400, "请至少勾选一个预设议题")
+        if len(requested) > 100:
+            raise AppError(400, "单次最多添加 100 个预设议题")
+
+        normalized = []
+        seen = set()
+        for item in requested:
+            if not isinstance(item, dict):
+                continue
+            try:
+                option_id = int(item.get("option_id"))
+            except (TypeError, ValueError):
+                continue
+            if option_id in seen:
+                continue
+            owner_id = item.get("owner_id") or None
+            if owner_id is not None:
+                try:
+                    owner_id = int(owner_id)
+                except (TypeError, ValueError):
+                    raise AppError(400, "责任人数据不正确")
+            normalized.append({"option_id": option_id, "owner_id": owner_id})
+            seen.add(option_id)
+        if not normalized:
+            raise AppError(400, "没有可添加的预设议题")
+
+        with connect() as conn:
+            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            if not meeting:
+                raise AppError(404, "会议不存在")
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(400, "已结束会议不能新增议题，请先重新开启")
+
+            existing = {
+                row["option_id"]
+                for row in conn.execute(
+                    "SELECT option_id FROM meeting_items WHERE meeting_id=? AND option_id IS NOT NULL AND deleted_at IS NULL",
+                    (meeting_id,),
+                ).fetchall()
+            }
+            valid_owners = {
+                row["id"]
+                for row in conn.execute("SELECT id FROM users WHERE active=1").fetchall()
+            }
+            next_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM meeting_items WHERE meeting_id=?",
+                (meeting_id,),
+            ).fetchone()[0]
+            added = 0
+            skipped = 0
+            for requested_item in normalized:
+                if requested_item["option_id"] in existing:
+                    skipped += 1
+                    continue
+                option = conn.execute(
+                    """
+                    SELECT o.*, t.name AS type_name
+                    FROM meeting_topic_options o
+                    JOIN meeting_topic_types t ON t.id=o.type_id
+                    WHERE o.id=? AND o.active=1 AND t.active=1
+                    """,
+                    (requested_item["option_id"],),
+                ).fetchone()
+                if not option:
+                    skipped += 1
+                    continue
+                owner_id = requested_item["owner_id"] or option["owner_id"]
+                if owner_id is not None and owner_id not in valid_owners:
+                    raise AppError(400, f"议题“{option['title']}”的责任人不可用")
+                conn.execute(
+                    """
+                    INSERT INTO meeting_items(
+                        meeting_id, section, title, detail, minutes, owner_id, status,
+                        due_date, created_by, created_at, type_id, option_id, sort_order,
+                        duration_minutes, expected_output, materials
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        meeting_id, option["type_name"], option["title"], option["default_detail"] or "", "",
+                        owner_id, "todo", None, actor["id"], now_iso(), option["type_id"], option["id"],
+                        next_order, option["duration_minutes"] or 10, option["expected_output"] or "",
+                        option["materials"] or "",
+                    ),
+                )
+                link_meeting_topic(conn, meeting_id, option["type_id"], actor["id"])
+                existing.add(option["id"])
+                next_order += 10
+                added += 1
+            if not added and skipped:
+                raise AppError(409, "所选议题已加入本场会议，请刷新后重新选择")
+            write_audit(
+                conn, actor, "meeting.agenda_options_add", "meeting", meeting_id,
+                "批量加入预设议题", {"added": added, "skipped": skipped}, self.client_address[0],
+            )
+        message = f"已加入 {added} 个议题"
+        if skipped:
+            message += f"，跳过 {skipped} 个重复或失效议题"
+        return {"message": message, "meetings": self.list_meetings({})}
 
     def update_meeting_item(self, item_id):
         user = self.current_user()
@@ -3603,16 +4214,56 @@ class Handler(BaseHTTPRequestHandler):
             start = data.get("shift_start_date") or data.get("shift_date") or today_iso()
             end = data.get("shift_end_date") or start
             dates = date_range(start, end)
+        dates = list(dict.fromkeys(dates))
+        machine_id = int(data.get("machine_id") or 0)
+        user_id = int(data.get("user_id") or 0)
+        shift_type = data.get("shift_type")
+        if shift_type not in ("day", "night"):
+            raise AppError(400, "班次类型不正确")
         with connect() as conn:
             default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
+            max_daily_hours = get_float_setting(conn, "shift_max_daily_hours", 24, minimum=1, maximum=48)
+            hours = float(data.get("hours") or default_hours)
+            if hours <= 0 or hours > 24:
+                raise AppError(400, "单条排班工时需要在 0 到 24 小时之间")
+            machine = conn.execute("SELECT id, name FROM machines WHERE id=?", (machine_id,)).fetchone()
+            member = conn.execute("SELECT id, display_name FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+            if not machine or not member:
+                raise AppError(404, "机台或排班成员不存在")
+            conflicts = []
+            for shift_date in dates:
+                try:
+                    dt.date.fromisoformat(shift_date)
+                except ValueError:
+                    raise AppError(400, f"排班日期格式不正确：{shift_date}")
+                duplicate = conn.execute(
+                    """
+                    SELECT id FROM shifts
+                    WHERE machine_id=? AND user_id=? AND shift_type=? AND shift_date=?
+                    """,
+                    (machine_id, user_id, shift_type, shift_date),
+                ).fetchone()
+                daily_hours = conn.execute(
+                    "SELECT COALESCE(SUM(hours), 0) FROM shifts WHERE user_id=? AND shift_date=?",
+                    (user_id, shift_date),
+                ).fetchone()[0]
+                if duplicate:
+                    conflicts.append(f"{shift_date} 已有相同机台、成员和班次")
+                elif float(daily_hours or 0) + hours > max_daily_hours:
+                    conflicts.append(f"{shift_date} 累计 {float(daily_hours or 0) + hours:g} 小时，超过上限 {max_daily_hours:g} 小时")
+            if conflicts:
+                detail = "；".join(conflicts[:6])
+                if len(conflicts) > 6:
+                    detail += f"；另有 {len(conflicts) - 6} 天冲突"
+                raise AppError(409, f"排班未保存：{detail}")
             created_ids = []
             for shift_date in dates:
                 cursor = conn.execute(
                     "INSERT INTO shifts(machine_id, user_id, shift_type, shift_date, hours, note, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (data.get("machine_id"), data.get("user_id"), data.get("shift_type"), shift_date, float(data.get("hours") or default_hours), data.get("note") or "", admin["id"], now_iso()),
+                    (machine_id, user_id, shift_type, shift_date, hours, data.get("note") or "", admin["id"], now_iso()),
                 )
                 created_ids.append(cursor.lastrowid)
-            write_audit(conn, admin, "shift.create", "shift", created_ids[0] if len(created_ids) == 1 else None, "排班已保存", {"dates": dates, "count": len(created_ids), "user_id": data.get("user_id")}, self.client_address[0])
+            write_audit(conn, admin, "shift.create", "shift", created_ids[0] if len(created_ids) == 1 else None, "排班已保存", {"dates": dates, "count": len(created_ids), "user_id": user_id}, self.client_address[0])
         return {"message": "排班已保存", "shifts": self.list_shifts({})}
 
     def delete_shift(self, shift_id):
@@ -3705,7 +4356,12 @@ class Handler(BaseHTTPRequestHandler):
             placeholders = ",".join("?" for _ in receiver_ids)
             active_receivers = rows_to_list(
                 conn.execute(
-                    f"SELECT id, display_name FROM users WHERE active=1 AND id IN ({placeholders})",
+                    f"""
+                    SELECT u.id, u.display_name FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.active=1 AND COALESCE(t.include_in_thanks, 1)=1
+                      AND u.id IN ({placeholders})
+                    """,
                     receiver_ids,
                 ).fetchall()
             )
@@ -3799,7 +4455,8 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT receiver.id, receiver.display_name, COUNT(*) AS thanks
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id = v.receiver_id
-                    WHERE {where}
+                    LEFT JOIN user_types t ON t.key=receiver.user_type
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
                     GROUP BY receiver.id
                     ORDER BY thanks DESC, receiver.display_name
                     """,
@@ -3811,7 +4468,9 @@ class Handler(BaseHTTPRequestHandler):
                     f"""
                     SELECT v.week_start, COUNT(*) AS thanks
                     FROM thank_you_votes v
-                    WHERE {where}
+                    JOIN users receiver ON receiver.id=v.receiver_id
+                    LEFT JOIN user_types t ON t.key=receiver.user_type
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
                     GROUP BY v.week_start
                     ORDER BY v.week_start
                     """,
@@ -4384,7 +5043,12 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def public_settings(self):
-        keys = ("app_brand_name", "app_team_name")
+        keys = (
+            "app_brand_name",
+            "app_team_name",
+            "red_black_show_black_points",
+            "red_black_show_black_details",
+        )
         placeholders = ",".join("?" for _ in keys)
         with connect() as conn:
             rows = rows_to_list(

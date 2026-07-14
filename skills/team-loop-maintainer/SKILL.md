@@ -42,6 +42,7 @@ Use these references conditionally:
 - Enforce admin, ownership, module, and action permissions in `server.py`.
 - Register new modules in `MODULE_CATALOG`, initial permissions, `module_for_path()`, frontend `pages`, and loaders.
 - Treat user types as administrator-defined data. Never branch business behavior on a display name or assume fixed internal/partner type keys.
+- Keep module permissions separate from business participation scopes (`members`, `morning`, `rules`, `thanks`); enforce both in backend queries and writes.
 - Test admin view, admin user view, at least two custom user types, and the dynamic guest template when the change affects access.
 
 ### Backend and data
@@ -58,15 +59,19 @@ Use these references conditionally:
 - Keep users and member profiles consistent.
 - Keep workbench and morning-meeting data synchronized.
 - Keep meeting state locks enforced by the server.
+- Keep meeting creation controlled by `meetings.create`, while first-level topic categories and second-level preset maintenance remain administrator-only.
+- Keep the full chat Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
 - Keep Thank You weekly limits and red/black independent scoring semantics.
+- Enforce black-score summary/detail visibility in backend responses; frontend hiding alone is insufficient.
 - Keep guest access read-only and entirely driven by the reserved `guest` permission template.
+- Preserve persistent session revocation, login throttling, optimistic versions, and atomic shift-conflict checks when touching shared write paths.
 
 ## Validate
 
 Run at minimum:
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py
 node --check static\app.js
 git diff --check
 ```
@@ -77,6 +82,7 @@ For database or deployment changes, deploy Gray and test against its isolated sn
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gray
+python scripts\safety_feature_test.py --base-url http://127.0.0.1:8001 --database data\deploy\gray\weekly_team_gray.db
 ```
 
 Do not promote or push unless the user explicitly asks.

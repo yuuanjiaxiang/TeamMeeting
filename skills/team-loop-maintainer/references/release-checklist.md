@@ -17,6 +17,13 @@
 
 - Check `/api/health` reports `environment=gray` and `database=ok`.
 - Test success, invalid input, repeat action, and permission failure.
+- Run `scripts/safety_feature_test.py` when sessions, permissions, participation scopes, optimistic writes, or shifts changed.
+- Verify bulk account-type changes and confirm excluded users disappear only from current business lists while history remains.
+- Verify a non-admin with `meetings.create` can create a timed meeting and select presets, but cannot maintain topic categories or preset definitions.
+- Verify attendance opens in a modal and meeting email generation works both with and without Thank You content.
+- Verify the local full Emoji picker loads, searches, sends an arbitrary Emoji, and can remove the reaction without external network access.
+- Toggle black-score summary and detail visibility independently; verify non-admin APIs and UI hide the configured data while administrators still see and can restore it.
+- Verify the score page defaults to the current month, detail rows are newest-first and scroll, and a member click opens only that member's full history.
 - Test desktop and narrow viewport for UI changes.
 - Verify gray writes do not appear in production.
 - Re-run Gray once when deployment scripts or migrations changed; repeated deployment must work on Windows.
@@ -37,4 +44,3 @@
 - Confirm a current production backup exists.
 - Run `Promote`, then health and smoke tests.
 - Keep rollback metadata and report the deployed release ID.
-

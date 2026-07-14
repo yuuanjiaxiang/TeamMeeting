@@ -27,11 +27,15 @@ data/deploy/runtime/                  # 进程元数据和日志
 | 表 | 用途 |
 | --- | --- |
 | `users` | 账号、姓名、角色、用户类型、密码哈希和启用状态 |
-| `user_types` | 管理员自定义的用户类型，以及保留的 `guest` 访客模板 |
+| `user_types` | 管理员自定义的用户类型、版本号、四类业务参与开关，以及保留的 `guest` 访客模板 |
 | `module_permissions` | 用户类型对模块的查看、新增、修改、删除权限 |
 | `members` | 与用户关联的成员画像、头像、标签、职责和排序 |
+| `auth_sessions` | 持久化登录会话、设备摘要、最后活动时间、到期和撤销状态 |
+| `login_attempts` | 按账号和来源地址统计失败次数及临时锁定时间 |
 
-`users.user_type` 必须指向一个启用的、非访客用户类型。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 仅代表未登录访问范围，服务端会强制其所有写权限为关闭。
+`users.user_type` 必须指向一个启用的、非访客用户类型。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 仅代表未登录访问范围，服务端会强制其所有写权限和业务参与开关为关闭。
+
+`user_types.include_in_members/include_in_morning/include_in_rules/include_in_thanks` 控制当前名单展示与新业务数据写入，不删除历史事实。`user_types.version` 和 `morning_items.version` 用于乐观并发控制，更新语句必须同时匹配客户端读取到的版本号。
 
 ### 团队交流
 
@@ -48,10 +52,10 @@ data/deploy/runtime/                  # 进程元数据和日志
 | 表 | 用途 |
 | --- | --- |
 | `morning_items` | 每日事项、状态、优先级、风险、继承链和进展 |
-| `meetings` | 会议日期、主题、摘要和阶段 |
+| `meetings` | 会议日期、开始时间、主题、摘要、创建人和阶段 |
 | `meeting_items` | 议题、纪要、负责人、时间盒、会前材料和顺延来源 |
-| `meeting_topic_types` | 议题类型和颜色 |
-| `meeting_topic_options` | 周期预设议题和默认准备信息 |
+| `meeting_topic_types` | 管理员维护的一级议题分类和颜色 |
+| `meeting_topic_options` | 隶属于一级分类的二级预设议题、周期和默认准备信息 |
 | `meeting_topic_links` | 每场会议独立启用的议题类型 |
 | `meeting_attendance` | 签到、乐捐金额和收款状态 |
 
@@ -66,6 +70,8 @@ data/deploy/runtime/                  # 进程元数据和日志
 | `thank_you_votes` | Thank You 记录和事实依据 |
 | `links` | 链接、标签、置顶、质量和访问量 |
 | `link_categories` | 管理员维护的链接分类 |
+
+`system_settings.red_black_show_black_points` 和 `red_black_show_black_details` 分别控制普通用户是否可见黑榜汇总及明细。它们只改变读取范围，不删除或改写历史积分事实。
 
 ### 系统治理
 
@@ -140,7 +146,7 @@ python scripts\db_snapshot.py `
 
 ## 8. 数据安全
 
-- 密码以加盐哈希保存，但数据库仍包含员工和业务信息；
+- 密码以加盐哈希保存，会话令牌仅保存摘要；数据库仍包含员工和业务信息；
 - 限制 `data/` 目录的 Windows 文件权限；
 - 不把数据库放在公开共享目录；
 - 不在截图、Issue 或日志中暴露账号、事实依据和审计详情；

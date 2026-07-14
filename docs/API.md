@@ -8,7 +8,7 @@
 - 时间格式：本地时间 ISO 8601；
 - 登录后由浏览器 Cookie 维持会话；
 - 错误响应：`{"error": "可读错误原因"}`；
-- 未登录通常返回 401，无权限返回 403，资源不存在返回 404。
+- 未登录通常返回 401，无权限返回 403，资源不存在返回 404；并发编辑冲突返回 409。
 
 示例：
 
@@ -30,6 +30,8 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | POST | `/api/logout` | 退出并清除当前会话 |
 | GET | `/api/me` | 当前用户、权限、模块目录和公开设置 |
 | PATCH | `/api/me/password` | 修改当前用户密码 |
+| GET | `/api/sessions` | 查询当前账号的登录设备和会话 |
+| DELETE | `/api/sessions/{id}` | 撤销指定会话；可撤销当前设备 |
 | GET | `/api/health` | 服务、环境、版本和数据库健康状态 |
 
 登录示例：
@@ -47,14 +49,18 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | --- | --- | --- |
 | GET/POST | `/api/users` | 查询或创建用户 |
 | PATCH/DELETE | `/api/users/{id}` | 修改或软删除用户 |
+| PATCH | `/api/users/bulk-type` | 将 `user_ids` 中的账号批量调整到指定 `user_type` |
 | GET/POST | `/api/user-types` | 查询或创建用户类型；创建时可指定 `copy_from` 复制权限 |
-| PATCH | `/api/user-types/{code}/permissions` | 更新类型名称、说明和模块操作权限；`guest` 仅接受查看权限 |
+| POST | `/api/user-types/{code}/impact` | 预评估权限或参与名单变化及受影响账号 |
+| PATCH | `/api/user-types/{code}/permissions` | 更新名称、说明、模块操作权限与独立业务参与名单；支持 `expected_version` |
 | DELETE | `/api/user-types/{code}` | 删除没有有效用户的类型；访客模板及最后一个可分配类型不可删除 |
 | GET/POST | `/api/members` | 查询成员或维护当前成员资料 |
 | PATCH | `/api/members/{id}` | 更新成员资料 |
 | PATCH | `/api/members/order` | 管理员调整成员卡片顺序 |
 
 用户与成员是一一关联的业务实体。新增用户必须指定有效用户类型，不能指定 `guest`。删除用户后历史记录保留，成员列表不再展示该用户。
+
+用户类型的 `participation` 与模块权限互相独立，包含 `members`、`morning`、`rules`、`thanks` 四个布尔值。例如拥有红黑榜查看权限，并不代表账号必须进入积分名单。类型更新和早例会编辑使用版本号防止覆盖其他管理员或成员刚提交的修改。
 
 ## 4. 团队对话
 
@@ -78,21 +84,22 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | GET | `/api/archive/years` | 获取可归档年份统计 |
 | GET | `/api/archive/search` | 跨会议、对话和早例会搜索 |
 
-历史日期只读。未完成事项由服务端按日继承，客户端不应自行复制。
+历史日期只读。未完成事项由服务端按日继承，客户端不应自行复制。更新或删除时传入查询结果中的 `version` 作为 `expected_version`，收到 409 后应重新加载数据。
 
 ## 6. 会议沙盘
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/meetings` | 查询或创建单场会议 |
+| GET/POST | `/api/meetings` | 查询或创建单场会议；创建受 `meetings.create` 权限控制 |
 | PATCH | `/api/meetings/{id}` | 更新会议信息或阶段 |
 | POST | `/api/meetings/bulk-generate` | 根据预设周期批量生成 |
 | PATCH | `/api/meetings/{id}/topics` | 设置本场会议主题 |
 | POST | `/api/meetings/{id}/copy-agenda` | 沿用最近会议议题 |
 | GET | `/api/meeting-topics` | 议题类型与预设选项 |
-| POST/DELETE | `/api/meeting-topic-types[/{id}]` | 新增或停用议题类型 |
-| POST | `/api/meeting-topic-options` | 新增预设议题 |
-| PATCH/DELETE | `/api/meeting-topic-options/{id}` | 修改或停用预设议题 |
+| POST/DELETE | `/api/meeting-topic-types[/{id}]` | 管理员新增或停用一级议题分类 |
+| POST | `/api/meeting-topic-options` | 管理员新增二级预设议题 |
+| PATCH/DELETE | `/api/meeting-topic-options/{id}` | 管理员修改或停用二级预设议题 |
+| POST | `/api/meetings/{id}/agenda-options` | 批量勾选二级预设议题并为每条指定 `owner_id` |
 | POST | `/api/meetings/{id}/items` | 添加本场议题 |
 | POST | `/api/meetings/{id}/items/reorder` | 提交完整议题 ID 顺序 |
 | PATCH/DELETE | `/api/meeting-items/{id}` | 更新纪要或软删除议题 |
@@ -100,6 +107,8 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | POST | `/api/meetings/{id}/attendance` | 更新单人成员签到 |
 
 会议阶段值：`draft`、`scheduled`、`in_progress`、`completed`、`archived`。后两种状态锁定议题和纪要。
+
+创建和更新会议可传 `start_time`，格式为 24 小时制 `HH:MM`。会议纪要邮件是否附带 Thank You 由前端生成时选择，不改变会议数据。
 
 议题常用字段：
 
@@ -131,6 +140,10 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | GET/POST | `/api/thank-you` | 查询或送出感谢 |
 | PATCH/DELETE | `/api/thank-you/{id}` | 修改或删除允许操作的感谢 |
 | GET | `/api/dashboards/thank-you` | 月度/年度 Thank You 排名 |
+
+批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。红黑榜和 Thank You 新增接口会校验目标账号是否处于对应业务参与名单。
+
+`GET /api/scores` 支持 `from`、`to` 和 `user_id`。`red_black_show_black_points` 与 `red_black_show_black_details` 为管理员维护的布尔系统配置；普通用户的年度汇总和明细会在服务端按配置裁剪，管理员始终获得完整数据。
 
 ## 8. 链接、提醒和系统管理
 

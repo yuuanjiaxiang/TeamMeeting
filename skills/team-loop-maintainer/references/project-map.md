@@ -19,10 +19,15 @@
 - A user owns one member profile; inactive users disappear from current member views while history remains.
 - Guest modules are selected through the reserved `guest` permission template; the frontend consumes `/api/me` and must not maintain a separate allowlist.
 - User-type permissions include view/create/edit/delete; UI hiding never replaces server checks.
+- User-type participation scopes independently control current team-member, morning, red/black, and Thank You candidate lists without deleting history.
 - User types are dynamic. Only `guest` is reserved; it is read-only and cannot be assigned to an account.
 - Past morning-meeting dates are read-only; unfinished items inherit through a root chain.
 - Completed or archived meetings lock agenda and minutes until an admin reopens them.
+- Meeting creation follows the `meetings.create` operation permission; only administrators maintain first-level topic categories and second-level presets.
+- Meeting presets are batch-added through `/api/meetings/{id}/agenda-options`, with an optional owner per selected item; `meetings.start_time` is `HH:MM` or empty.
+- Chat Emoji picker code, locale, and Emoji data are local static assets and must work without public internet access.
 - Red and black scores remain separate; do not silently convert to a net score.
+- Black-score summary and detail visibility are separate system settings; non-admin API responses must be filtered server-side while administrators retain full management access.
 - A user may edit/delete only allowed Thank You records; weekly recipient limits come from settings.
 - Link edits and deletes are available to users whose type grants the matching operation, with soft deletion and audit history.
 - Gray uses a production snapshot and never writes its test data back to production.
@@ -31,7 +36,9 @@
 
 - `server.py` is intentionally monolithic; route ordering can shadow dynamic paths.
 - `static/app.js` renders HTML strings; missing `escapeHtml()` creates stored-XSS risk.
-- Sessions are process memory; restarting the service signs users out.
+- Sessions are persisted as token hashes in SQLite; authentication changes must preserve expiry, revocation, device listing, and login throttling.
+- User types and morning items use optimistic versions; stale writes must return 409 instead of overwriting newer data.
+- Shift batches are atomic and must reject duplicates or daily-hour conflicts before inserting any row.
 - SQLite files cannot be replaced while another Windows process holds them open.
 - Theme-specific CSS appears after base CSS and can override new styles.
 - Development hot reload on port 8000 may point at the main database; use Gray for destructive tests.

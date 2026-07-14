@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="party popper">
+  <path d="m11 53 13-34 21 21-34 13Z" fill="#ffcb45" stroke="#9c6d15" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="m17 39 8 8m-3-20 15 15" stroke="#e85757" stroke-width="5"/>
+  <path d="M34 17c2-7 9-9 14-6M43 27c6-4 10-2 13 2M31 9l-1-5M52 13l5-3M48 37l4 5" fill="none" stroke="#3370ff" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="43" cy="7" r="3" fill="#e85757"/><circle cx="56" cy="21" r="3" fill="#12b981"/><circle cx="31" cy="19" r="2.5" fill="#8b5cf6"/>
+</svg>

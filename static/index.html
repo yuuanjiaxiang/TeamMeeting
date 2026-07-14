@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260713-dynamic-user-types-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260714-collab-score-v4" />
   </head>
   <body>
     <div class="app-shell">
@@ -71,12 +71,16 @@
           </header>
 
           <div id="toast" class="toast hidden"></div>
+          <div id="permissionPreviewBanner" class="permission-preview-banner hidden" role="status">
+            <div><strong id="permissionPreviewTitle">权限预览</strong><span id="permissionPreviewSummary"></span></div>
+            <button id="exitPermissionPreviewBtn" class="secondary" type="button">退出预览</button>
+          </div>
           <div id="passwordModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="passwordModalTitle" aria-hidden="true">
             <div class="modal-card password-modal-card">
               <div class="modal-head">
                 <div>
                   <h2 id="passwordModalTitle">修改密码</h2>
-                  <p>修改后请使用新密码重新登录。</p>
+                  <p>修改密码会让其他设备退出；也可以单独撤销不认识的登录设备。</p>
                 </div>
                 <button class="modal-close" type="button" data-password-modal-close aria-label="关闭">×</button>
               </div>
@@ -87,6 +91,46 @@
                 <div class="modal-actions">
                   <button class="secondary" type="button" data-password-modal-close>取消</button>
                   <button type="submit">保存新密码</button>
+                </div>
+              </form>
+              <section class="session-security-panel">
+                <div class="session-security-head"><strong>登录设备</strong><span>无操作超时后会自动退出</span></div>
+                <div id="sessionList" class="session-list"><p class="empty-note">正在读取登录设备…</p></div>
+              </section>
+            </div>
+          </div>
+
+          <div id="userTypePermissionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userTypePermissionTitle" aria-hidden="true">
+            <div class="modal-card permission-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="userTypePermissionTitle">配置用户类型</h2>
+                  <p id="userTypePermissionSubtitle">分别设置页面权限和业务参与名单。</p>
+                </div>
+                <button class="modal-close" type="button" data-user-type-modal-close aria-label="关闭">×</button>
+              </div>
+              <div id="userTypePermissionEditor"></div>
+            </div>
+          </div>
+
+          <div id="userAccountModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userAccountModalTitle" aria-hidden="true">
+            <div class="modal-card user-account-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="userAccountModalTitle">编辑账号</h2>
+                  <p>调整基础资料、用户类型和系统管理员身份。</p>
+                </div>
+                <button class="modal-close" type="button" data-user-account-modal-close aria-label="关闭">×</button>
+              </div>
+              <form id="userAccountEditForm" class="user-edit-form user-account-edit-form">
+                <label>账号<input name="username" required /></label>
+                <label>姓名<input name="display_name" required /></label>
+                <label>用户类型<select name="user_type" required></select></label>
+                <label>授权方式<select name="role"><option value="user">按类型授权</option><option value="admin">系统管理员</option></select></label>
+                <label>重置密码<input name="password" type="password" placeholder="不修改则留空" /></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-user-account-modal-close>取消</button>
+                  <button type="submit">保存账号</button>
                 </div>
               </form>
             </div>
@@ -188,6 +232,103 @@
                 </div>
               </form>
             </div>
+          </div>
+
+          <div id="meetingAgendaModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="meetingAgendaTitle" aria-hidden="true">
+            <div class="modal-card meeting-agenda-picker-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="meetingAgendaTitle">选择预设议题</h2>
+                  <p id="meetingAgendaSubtitle">按一级分类勾选二级议题，并逐项指定本场责任人。</p>
+                </div>
+                <button class="modal-close" type="button" data-meeting-agenda-close aria-label="关闭">×</button>
+              </div>
+              <form id="meetingAgendaPickerForm" class="meeting-agenda-picker-form">
+                <input name="meeting_id" type="hidden" />
+                <div class="meeting-agenda-picker-toolbar">
+                  <label class="meeting-agenda-search">搜索议题<input id="meetingAgendaSearch" type="search" placeholder="输入议题或一级分类" /></label>
+                  <span id="meetingAgendaSelectedCount" class="meeting-agenda-selected-count">已选 0 项</span>
+                </div>
+                <div id="meetingAgendaPickerList" class="meeting-agenda-picker-list"></div>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-meeting-agenda-close>取消</button>
+                  <button id="meetingAgendaSubmitBtn" type="submit" disabled>加入本场会议</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="meetingAttendanceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="meetingAttendanceTitle" aria-hidden="true">
+            <div class="modal-card meeting-attendance-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="meetingAttendanceTitle">参会签到</h2>
+                  <p id="meetingAttendanceSubtitle">点击状态即自动保存；迟到和缺席可登记乐捐金额。</p>
+                </div>
+                <button class="modal-close" type="button" data-meeting-attendance-close aria-label="关闭">×</button>
+              </div>
+              <div id="meetingAttendanceSummary" class="meeting-attendance-summary"></div>
+              <div id="meetingAttendanceList" class="meeting-attendance-list"></div>
+              <div class="modal-actions">
+                <button class="secondary" type="button" data-meeting-attendance-close>完成</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="meetingCreateModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="meetingCreateTitle" aria-hidden="true">
+            <div class="modal-card meeting-create-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="meetingCreateTitle">创建会议</h2>
+                  <p>先确定时间和主题，创建后立即勾选本场议题。</p>
+                </div>
+                <button class="modal-close" type="button" data-meeting-create-close aria-label="关闭">×</button>
+              </div>
+              <form id="meetingCreateForm" class="form-grid meeting-create-form">
+                <label>会议日期<input name="meeting_date" type="date" required /></label>
+                <label>开始时间<input name="start_time" type="time" /></label>
+                <label class="meeting-create-title-field">会议标题<input name="title" placeholder="默认使用系统会议标题" /></label>
+                <label class="meeting-create-summary-field">会议说明<textarea name="summary" placeholder="会议目标或需要提前准备的内容"></textarea></label>
+                <div class="modal-actions meeting-create-actions">
+                  <button class="secondary" type="button" data-meeting-create-close>取消</button>
+                  <button type="submit">创建并选择议题</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="meetingEmailModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="meetingEmailTitle" aria-hidden="true">
+            <div class="modal-card meeting-email-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="meetingEmailTitle">生成会议纪要邮件</h2>
+                  <p id="meetingEmailSubtitle">确认本次纪要需要包含的系统内容。</p>
+                </div>
+                <button class="modal-close" type="button" data-meeting-email-close aria-label="关闭">×</button>
+              </div>
+              <form id="meetingEmailForm" class="meeting-email-form">
+                <input name="meeting_id" type="hidden" />
+                <label class="meeting-email-option"><input name="include_thanks" type="checkbox" checked /><span><strong>附带本周 Thank You</strong><small>作为最后一个议题汇总本周感谢明细和 Thank You 之星。</small></span></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-meeting-email-close>取消</button>
+                  <button type="submit">生成邮件</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="memberScoreModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="memberScoreTitle" aria-hidden="true">
+            <section class="modal-card member-score-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="memberScoreTitle">个人红黑榜</h2>
+                  <p id="memberScoreSubtitle">查看该成员的全部积分记录。</p>
+                </div>
+                <button class="icon-button" type="button" data-member-score-close aria-label="关闭">×</button>
+              </div>
+              <div id="memberScoreSummary" class="member-score-summary"></div>
+              <div id="memberScoreList" class="member-score-list"></div>
+            </section>
           </div>
 
           <div id="linkEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="linkEditTitle" aria-hidden="true">
@@ -432,10 +573,13 @@
                   <h2>例会议题沙盘</h2>
                   <p>先选会议，再处理议题、纪要、签到和邮件。</p>
                 </div>
-                <div class="month-switch">
-                  <button id="prevMeetingMonthBtn" class="secondary" type="button">上月</button>
-                  <strong id="meetingMonthTitle"></strong>
-                  <button id="nextMeetingMonthBtn" class="secondary" type="button">下月</button>
+                <div class="meeting-calendar-actions">
+                  <button id="openMeetingCreateBtn" type="button">创建会议</button>
+                  <div class="month-switch">
+                    <button id="prevMeetingMonthBtn" class="secondary" type="button">上月</button>
+                    <strong id="meetingMonthTitle"></strong>
+                    <button id="nextMeetingMonthBtn" class="secondary" type="button">下月</button>
+                  </div>
                 </div>
               </div>
               <div id="meetingCalendar" class="calendar meeting-calendar"></div>
@@ -473,12 +617,14 @@
                   <h3>生成周例会</h3>
                   <form id="meetingForm" class="form-grid compact">
                     <input name="meeting_date" type="date" />
+                    <input name="start_time" type="time" title="会议开始时间" />
                     <input name="title" placeholder="会议标题，默认周例会" />
                     <input name="summary" placeholder="会议摘要" />
-                    <button>创建单场会议</button>
+                    <button>创建并选择议题</button>
                   </form>
                   <form id="meetingGenerateForm" class="form-grid compact meeting-generate-form">
                     <input name="start_date" type="date" />
+                    <input name="start_time" type="time" title="每场会议开始时间" />
                     <select name="weeks">
                       <option value="4">生成未来 4 周</option>
                       <option value="8">生成未来 8 周</option>
@@ -492,20 +638,20 @@
                 </div>
 
                 <div class="admin-block">
-                <h2>议题类型</h2>
+                <h2>一级议题分类</h2>
                 <form id="topicTypeForm" class="form-row slim">
-                  <input name="name" placeholder="例如：质量风险" required />
+                  <input name="name" placeholder="例如：质量、项目、人员" required />
                   <input name="color" type="color" value="#3370ff" />
-                  <button>新增类型</button>
+                  <button>新增一级分类</button>
                 </form>
                 <div id="topicTypeList" class="chip-list"></div>
                 </div>
 
                 <div class="admin-block">
-                <h2>预设议题</h2>
+                <h2>二级预设议题</h2>
                 <form id="topicOptionForm" class="form-grid compact">
                   <select name="type_id" data-topic-types required></select>
-                  <input name="title" placeholder="例如：本周阻塞问题" required />
+                  <input name="title" placeholder="例如：本周质量风险复盘" required />
                   <select name="recurrence_rule">
                     <option value="weekly:1">每 1 周</option>
                     <option value="weekly:2">每 2 周</option>
@@ -523,11 +669,11 @@
                   <input name="expected_output" placeholder="期望产出，例如形成结论" />
                   <input name="materials" placeholder="会前材料或链接" />
                   <textarea name="default_detail" placeholder="默认说明，可留空"></textarea>
-                  <button>新增选项</button>
+                  <button>新增二级议题</button>
                 </form>
                 </div>
               </div>
-              <h3>预设议题清单</h3>
+              <h3>两级议题库</h3>
               <div id="topicPresetList" class="table"></div>
             </section>
           </section>
@@ -598,7 +744,7 @@
               <section class="panel admin-only">
                 <h2>记录个人积分</h2>
                 <form id="scoreForm" class="form-grid compact">
-                  <select name="user_id" data-users required></select>
+                  <select name="user_id" data-rule-users required></select>
                   <input name="rule_id" type="hidden" />
                   <div class="selected-rule-box" id="selectedScoreRule">从下方红黑榜细则中勾选规则</div>
                   <select name="kind"><option value="red">红榜加分</option><option value="black">黑榜扣分</option></select>
@@ -619,13 +765,22 @@
                   <h2>年度积分总览</h2>
                   <p>红榜与黑榜分别统计，不折算净分。</p>
                 </div>
-                <label class="year-chip">年份<input id="scoreYear" type="number" min="2000" max="2100" step="1" /></label>
+                <div class="annual-score-tools">
+                  <form id="blackVisibilityForm" class="score-visibility-settings admin-only">
+                    <label><input name="show_points" type="checkbox" /> <span>公开黑榜积分</span></label>
+                    <label><input name="show_details" type="checkbox" /> <span>公开黑榜明细</span></label>
+                    <button class="secondary" type="submit">保存显示设置</button>
+                  </form>
+                  <label class="year-chip">年份<input id="scoreYear" type="number" min="2000" max="2100" step="1" /></label>
+                </div>
               </div>
               <div id="annualScoreTable" class="annual-score-wrap"></div>
             </section>
             <section class="panel">
-              <h2>积分明细</h2>
-              <div id="scoreList" class="table"></div>
+              <div class="panel-title compact-title">
+                <div><h2>积分明细</h2><p>按时间倒序显示当前筛选范围内的全部记录。</p></div>
+              </div>
+              <div id="scoreList" class="table score-detail-scroll"></div>
             </section>
           </section>
 
@@ -705,7 +860,7 @@
               <div class="panel-title">
                 <div>
                   <h2>用户类型与权限</h2>
-                  <p>先创建用户类型并配置模块权限；访客使用单独的只读权限模板。</p>
+                  <p>页面只保留类型概览；点击配置后设置模块权限、业务参与名单并评估影响。</p>
                 </div>
               </div>
               <form id="userTypeForm" class="user-type-create-form">
@@ -720,7 +875,7 @@
               <div class="panel-title">
                 <div>
                   <h2>账号管理</h2>
-                  <p>新增账号必须指定用户类型；只有确需管理系统的账号才设置为管理员。</p>
+                  <p>新增账号必须指定用户类型；可勾选多个账号后批量调整类型。</p>
                 </div>
               </div>
               <form id="userForm" class="user-create-form">
@@ -731,6 +886,12 @@
                 <input name="password" placeholder="初始密码，默认 123456" />
                 <button>新增用户</button>
               </form>
+              <div id="userBulkToolbar" class="user-bulk-toolbar hidden">
+                <strong><span id="userBulkCount">0</span> 个账号已选择</strong>
+                <select id="userBulkType" aria-label="批量设置用户类型"></select>
+                <button id="userBulkApplyBtn" type="button">批量设置类型</button>
+                <button id="userBulkClearBtn" class="secondary" type="button">取消选择</button>
+              </div>
               <div id="userList" class="table"></div>
             </section>
           </section>
@@ -784,6 +945,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260713-dynamic-user-types-v1"></script>
+    <script type="module" src="/app.js?v=20260714-collab-score-v4"></script>
   </body>
 </html>

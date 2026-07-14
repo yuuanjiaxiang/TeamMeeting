@@ -16,10 +16,13 @@ const state = {
   meetings: [],
   morningItems: [],
   morningUsers: [],
+  thankUsers: [],
   morningReadOnly: false,
   morningCarriedCount: 0,
   userTypes: [],
   moduleCatalog: [],
+  permissionPreview: null,
+  sessions: [],
   settings: [],
   publicSettings: {},
   backups: [],
@@ -43,6 +46,7 @@ const state = {
   thankYear: new Date().getFullYear(),
   thankScope: "month",
   thankMonth: new Date().getMonth() + 1,
+  rulesPeriodInitialized: false,
   viewMode: safeStorageGet("teamLoopViewMode", "admin"),
   showLogin: false,
   uiTheme: safeStorageGet("teamLoopThemeVersion", "") === uiThemeVersion
@@ -68,9 +72,24 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
-const teamReactionOptions = ["+1", "👍", "🤑", "🤔", "收到", "辛苦了", "已跟进"];
+const teamReactionOptions = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"];
+const teamReactionLabels = {
+  "+1": "+1",
+  "👍": "点赞",
+  "👏": "鼓掌",
+  "😊": "微笑",
+  "🎉": "庆祝",
+  "🤑": "赞赏",
+  "🤔": "思考",
+  "收到": "收到",
+  "辛苦了": "辛苦了",
+  "已跟进": "已跟进",
+};
 const teamReactionEmojiAssets = {
   "1f44d": "/vendor/team-reaction-emoji/1f44d.svg",
+  "1f44f": "/vendor/team-reaction-emoji/1f44f.svg",
+  "1f60a": "/vendor/team-reaction-emoji/1f60a.svg",
+  "1f389": "/vendor/team-reaction-emoji/1f389.svg",
   "1f911": "/vendor/team-reaction-emoji/1f911.svg",
   "1f914": "/vendor/team-reaction-emoji/1f914.svg",
 };
@@ -78,6 +97,8 @@ const teamReactionEmojiDataSource = "/vendor/emoji-picker-element-data/zh/emojib
 let activeReactionTarget = null;
 let pendingLinkDeleteId = null;
 let activePageRefreshId = 0;
+let authSyncInFlight = false;
+let lastAuthSyncAt = 0;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -116,7 +137,7 @@ function isAdminAccount() {
 }
 
 function isAdminView() {
-  return isAdminAccount() && state.viewMode !== "user";
+  return isAdminAccount() && state.viewMode !== "user" && !state.permissionPreview;
 }
 
 function isGuest() {
@@ -124,6 +145,7 @@ function isGuest() {
 }
 
 function canAccessPage(id) {
+  if (state.permissionPreview) return state.permissionPreview.modules.includes(id);
   if (isGuest()) return Array.isArray(state.permissions?.modules) && state.permissions.modules.includes(id);
   if (isAdminView()) return true;
   if (["users", "system"].includes(id)) return false;
@@ -137,6 +159,7 @@ function canManageLinks() {
 }
 
 function canOperate(moduleKey, action = "view") {
+  if (state.permissionPreview) return Boolean(state.permissionPreview.operations?.[moduleKey]?.[action]);
   if (isAdminAccount()) return true;
   const operations = state.permissions?.operations;
   if (!operations || !operations[moduleKey]) return action === "view" ? canAccessPage(moduleKey) : false;
@@ -154,6 +177,49 @@ function canLoadModule(id) {
 function setViewMode(mode) {
   state.viewMode = mode === "user" ? "user" : "admin";
   safeStorageSet("teamLoopViewMode", state.viewMode);
+}
+
+function permissionOperations(type) {
+  const operations = {};
+  state.moduleCatalog.forEach((module) => {
+    const source = type?.permissions?.[module.key] || {};
+    operations[module.key] = {
+      view: Boolean(source.view),
+      create: Boolean(source.create),
+      edit: Boolean(source.edit),
+      delete: Boolean(source.delete),
+    };
+  });
+  return operations;
+}
+
+function enterPermissionPreview(typeKey, proposedPermissions = null, proposedName = "") {
+  const type = state.userTypes.find((item) => item.key === typeKey);
+  if (!type) return;
+  const operations = permissionOperations({ ...type, permissions: proposedPermissions || type.permissions });
+  const modules = Object.entries(operations).filter(([, actions]) => actions.view).map(([key]) => key);
+  if (!modules.length) {
+    toast("该类型当前没有可查看模块，请先勾选查看权限");
+    return;
+  }
+  state.permissionPreview = {
+    key: type.key,
+    name: proposedName || type.name,
+    operations,
+    modules,
+  };
+  setViewMode("user");
+  applyAuthView();
+  switchPage(firstAccessiblePage());
+  refreshAll().catch((error) => toast(error.message));
+}
+
+function exitPermissionPreview() {
+  state.permissionPreview = null;
+  setViewMode("admin");
+  applyAuthView();
+  switchPage("users");
+  refreshAll().catch((error) => toast(error.message));
 }
 
 function escapeHtml(value = "") {
@@ -251,7 +317,15 @@ async function api(path, options = {}) {
     ...options,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "请求失败");
+  if (!response.ok) {
+    const error = new Error(data.error || "请求失败");
+    error.status = response.status;
+    error.data = data;
+    if (response.status === 401 && state.user && path !== "/api/login") {
+      transitionToLoggedOut(true, true).catch(() => {});
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -366,17 +440,64 @@ function applyAuthView() {
     viewModeBtn.classList.toggle("hidden", !isAdminAccount());
     viewModeBtn.textContent = isAdminView() ? "切换用户视图" : "切换管理视图";
   }
+  const previewBanner = $("#permissionPreviewBanner");
+  previewBanner?.classList.toggle("hidden", !state.permissionPreview);
+  if (state.permissionPreview) {
+    $("#permissionPreviewTitle").textContent = `正在预览：${state.permissionPreview.name}`;
+    $("#permissionPreviewSummary").textContent = `可查看 ${state.permissionPreview.modules.length} 个模块，服务端仍保持管理员身份`;
+  }
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
   $("#teamChatForm")?.classList.toggle("hidden", guest || !canOperate("members", "create"));
   $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("thanks", "create"));
   $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("links", "create"));
-  $("#morningCreatePanel")?.classList.toggle("hidden", guest || !canOperate("morning", "create"));
-  $("#personalMorningCreateForm")?.classList.toggle("hidden", guest || !canOperate("morning", "create"));
+  $("#openMeetingCreateBtn")?.classList.toggle("hidden", guest || !canOperate("meetings", "create"));
+  const cannotJoinMorning = !isAdminView() && state.user?.eligible_morning !== undefined && !Boolean(state.user.eligible_morning);
+  $("#morningCreatePanel")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
+  $("#personalMorningCreateForm")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
   if (!canAccessPage(state.currentPage)) {
     switchPage(firstAccessiblePage());
   } else {
     renderPageToolbar();
     renderNav();
+  }
+}
+
+async function transitionToLoggedOut(showLogin = true, refresh = true) {
+  closeUserTypePermissionModal();
+  closeUserAccountModal();
+  state.user = null;
+  state.permissions = {};
+  state.permissionPreview = null;
+  state.sessions = [];
+  state.thankUsers = [];
+  state.showLogin = showLogin;
+  applyAuthView();
+  if (refresh) await refreshAll();
+}
+
+async function syncAuthState(force = false) {
+  if (authSyncInFlight) return;
+  const now = Date.now();
+  if (!force && now - lastAuthSyncAt < 15000) return;
+  authSyncInFlight = true;
+  lastAuthSyncAt = now;
+  try {
+    const data = await api("/api/me");
+    if (state.user && !data.user) {
+      await transitionToLoggedOut(true, true);
+      toast("登录状态已结束，请重新登录");
+      return;
+    }
+    if (data.user) {
+      const changedUser = !state.user || Number(state.user.id) !== Number(data.user.id);
+      state.user = data.user;
+      state.permissions = data.permissions || {};
+      state.publicSettings = data.settings || state.publicSettings;
+      applyAuthView();
+      if (changedUser) await refreshAll();
+    }
+  } finally {
+    authSyncInFlight = false;
   }
 }
 
@@ -394,6 +515,12 @@ function switchPage(id) {
     $("#loginView")?.classList.add("hidden");
     $("#appView")?.classList.remove("hidden");
     $("#loginEntryBtn")?.classList.remove("hidden");
+  }
+  if (id === "rules" && !state.rulesPeriodInitialized) {
+    const now = new Date();
+    $("#fromDate").value = iso(monthStart(now));
+    $("#toDate").value = iso(now);
+    state.rulesPeriodInitialized = true;
   }
   state.currentPage = id;
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
@@ -458,11 +585,15 @@ async function loadReferenceData() {
 function populateSelects() {
   const selectUsers = state.users.length ? state.users : state.morningUsers.map((user) => ({ ...user, active: 1 }));
   const activeUsers = selectUsers.filter((user) => user.active !== 0);
+  const eligibleUsers = (scope) => activeUsers.filter((user) => user[`eligible_${scope}`] === undefined || Boolean(user[`eligible_${scope}`]));
   const userOptions = activeUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const morningUsers = state.morningUsers.length ? state.morningUsers : eligibleUsers("morning");
+  const morningOptions = morningUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const ruleOptionsUsers = eligibleUsers("rules").map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
-  const thankUsers = activeUsers.filter((user) => user.id !== state.user?.id);
+  const thankUsers = (state.thankUsers.length ? state.thankUsers : eligibleUsers("thanks")).filter((user) => user.id !== state.user?.id);
   const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
   const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
@@ -471,9 +602,12 @@ function populateSelects() {
   const userTypeCopyOptions = `<option value="">不复制权限</option>${accountTypes.map((type) => `<option value="${escapeHtml(type.key)}">复制 ${escapeHtml(type.name)} 权限</option>`).join("")}`;
 
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
-  $$("[data-morning-users]").forEach((select) => { select.innerHTML = userOptions; });
+  $$("[data-morning-users]").forEach((select) => { select.innerHTML = morningOptions; });
+  $$("[data-rule-users]").forEach((select) => { select.innerHTML = ruleOptionsUsers; });
   $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
   $$("[data-user-type-copy]").forEach((select) => { select.innerHTML = userTypeCopyOptions; });
+  const bulkType = $("#userBulkType");
+  if (bulkType) bulkType.innerHTML = `<option value="">选择目标类型</option>${userTypeOptions}`;
   $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
   $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
@@ -548,6 +682,10 @@ function settingValue(key, fallback = "") {
   const setting = state.settings.find((item) => item.key === key);
   if (setting) return setting.value;
   return state.publicSettings?.[key] ?? fallback;
+}
+
+function settingEnabled(key, fallback = true) {
+  return String(settingValue(key, fallback ? "1" : "0")) !== "0";
 }
 
 function applyBranding() {
@@ -636,6 +774,7 @@ function renderPersonalMorningCard(item) {
   }
   return `<article class="personal-reminder-card ${statusClass} ${isActive ? "calendar-focused" : ""}" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
     <form class="personal-morning-form" data-item-id="${item.id}">
+      <input type="hidden" name="expected_version" value="${Number(item.version || 1)}">
       <div class="personal-card-head">
         <div>
           <strong>${escapeHtml(item.title)}</strong>
@@ -1137,6 +1276,7 @@ function renderMorningItem(item) {
     <article class="morning-item-card morning-list-item ${statusClass}" data-morning-history-id="${item.id}">
       ${canEdit ? `
         <form class="morning-item-form morning-list-item-form" data-item-id="${item.id}">
+          <input type="hidden" name="expected_version" value="${Number(item.version || 1)}">
           <div class="morning-status-cell">
             <div class="morning-badge-stack">
               <span class="morning-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
@@ -1156,7 +1296,7 @@ function renderMorningItem(item) {
           <div class="morning-item-actions">
             <button type="submit">保存</button>
             <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
-            ${canOperate("morning", "delete") ? `<button class="danger morning-delete-btn" type="button" data-item-id="${item.id}">删除</button>` : ""}
+            ${canOperate("morning", "delete") ? `<button class="danger morning-delete-btn" type="button" data-item-id="${item.id}" data-item-version="${Number(item.version || 1)}">删除</button>` : ""}
           </div>
         </form>
       ` : `
@@ -1295,9 +1435,12 @@ async function loadUsers() {
     api("/api/user-types"),
   ]);
   state.users = data.users;
+  const currentAccount = state.users.find((item) => Number(item.id) === Number(state.user?.id));
+  if (state.user && currentAccount) state.user = { ...state.user, ...currentAccount };
   state.userTypes = typeData.types;
   state.moduleCatalog = typeData.modules;
   $("#userList").innerHTML = renderUserTable(data.users);
+  clearUserBulkSelection();
   renderUserTypePermissions();
   populateSelects();
 }
@@ -1309,27 +1452,70 @@ function renderUserTypeOptions(selected) {
 
 function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
-  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th>账号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>重置密码</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
-      <td>
-        <input form="userEdit${user.id}" name="username" value="${escapeHtml(user.username)}" placeholder="账号" required>
-      </td>
-      <td>
-        <form id="userEdit${user.id}" class="user-edit-form user-inline-form" data-user-id="${user.id}">
-          <input name="display_name" value="${escapeHtml(user.display_name)}" placeholder="姓名" required>
-        </form>
-      </td>
-      <td><select form="userEdit${user.id}" name="user_type" required>${renderUserTypeOptions(user.user_type)}</select></td>
-      <td><select form="userEdit${user.id}" name="role" ${user.id === state.user?.id ? "disabled" : ""}>
-        <option value="user" ${user.role === "user" ? "selected" : ""}>按类型授权</option>
-        <option value="admin" ${user.role === "admin" ? "selected" : ""}>系统管理员</option>
-      </select></td>
-      <td><input form="userEdit${user.id}" class="user-password-input" name="password" placeholder="不修改则留空"></td>
-      <td>
-        <button form="userEdit${user.id}" type="submit">保存</button>
+      <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}"></td>
+      <td><strong>${escapeHtml(user.username)}</strong></td>
+      <td>${escapeHtml(user.display_name)}</td>
+      <td><span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span></td>
+      <td>${user.role === "admin" ? '<span class="pill admin">系统管理员</span>' : "按类型授权"}</td>
+      <td><div class="user-scope-mini">${[
+        ["members", "成员"], ["morning", "早会"], ["rules", "榜单"], ["thanks", "感谢"],
+      ].map(([scope, label]) => `<span class="${Boolean(user[`eligible_${scope}`]) ? "on" : "off"}">${label}</span>`).join("")}</div></td>
+      <td class="user-row-actions">
+        <button class="secondary user-account-edit-btn" type="button" data-user-id="${user.id}">编辑</button>
         ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
       </td>
     </tr>`).join("")}</tbody></table></div>`;
+}
+
+function selectedBulkUserIds() {
+  return $$(".user-bulk-checkbox:checked").map((input) => Number(input.value)).filter(Boolean);
+}
+
+function updateUserBulkToolbar() {
+  const selected = selectedBulkUserIds();
+  $("#userBulkToolbar")?.classList.toggle("hidden", selected.length === 0);
+  if ($("#userBulkCount")) $("#userBulkCount").textContent = String(selected.length);
+  const checkboxes = $$(".user-bulk-checkbox");
+  const selectAll = $("#userBulkSelectAll");
+  if (selectAll) {
+    selectAll.checked = checkboxes.length > 0 && selected.length === checkboxes.length;
+    selectAll.indeterminate = selected.length > 0 && selected.length < checkboxes.length;
+  }
+}
+
+function clearUserBulkSelection() {
+  $$(".user-bulk-checkbox, #userBulkSelectAll").forEach((input) => { input.checked = false; input.indeterminate = false; });
+  updateUserBulkToolbar();
+}
+
+function openUserAccountModal(userId) {
+  const user = state.users.find((item) => Number(item.id) === Number(userId));
+  const form = $("#userAccountEditForm");
+  if (!user || !form) return;
+  form.dataset.userId = String(user.id);
+  form.elements.username.value = user.username || "";
+  form.elements.display_name.value = user.display_name || "";
+  form.elements.user_type.innerHTML = renderUserTypeOptions(user.user_type);
+  form.elements.user_type.value = user.user_type;
+  form.elements.role.value = user.role || "user";
+  form.elements.role.disabled = Number(user.id) === Number(state.user?.id);
+  form.elements.password.value = "";
+  $("#userAccountModalTitle").textContent = `编辑账号：${user.display_name}`;
+  const modal = $("#userAccountModal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.username.focus();
+}
+
+function closeUserAccountModal() {
+  const modal = $("#userAccountModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
 }
 
 function renderUserTypePermissions() {
@@ -1339,52 +1525,128 @@ function renderUserTypePermissions() {
     target.innerHTML = "<p>暂无用户类型配置</p>";
     return;
   }
+  const scopeLabels = { members: "团队成员", morning: "早例会", rules: "红黑榜", thanks: "Thank You" };
   target.innerHTML = state.userTypes.map((type) => {
     const isGuestType = Boolean(type.is_guest || type.key === "guest");
-    const legacyModules = new Set(type.modules || []);
-    const permissions = type.permissions || {};
-    const actions = isGuestType ? [["view", "可查看"]] : [
-      ["view", "查看"],
-      ["create", "新增"],
-      ["edit", "编辑"],
-      ["delete", "删除"],
-    ];
+    const visibleModules = state.moduleCatalog.filter((module) => Boolean(type.permissions?.[module.key]?.view));
+    const participation = type.participation || {};
     return `
-      <form class="permission-card user-type-permission-form ${isGuestType ? "guest-permission-card" : ""}" data-type-key="${escapeHtml(type.key)}">
-        <div class="user-type-config-head">
-          <div class="user-type-identity">
-            <div class="user-type-name-row">
-              <input name="name" value="${escapeHtml(type.name)}" maxlength="30" ${isGuestType ? "disabled" : ""} aria-label="用户类型名称">
-              <span class="pill ${isGuestType ? "guest" : ""}">${isGuestType ? "未登录访问" : `${Number(type.user_count || 0)} 个账号`}</span>
-            </div>
-            <input name="description" value="${escapeHtml(type.description || "")}" maxlength="200" ${isGuestType ? "disabled" : ""} placeholder="补充该类型的适用范围" aria-label="用户类型说明">
-          </div>
+      <article class="user-type-summary-card ${isGuestType ? "guest" : ""}">
+        <div class="user-type-summary-head">
+          <div><strong>${escapeHtml(type.name)}</strong><span>${isGuestType ? "未登录访问模板" : `${Number(type.user_count || 0)} 个账号`}</span></div>
+          <button class="user-type-config-btn" type="button" data-type-key="${escapeHtml(type.key)}">配置</button>
+        </div>
+        <p>${escapeHtml(type.description || "尚未填写类型说明")}</p>
+        <div class="user-type-summary-row"><span>可访问模块</span><div>${visibleModules.length ? visibleModules.map((module) => `<span class="scope-chip module">${escapeHtml(module.name)}</span>`).join("") : '<span class="scope-chip off">无</span>'}</div></div>
+        ${isGuestType ? "" : `<div class="user-type-summary-row"><span>参与名单</span><div>${Object.entries(scopeLabels).map(([scope, label]) => `<span class="scope-chip ${participation[scope] ? "on" : "off"}">${label}</span>`).join("")}</div></div>`}
+        <div class="user-type-summary-actions">
+          <button class="secondary permission-preview-btn" type="button" data-type-key="${escapeHtml(type.key)}">预览视图</button>
           ${isGuestType
-            ? `<span class="user-type-lock-note">访客仅可配置查看范围</span>`
+            ? ""
             : Number(type.user_count || 0) > 0
-              ? `<button class="secondary user-type-delete-btn" type="button" disabled title="请先迁移该类型下的用户">有用户，不能删除</button>`
+              ? `<span class="user-type-delete-note">迁移账号后可删除</span>`
               : `<button class="danger user-type-delete-btn" type="button" data-type-key="${escapeHtml(type.key)}" data-type-name="${escapeHtml(type.name)}">删除类型</button>`}
         </div>
-        <div class="permission-matrix-wrap">
-          <table class="permission-matrix">
-            <thead><tr><th>模块</th>${actions.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead>
-            <tbody>${state.moduleCatalog.map((module) => {
-              const modulePermissions = permissions[module.key] || {};
-              const guestUnsupported = isGuestType && module.key === "dashboard";
-              return `<tr>
-                <th><strong>${escapeHtml(module.name)}</strong><small>${guestUnsupported ? "工作台依赖登录身份，访客不可用" : escapeHtml(module.description || "")}</small></th>
-                ${actions.map(([action, label]) => {
-                  const checked = !guestUnsupported && (modulePermissions[action] ?? legacyModules.has(module.key));
-                  return `<td><label class="permission-action-check ${guestUnsupported ? "disabled" : ""}" title="${escapeHtml(module.name)} · ${label}"><input type="checkbox" name="permission" value="${escapeHtml(module.key)}:${action}" data-permission-module="${escapeHtml(module.key)}" data-permission-action="${action}" ${checked ? "checked" : ""} ${guestUnsupported ? "disabled" : ""}><span>${guestUnsupported ? "需登录" : label}</span></label></td>`;
-                }).join("")}
-              </tr>`;
-            }).join("")}</tbody>
-          </table>
-        </div>
-        <button type="submit">保存${isGuestType ? "访客范围" : "类型与权限"}</button>
-      </form>
+      </article>
     `;
   }).join("");
+}
+
+function renderUserTypePermissionEditor(type) {
+  const target = $("#userTypePermissionEditor");
+  if (!target || !type) return;
+  const isGuestType = Boolean(type.is_guest || type.key === "guest");
+  const legacyModules = new Set(type.modules || []);
+  const actions = isGuestType ? [["view", "可查看"]] : [["view", "查看"], ["create", "新增"], ["edit", "编辑"], ["delete", "删除"]];
+  const scopeLabels = { members: "团队成员展示", morning: "早例会跟踪", rules: "红黑榜名单", thanks: "Thank You 名单" };
+  target.innerHTML = `<form class="user-type-permission-form" data-type-key="${escapeHtml(type.key)}">
+    <input type="hidden" name="expected_version" value="${Number(type.version || 1)}">
+    <div class="permission-modal-identity">
+      <label>类型名称<input name="name" value="${escapeHtml(type.name)}" maxlength="30" ${isGuestType ? "disabled" : ""}></label>
+      <label>类型说明<input name="description" value="${escapeHtml(type.description || "")}" maxlength="200" ${isGuestType ? "disabled" : ""} placeholder="说明适用对象和使用边界"></label>
+    </div>
+    <section class="permission-modal-section ${isGuestType ? "hidden" : ""}">
+      <div class="permission-section-title"><strong>业务参与名单</strong><span>与页面访问权限相互独立</span></div>
+      <div class="participation-grid">${Object.entries(scopeLabels).map(([scope, label]) => `<label class="participation-toggle"><input type="checkbox" name="participation" value="${scope}" ${type.participation?.[scope] ? "checked" : ""}><span><strong>${label}</strong><small>${scope === "members" ? "显示成员卡片" : scope === "morning" ? "可登记和被跟踪事项" : scope === "rules" ? "可记录并进入积分看板" : "可被感谢并进入排名"}</small></span></label>`).join("")}</div>
+    </section>
+    <section class="permission-modal-section">
+      <div class="permission-section-title"><strong>模块操作权限</strong><span>${isGuestType ? "访客仅支持查看" : "操作权限会自动包含查看权限"}</span></div>
+      <div class="permission-matrix-wrap"><table class="permission-matrix"><thead><tr><th>模块</th>${actions.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${state.moduleCatalog.map((module) => {
+        const modulePermissions = type.permissions?.[module.key] || {};
+        const guestUnsupported = isGuestType && module.key === "dashboard";
+        return `<tr><th><strong>${escapeHtml(module.name)}</strong><small>${guestUnsupported ? "访客不可用" : escapeHtml(module.description || "")}</small></th>${actions.map(([action, label]) => {
+          const checked = !guestUnsupported && (modulePermissions[action] ?? legacyModules.has(module.key));
+          return `<td><label class="permission-action-check ${guestUnsupported ? "disabled" : ""}" title="${escapeHtml(module.name)} · ${label}"><input type="checkbox" name="permission" value="${escapeHtml(module.key)}:${action}" data-permission-module="${escapeHtml(module.key)}" data-permission-action="${action}" ${checked ? "checked" : ""} ${guestUnsupported ? "disabled" : ""}><span>${guestUnsupported ? "需登录" : label}</span></label></td>`;
+        }).join("")}</tr>`;
+      }).join("")}</tbody></table></div>
+    </section>
+    <div class="permission-impact-summary" data-permission-impact><strong>当前配置</strong><span>${isGuestType ? "影响所有未登录访客" : `关联 ${Number(type.user_count || 0)} 个账号${type.assigned_users?.length ? `：${escapeHtml(type.assigned_users.join("、"))}` : ""}`}</span></div>
+    <div class="modal-actions permission-modal-actions"><button class="secondary" type="button" data-user-type-modal-close>取消</button><button class="secondary permission-preview-btn" type="button" data-type-key="${escapeHtml(type.key)}">预览视图</button><button class="secondary permission-impact-btn" type="button" data-type-key="${escapeHtml(type.key)}">评估影响</button><button type="submit">保存配置</button></div>
+  </form>`;
+}
+
+function openUserTypePermissionModal(typeKey) {
+  const type = state.userTypes.find((item) => item.key === typeKey);
+  if (!type) return;
+  renderUserTypePermissionEditor(type);
+  $("#userTypePermissionTitle").textContent = `配置：${type.name}`;
+  $("#userTypePermissionSubtitle").textContent = type.is_guest ? "设置未登录访客可以查看的模块。" : "页面权限与业务参与名单分开设置。";
+  const modal = $("#userTypePermissionModal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function closeUserTypePermissionModal() {
+  const modal = $("#userTypePermissionModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function permissionFormPermissions(form) {
+  const permissions = {};
+  state.moduleCatalog.forEach((module) => {
+    permissions[module.key] = { view: false, create: false, edit: false, delete: false };
+  });
+  new FormData(form).getAll("permission").forEach((value) => {
+    const [moduleKey, action] = String(value).split(":");
+    if (permissions[moduleKey] && Object.hasOwn(permissions[moduleKey], action)) permissions[moduleKey][action] = true;
+  });
+  return permissions;
+}
+
+function permissionFormParticipation(form) {
+  const selected = new Set(new FormData(form).getAll("participation").map(String));
+  return {
+    members: selected.has("members"),
+    morning: selected.has("morning"),
+    rules: selected.has("rules"),
+    thanks: selected.has("thanks"),
+  };
+}
+
+async function assessPermissionImpact(form) {
+  const target = form.querySelector("[data-permission-impact]");
+  if (target) target.innerHTML = "<strong>正在评估</strong><span>对比服务器上的最新权限…</span>";
+  const data = await api(`/api/user-types/${form.dataset.typeKey}/impact`, {
+    method: "POST",
+    body: JSON.stringify({
+      permissions: permissionFormPermissions(form),
+      participation: permissionFormParticipation(form),
+    }),
+  });
+  const enabled = (data.changed || []).filter((item) => item.enabled);
+  const disabled = (data.changed || []).filter((item) => !item.enabled);
+  const users = data.affected_users?.length ? `：${data.affected_users.join("、")}` : "";
+  const scopeChanges = data.participation_changed || [];
+  const totalChanges = (data.changed || []).length + scopeChanges.length;
+  const scopeSummary = scopeChanges.length ? `；调整名单：${scopeChanges.map((item) => `${item.enabled ? "加入" : "移出"}${item.name}`).join("、")}` : "";
+  if (target) target.innerHTML = totalChanges
+    ? `<strong>将变更 ${totalChanges} 项配置</strong><span>权限新增 ${enabled.length} 项、收回 ${disabled.length} 项${escapeHtml(scopeSummary)}；影响 ${data.affected_count} 个账号${escapeHtml(users)}</span>`
+    : `<strong>配置没有变化</strong><span>关联 ${data.affected_count} 个账号${escapeHtml(users)}</span>`;
+  return data;
 }
 
 async function loadSystemAdmin() {
@@ -1666,7 +1928,10 @@ function renderRuleSelectOptions(selectedId = "") {
 function renderScoreList(scores) {
   const list = $("#scoreList");
   if (!list) return;
-  if (!scores.length) {
+  const visibleScores = isAdminView() || settingEnabled("red_black_show_black_details")
+    ? scores
+    : scores.filter((score) => score.kind !== "black");
+  if (!visibleScores.length) {
     list.innerHTML = "<p>暂无积分记录</p>";
     return;
   }
@@ -1674,12 +1939,12 @@ function renderScoreList(scores) {
     <table>
       <thead><tr><th>日期</th><th>成员</th><th>类型</th><th>积分</th><th>规则</th><th>依据</th><th>操作</th></tr></thead>
       <tbody>
-        ${scores.map((score) => {
+        ${visibleScores.map((score) => {
           const editable = isAdminView() && score.score_date === iso(new Date());
           if (!editable) {
             return `<tr>
               <td>${escapeHtml(score.score_date)}</td>
-              <td>${escapeHtml(score.display_name)}</td>
+              <td><button class="score-member-link" type="button" data-score-user-id="${score.user_id}" data-score-user-name="${escapeHtml(score.display_name)}">${escapeHtml(score.display_name)}</button></td>
               <td>${score.kind === "red" ? "红榜" : "黑榜"}</td>
               <td>${escapeHtml(score.points)}</td>
               <td>${escapeHtml(score.rule_title || "-")}</td>
@@ -1705,6 +1970,45 @@ function renderScoreList(scores) {
     </table>`;
 }
 
+function closeMemberScoreModal() {
+  const modal = $("#memberScoreModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+async function openMemberScoreModal(userId, displayName) {
+  const modal = $("#memberScoreModal");
+  const list = $("#memberScoreList");
+  if (!modal || !list) return;
+  $("#memberScoreTitle").textContent = `${displayName || "成员"}的红黑榜`;
+  $("#memberScoreSubtitle").textContent = "按时间倒序展示全部历史积分记录。";
+  list.innerHTML = '<p class="empty-note">正在加载...</p>';
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  try {
+    const data = await api(`/api/scores?user_id=${encodeURIComponent(userId)}`);
+    const records = (data.scores || []).filter((score) => isAdminView()
+      || settingEnabled("red_black_show_black_details")
+      || score.kind !== "black");
+    const redTotal = records.filter((score) => score.kind === "red").reduce((sum, score) => sum + Math.abs(Number(score.points || 0)), 0);
+    const blackTotal = records.filter((score) => score.kind === "black").reduce((sum, score) => sum + Math.abs(Number(score.points || 0)), 0);
+    const showBlack = isAdminView() || settingEnabled("red_black_show_black_points");
+    $("#memberScoreSummary").innerHTML = `
+      <span class="member-score-total red"><small>红榜累计</small><strong>${redTotal}</strong></span>
+      ${showBlack ? `<span class="member-score-total black"><small>黑榜累计</small><strong>${blackTotal}</strong></span>` : ""}
+      <span class="member-score-total"><small>记录数</small><strong>${records.length}</strong></span>`;
+    list.innerHTML = records.length ? records.map((score) => `
+      <article class="member-score-record ${score.kind}">
+        <div><span class="pill ${score.kind}">${score.kind === "red" ? "红榜" : "黑榜"}</span><strong>${Math.abs(Number(score.points || 0))} 分</strong><time>${escapeHtml(score.score_date)}</time></div>
+        <h3>${escapeHtml(score.rule_title || "未关联细则")}</h3>
+        <p>${escapeHtml(score.reason || "未填写事实依据")}</p>
+      </article>`).join("") : '<p class="empty-note">暂无相关积分记录。</p>';
+  } catch (error) {
+    list.innerHTML = `<p class="empty-note">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function scoreYearValue() {
   const input = $("#scoreYear");
   const fallback = new Date().getFullYear();
@@ -1721,7 +2025,7 @@ function scoreClass(value) {
   return "zero";
 }
 
-function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
+function renderAnnualScoreTable(rows = [], year = new Date().getFullYear(), showBlack = true) {
   const target = $("#annualScoreTable");
   if (!target) return;
   const months = Array.from({ length: 12 }, (_, index) => index + 1);
@@ -1729,12 +2033,14 @@ function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
     target.innerHTML = `<p class="empty-note">${year} 年暂无积分数据。</p>`;
     return;
   }
-  const maxMonthly = Math.max(1, ...rows.flatMap((row) => Object.values(row.months || {}).flatMap((value) => [Number(value.red || 0), Number(value.black || 0)])));
+  const maxMonthly = Math.max(1, ...rows.flatMap((row) => Object.values(row.months || {}).flatMap((value) => showBlack
+    ? [Number(value.red || 0), Number(value.black || 0)]
+    : [Number(value.red || 0)])));
   target.innerHTML = `
     <div class="annual-score-legend">
       <span class="annual-legend-item red"><i></i>红榜积分</span>
-      <span class="annual-legend-item black"><i></i>黑榜积分</span>
-      <small>按年度红榜积分从高到低排列，红黑榜不相互抵扣</small>
+      ${showBlack ? '<span class="annual-legend-item black"><i></i>黑榜积分</span>' : ""}
+      <small>按年度红榜积分从高到低排列${showBlack ? "，红黑榜不相互抵扣" : ""}；点击成员查看历史</small>
     </div>
     <table class="annual-score-table">
       <thead>
@@ -1748,20 +2054,20 @@ function renderAnnualScoreTable(rows = [], year = new Date().getFullYear()) {
         ${rows.map((row, rowIndex) => {
           const monthsData = row.months || {};
           return `<tr>
-            <th class="member-col"><div class="annual-member-cell"><span class="annual-member-rank">${rowIndex + 1}</span><span>${escapeHtml(row.display_name || "未命名")}</span></div></th>
+            <th class="member-col"><button class="annual-member-cell annual-member-button" type="button" data-score-user-id="${row.id}" data-score-user-name="${escapeHtml(row.display_name || "未命名")}"><span class="annual-member-rank">${rowIndex + 1}</span><span>${escapeHtml(row.display_name || "未命名")}</span></button></th>
             ${months.map((month) => {
               const value = monthsData[String(month)] || {};
               const red = Number(value.red || 0);
               const black = Number(value.black || 0);
-              if (!red && !black) return `<td><span class="annual-score-empty">—</span></td>`;
+              if (!red && (!showBlack || !black)) return `<td><span class="annual-score-empty">—</span></td>`;
               const redStrength = 0.55 + Math.min(1, red / maxMonthly) * 0.35;
               const blackStrength = 0.55 + Math.min(1, black / maxMonthly) * 0.35;
               return `<td><div class="annual-month-score">
                 ${red ? `<span class="score-red" style="--score-strength:${redStrength}"><b>红</b>${red}</span>` : ""}
-                ${black ? `<span class="score-black" style="--score-strength:${blackStrength}"><b>黑</b>${black}</span>` : ""}
+                ${showBlack && black ? `<span class="score-black" style="--score-strength:${blackStrength}"><b>黑</b>${black}</span>` : ""}
               </div></td>`;
             }).join("")}
-            <td class="total-col"><div class="annual-total-score"><span class="score-red"><b>红榜</b>${Number(row.total_red || 0)}</span><span class="score-black"><b>黑榜</b>${Number(row.total_black || 0)}</span></div></td>
+            <td class="total-col"><div class="annual-total-score"><span class="score-red"><b>红榜</b>${Number(row.total_red || 0)}</span>${showBlack ? `<span class="score-black"><b>黑榜</b>${Number(row.total_black || 0)}</span>` : ""}</div></td>
           </tr>`;
         }).join("")}
       </tbody>
@@ -1793,8 +2099,14 @@ async function loadRulesAndScores() {
     </section>`;
   };
   $("#ruleList").innerHTML = renderRuleColumn("red", "红榜") + renderRuleColumn("black", "黑榜");
-  renderAnnualScoreTable(annualData.annual || [], year);
+  const showBlackPoints = isAdminView() || settingEnabled("red_black_show_black_points");
+  renderAnnualScoreTable(annualData.annual || [], year, showBlackPoints);
   renderScoreList(scores);
+  const visibilityForm = $("#blackVisibilityForm");
+  if (visibilityForm) {
+    visibilityForm.elements.show_points.checked = settingEnabled("red_black_show_black_points");
+    visibilityForm.elements.show_details.checked = settingEnabled("red_black_show_black_details");
+  }
   populateSelects();
   renderSelectedScoreRule();
 }
@@ -1843,25 +2155,36 @@ function renderUserOptions(selectedId, placeholder = "负责人") {
 }
 
 function renderTopicPresetList() {
-  const rows = state.topics.flatMap((topic) => (topic.options || []).map((option) => ({ ...option, typeName: topic.name })));
   const list = $("#topicPresetList");
   if (!list) return;
-  list.innerHTML = rows.length ? `
-    <div class="preset-list">
-      ${rows.map((option) => `
-        <form class="preset-row preset-form" data-option-id="${option.id}">
-          <select name="type_id">${renderPresetTypeOptions(option.type_id)}</select>
-          <input name="title" value="${escapeHtml(option.title)}" placeholder="议题名称" required>
-          <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
-          <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人")}</select>
-          <input name="duration_minutes" type="number" min="1" max="180" value="${Number(option.duration_minutes || 10)}" title="预计时长（分钟）">
-          <input name="expected_output" value="${escapeHtml(option.expected_output || "")}" placeholder="期望产出">
-          <input name="materials" value="${escapeHtml(option.materials || "")}" placeholder="会前材料">
-          <input name="default_detail" value="${escapeHtml(option.default_detail || "")}" placeholder="默认说明">
-          <button>保存</button>
-          <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
+  const groups = state.topics.filter((topic) => (topic.options || []).length);
+  list.innerHTML = groups.length ? `<div class="preset-library">
+    ${groups.map((topic, index) => `<details class="preset-primary-group" ${index === 0 ? "open" : ""}>
+      <summary><span><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span><strong>${escapeHtml(topic.name)}</strong></span><span>${topic.options.length} 个二级议题</span></summary>
+      <div class="preset-secondary-list">
+        ${topic.options.map((option) => `<form class="preset-row preset-form" data-option-id="${option.id}">
+          <div class="preset-row-main">
+            <input name="title" value="${escapeHtml(option.title)}" placeholder="二级议题名称" required>
+            <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人")}</select>
+            <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
+            <span>${Number(option.duration_minutes || 10)} 分钟</span>
+            <button>保存</button>
+            <button class="danger preset-delete-btn" type="button" data-option-id="${option.id}">删除</button>
+          </div>
+          <details class="preset-row-advanced">
+            <summary>更多设置</summary>
+            <div>
+              <label>一级分类<select name="type_id">${renderPresetTypeOptions(option.type_id)}</select></label>
+              <label>预计时长<input name="duration_minutes" type="number" min="1" max="180" value="${Number(option.duration_minutes || 10)}"></label>
+              <label>期望产出<input name="expected_output" value="${escapeHtml(option.expected_output || "")}" placeholder="例如：形成结论"></label>
+              <label>会前材料<input name="materials" value="${escapeHtml(option.materials || "")}" placeholder="文档、数据或链接"></label>
+              <label class="preset-detail-field">默认说明<textarea name="default_detail" placeholder="议题背景或讨论要求">${escapeHtml(option.default_detail || "")}</textarea></label>
+            </div>
+          </details>
         </form>`).join("")}
-    </div>` : "<p>暂无预设议题</p>";
+      </div>
+    </details>`).join("")}
+  </div>` : "<p>暂无二级预设议题，请先新增一级分类。</p>";
 }
 
 function renderPresetTopicForm(meeting) {
@@ -1994,7 +2317,7 @@ function openMeetingMinuteModal(itemId, mode = "minutes") {
   form.elements.open_issues.value = item.open_issues || "";
   form.elements.next_steps.value = item.next_steps || "";
   $("#meetingMinuteTitle").textContent = item.minutes || item.open_issues || item.next_steps ? "编辑会议纪要" : "记录会议纪要";
-  $("#meetingMinuteSubtitle").textContent = `${meeting.meeting_date} · ${meeting.title}`;
+  $("#meetingMinuteSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}`;
   $("#meetingMinuteContext").innerHTML = `
     <h3>${escapeHtml(item.title)}</h3>
     <p>${escapeHtml(item.detail || "暂无议题说明")}</p>
@@ -2012,6 +2335,179 @@ function openMeetingMinuteModal(itemId, mode = "minutes") {
   }
   form.elements.minutes.focus();
   form.elements.minutes.setSelectionRange(form.elements.minutes.value.length, form.elements.minutes.value.length);
+}
+
+function closeMeetingAgendaModal() {
+  const modal = $("#meetingAgendaModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function updateMeetingAgendaSelection() {
+  const form = $("#meetingAgendaPickerForm");
+  if (!form) return;
+  const checked = $$(".meeting-agenda-option-check:checked", form);
+  $$(".meeting-agenda-option", form).forEach((row) => {
+    const selected = Boolean($(".meeting-agenda-option-check", row)?.checked);
+    row.classList.toggle("selected", selected);
+    const owner = $(".meeting-agenda-owner", row);
+    if (owner) owner.disabled = !selected;
+  });
+  $$(".meeting-agenda-group", form).forEach((group) => {
+    const options = $$(".meeting-agenda-option-check:not(:disabled)", group);
+    const selected = options.filter((input) => input.checked);
+    const toggle = $(".meeting-agenda-group-check", group);
+    if (toggle) {
+      toggle.checked = Boolean(options.length) && selected.length === options.length;
+      toggle.indeterminate = selected.length > 0 && selected.length < options.length;
+    }
+  });
+  $("#meetingAgendaSelectedCount").textContent = `已选 ${checked.length} 项`;
+  $("#meetingAgendaSubmitBtn").disabled = checked.length === 0;
+}
+
+function renderMeetingAgendaPicker(meeting) {
+  const list = $("#meetingAgendaPickerList");
+  if (!list) return;
+  const existing = new Set((meeting.items || []).map((item) => Number(item.option_id)).filter(Boolean));
+  const groups = state.topics.filter((topic) => (topic.options || []).length);
+  list.innerHTML = groups.length ? groups.map((topic, index) => {
+    const available = (topic.options || []).filter((option) => !existing.has(Number(option.id))).length;
+    return `<section class="meeting-agenda-group" data-search="${escapeHtml(`${topic.name} ${(topic.options || []).map((option) => option.title).join(" ")}`.toLowerCase())}">
+      <div class="meeting-agenda-group-head">
+        <label><input class="meeting-agenda-group-check" type="checkbox" ${available ? "" : "disabled"}><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span><strong>${escapeHtml(topic.name)}</strong></label>
+        <span>${available} 项可选</span>
+      </div>
+      <div class="meeting-agenda-group-options">
+        ${(topic.options || []).map((option) => {
+          const added = existing.has(Number(option.id));
+          return `<div class="meeting-agenda-option ${added ? "already-added" : ""}" data-search="${escapeHtml(`${topic.name} ${option.title} ${option.default_detail || ""}`.toLowerCase())}">
+            <label class="meeting-agenda-option-main">
+              <input class="meeting-agenda-option-check" type="checkbox" value="${option.id}" ${added ? "disabled" : ""}>
+              <span><strong>${escapeHtml(option.title)}</strong><small>${escapeHtml(option.default_detail || option.expected_output || "暂无补充说明")}</small></span>
+            </label>
+            <select class="meeting-agenda-owner" disabled aria-label="${escapeHtml(option.title)}责任人">${renderUserOptions(option.owner_id, "选择责任人")}</select>
+            <span class="meeting-agenda-option-meta">${added ? "已加入" : `${Number(option.duration_minutes || 10)} 分钟`}</span>
+          </div>`;
+        }).join("")}
+      </div>
+    </section>`;
+  }).join("") : `<div class="meeting-empty"><h3>暂无预设议题</h3><p>请先在会议管理中维护一级分类和二级预设议题。</p></div>`;
+  updateMeetingAgendaSelection();
+}
+
+function openMeetingAgendaModal(meetingId) {
+  const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
+  const modal = $("#meetingAgendaModal");
+  const form = $("#meetingAgendaPickerForm");
+  if (!meeting || !modal || !form) return;
+  form.reset();
+  form.elements.meeting_id.value = meeting.id;
+  $("#meetingAgendaSearch").value = "";
+  $("#meetingAgendaSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title} · 按一级分类批量勾选`;
+  renderMeetingAgendaPicker(meeting);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  $("#meetingAgendaSearch").focus();
+}
+
+function closeMeetingAttendanceModal() {
+  const modal = $("#meetingAttendanceModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function closeMeetingCreateModal() {
+  const modal = $("#meetingCreateModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function openMeetingCreateModal() {
+  const modal = $("#meetingCreateModal");
+  const form = $("#meetingCreateForm");
+  if (!modal || !form) return;
+  form.reset();
+  form.elements.meeting_date.value = state.selectedMeetingDate || iso(new Date());
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.title.focus();
+}
+
+async function createMeetingFromForm(form) {
+  const response = await api("/api/meetings", { method: "POST", body: JSON.stringify(formData(form)) });
+  state.meetings = response.meetings || state.meetings;
+  state.selectedMeetingId = response.meeting_id;
+  const created = state.meetings.find((meeting) => Number(meeting.id) === Number(response.meeting_id));
+  if (created) state.selectedMeetingDate = created.meeting_date;
+  form.reset();
+  setDefaultDates();
+  closeMeetingCreateModal();
+  renderMeetingCalendar(state.meetings);
+  renderMeetingList(state.meetings);
+  renderMeetingDetail(created || null);
+  openMeetingAgendaModal(response.meeting_id);
+  toast("会议已创建，请勾选本场议题");
+}
+
+function closeMeetingEmailModal() {
+  const modal = $("#meetingEmailModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function openMeetingEmailModal(meetingId) {
+  const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
+  const modal = $("#meetingEmailModal");
+  const form = $("#meetingEmailForm");
+  if (!meeting || !modal || !form) return;
+  form.reset();
+  form.elements.meeting_id.value = meeting.id;
+  form.elements.include_thanks.checked = true;
+  $("#meetingEmailSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}`;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function attendanceSummary(meeting) {
+  const records = meeting.attendance || [];
+  const count = (status) => records.filter((item) => item.status === status).length;
+  const total = isAdminView() ? state.users.filter((user) => user.active !== 0).length : records.length;
+  return { total, signed: records.length, present: count("present"), late: count("late"), leave: count("leave"), absent: count("absent") };
+}
+
+function renderMeetingAttendanceSummary(meeting) {
+  const summary = attendanceSummary(meeting);
+  return `<div class="meeting-attendance-summary-grid">
+    <span><strong>${summary.signed}/${summary.total}</strong>已签到</span>
+    <span><strong>${summary.present}</strong>出席</span>
+    <span><strong>${summary.late}</strong>迟到</span>
+    <span><strong>${summary.leave}</strong>请假</span>
+    <span><strong>${summary.absent}</strong>缺席</span>
+  </div>`;
+}
+
+function openMeetingAttendanceModal(meetingId) {
+  const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
+  const modal = $("#meetingAttendanceModal");
+  if (!meeting || !modal) return;
+  $("#meetingAttendanceSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}${isAdminView() ? " · 点击即保存" : " · 只读"}`;
+  $("#meetingAttendanceSummary").innerHTML = renderMeetingAttendanceSummary(meeting);
+  $("#meetingAttendanceList").innerHTML = isAdminView() ? renderAttendance(meeting) : renderAttendanceReadonly(meeting);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
 }
 
 function renderTopicBoard(meeting) {
@@ -2163,12 +2659,20 @@ async function saveAttendanceForm(form) {
   if (current) {
     renderMeetingList(state.meetings);
     renderMeetingDetail(current);
+    if (!$("#meetingAttendanceModal")?.classList.contains("hidden")) {
+      $("#meetingAttendanceSummary").innerHTML = renderMeetingAttendanceSummary(current);
+    }
   }
   toast("签到已更新");
 }
 
 function meetingMinutesSubject(meeting) {
   return `【会议纪要】${meeting.meeting_date} ${meeting.title}`;
+}
+
+function meetingScheduleLabel(meeting, compact = false) {
+  const date = compact ? shortDate(meeting.meeting_date) : meeting.meeting_date;
+  return `${date}${meeting.start_time ? ` ${meeting.start_time}` : ""}`;
 }
 
 function tableCell(value, fallback = "无") {
@@ -2228,7 +2732,7 @@ function meetingStatusLabel(status) {
   return meetingItemStatusMeta[status]?.[0] || "待处理";
 }
 
-function meetingMinuteRows(meeting, thankData = {}) {
+function meetingMinuteRows(meeting, thankData = null) {
   const rows = (meeting.items || []).filter((item) => !isThankYouTopic(item)).map((item, index) => {
     const topicName = item.type_name || item.section || "议题";
     return [
@@ -2243,18 +2747,20 @@ function meetingMinuteRows(meeting, thankData = {}) {
       meetingStatusLabel(item.status),
     ];
   });
-  const summary = thankYouSummary(thankData);
-  rows.push([
-    rows.length + 1,
-    "Thank You",
-    "本周 Thank You",
-    summary.minutes,
-    summary.stars,
-    summary.details,
-    "系统自动汇总",
-    meeting.meeting_date,
-    "已汇总",
-  ]);
+  if (thankData) {
+    const summary = thankYouSummary(thankData);
+    rows.push([
+      rows.length + 1,
+      "Thank You",
+      "本周 Thank You",
+      summary.minutes,
+      summary.stars,
+      summary.details,
+      "系统自动汇总",
+      meeting.meeting_date,
+      "已汇总",
+    ]);
+  }
   return rows;
 }
 
@@ -2289,7 +2795,7 @@ function meetingTopicTableRows(row) {
   return rows.filter(([, value, required]) => required || hasMeetingMinuteValue(value)).map(([label, value]) => [label, value]);
 }
 
-function buildMeetingMinutesText(meeting, thankData = {}) {
+function buildMeetingMinutesText(meeting, thankData = null) {
   const attendance = groupAttendance(meeting);
   const rows = meetingMinuteRows(meeting, thankData);
   const pendingCount = meetingPendingCount(rows);
@@ -2300,7 +2806,7 @@ function buildMeetingMinutesText(meeting, thankData = {}) {
     "战情概览",
     "",
     markdownTable([
-      ["会议日期", meeting.meeting_date],
+      ["会议时间", meetingScheduleLabel(meeting)],
       ["与会人数", `${attendeeCount} 人`],
       ["待闭环", `${pendingCount} 项`],
       ["与会人", attendance.present],
@@ -2384,7 +2890,7 @@ function htmlTopicSections(rows) {
   `).join("");
 }
 
-function buildMeetingMinutesHtml(meeting, thankData = {}) {
+function buildMeetingMinutesHtml(meeting, thankData = null) {
   const attendance = groupAttendance(meeting);
   const rows = meetingMinuteRows(meeting, thankData);
   const pendingCount = meetingPendingCount(rows);
@@ -2394,8 +2900,8 @@ function buildMeetingMinutesHtml(meeting, thankData = {}) {
     ${hasMeetingMinuteValue(attendance.present) ? `<p style="margin:0 0 12px;color:#445066;">与会人：${htmlCell(attendance.present)}</p>` : ""}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:12px 0 18px;">
       <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
-        <span style="display:block;color:#6b7280;font-size:12px;">会议日期</span>
-        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${htmlCell(shortDate(meeting.meeting_date))}</strong>
+        <span style="display:block;color:#6b7280;font-size:12px;">会议时间</span>
+        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${htmlCell(meetingScheduleLabel(meeting, true))}</strong>
       </div>
       <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
         <span style="display:block;color:#6b7280;font-size:12px;">与会人</span>
@@ -2511,21 +3017,22 @@ function openMailDraft(subject) {
   }
 }
 
-async function openMeetingEmail(meetingId) {
+async function openMeetingEmail(meetingId, includeThanks = true) {
   const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingId));
   if (!meeting) throw new Error("生成会议邮件失败：请先选择会议");
   const weekStart = mondayOf(meeting.meeting_date);
-  let thankVotes;
-  let thankDashboard;
-  try {
-    [thankVotes, thankDashboard] = await Promise.all([
-      api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
-      api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
-    ]);
-  } catch (error) {
-    throw new Error(`生成会议邮件失败：读取 Thank You 数据失败，${errorReason(error)}`);
+  let thankData = null;
+  if (includeThanks) {
+    try {
+      const [thankVotes, thankDashboard] = await Promise.all([
+        api(`/api/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+        api(`/api/dashboards/thank-you?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}`),
+      ]);
+      thankData = { votes: thankVotes.votes, stars: thankDashboard.stars };
+    } catch (error) {
+      throw new Error(`生成会议邮件失败：读取 Thank You 数据失败，${errorReason(error)}`);
+    }
   }
-  const thankData = { votes: thankVotes.votes, stars: thankDashboard.stars };
   const text = buildMeetingMinutesText(meeting, thankData);
   const html = buildMeetingMinutesHtml(meeting, thankData);
   const copyResult = await copyMeetingMinutes(html, text);
@@ -2568,7 +3075,7 @@ function renderMeetingCalendar(meetings) {
     const hasSelected = dayMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
     cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${hasSelected ? "active-meeting-day" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${dayMeetings.map((meeting) => `<div class="meeting-line">${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</div>`).join("")}
+      ${dayMeetings.map((meeting) => `<div class="meeting-line">${meeting.start_time ? `${escapeHtml(meeting.start_time)} · ` : ""}${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</div>`).join("")}
     </div>`);
   }
   $("#meetingCalendar").innerHTML = weekdays + cells.join("");
@@ -2615,7 +3122,7 @@ function renderMeetingList(meetings) {
   });
   list.innerHTML = visibleMeetings.length ? visibleMeetings.map((meeting) => `
     <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
-      <span class="meeting-list-meta"><span>${escapeHtml(shortDate(meeting.meeting_date))}</span><em class="meeting-status-dot ${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][2]}">${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][0]}</em></span>
+      <span class="meeting-list-meta"><span>${escapeHtml(meetingScheduleLabel(meeting, true))}</span><em class="meeting-status-dot ${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][2]}">${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][0]}</em></span>
       <strong>${escapeHtml(meeting.title)}</strong>
       <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
     </button>`).join("") : `<p>${range.label}暂无后续会议。</p>`;
@@ -2694,11 +3201,13 @@ function renderMeetingDetail(meeting) {
     <div class="meeting-detail-head">
       <div>
         <div class="meeting-title-line"><h2>${escapeHtml(meeting.title)}</h2><span class="meeting-status-badge ${status[2]}">${status[0]}</span></div>
-        <p>${meeting.meeting_date} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
+        <p>${escapeHtml(meetingScheduleLabel(meeting))} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
       </div>
       <div class="meeting-meta-actions">
         <span class="pill">${escapeHtml(meeting.creator || "")}</span>
         ${isAdminView() && !locked ? `<button class="secondary meeting-copy-agenda-btn" type="button" data-meeting-id="${meeting.id}">沿用上场议题</button>` : ""}
+        ${canOperate("meetings", "create") && !locked ? `<button class="secondary meeting-agenda-picker-btn" type="button" data-meeting-id="${meeting.id}">选择预设议题</button>` : ""}
+        <button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">参会签到</button>
         <button class="button-link meeting-email-btn" type="button" data-meeting-id="${meeting.id}">生成会议邮件</button>
       </div>
     </div>
@@ -2708,9 +3217,8 @@ function renderMeetingDetail(meeting) {
 
     <section class="detail-section">
       <h3>本场会议主题</h3>
-      <p>每场会议单独配置主题，议题看板只展示本场会议选中的主题。</p>
-      <div class="admin-only">${locked ? `<p class="agenda-locked-note">会议已结束，重新开启后可调整主题。</p>` : renderMeetingTopicScopeForm(meeting)}</div>
-      ${!isAdminView() && meetingTopicTypes(meeting).length ? `<div class="chip-list">${meetingTopicTypes(meeting).map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</span>`).join("")}</div>` : ""}
+      <p>主题会随所选预设议题自动加入，不需要单独维护。</p>
+      ${meetingTopicTypes(meeting).length ? `<div class="chip-list">${meetingTopicTypes(meeting).map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</span>`).join("")}</div>` : `<p class="empty-note">尚未加入主题，点击“选择预设议题”开始组会议程。</p>`}
     </section>
 
     <section class="detail-section">
@@ -2718,18 +3226,14 @@ function renderMeetingDetail(meeting) {
       ${renderTopicBoard(meeting)}
     </section>
 
-    <div class="meeting-detail-grid ${locked ? "is-locked" : ""}">
+    <div class="meeting-detail-grid meeting-detail-actions ${locked ? "is-locked" : ""}">
       <section class="detail-card">
         <h3>成员自定义议题</h3>
         ${locked ? `<p class="agenda-locked-note">会议已结束，不能继续添加议题。</p>` : renderCustomTopicForm(meeting)}
       </section>
-      <section class="detail-card admin-only">
-        <h3>管理员添加预设议题</h3>
-        ${locked ? `<p class="agenda-locked-note">会议已结束，不能继续添加议题。</p>` : renderPresetTopicForm(meeting)}
-      </section>
-      <section class="detail-card">
-        <h3>参会签到</h3>
-        ${isAdminView() ? renderAttendance(meeting) : renderAttendanceReadonly(meeting)}
+      <section class="detail-card attendance-summary-card">
+        <div class="section-headline"><div><h3>参会签到</h3><p>详情收进弹窗，主页面只看签到概况。</p></div><button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${isAdminView() ? "打开签到" : "查看签到"}</button></div>
+        ${renderMeetingAttendanceSummary(meeting)}
       </section>
     </div>
 
@@ -3167,6 +3671,8 @@ async function loadThanks() {
     api(`/api/thank-you?${thankPeriodQuery()}`),
     api(`/api/dashboards/thank-you?${thankPeriodQuery()}`),
   ]);
+  state.thankUsers = votes.users || state.thankUsers;
+  populateSelects();
   $("#thankStars").innerHTML = renderThankRank(dashboard.stars || []);
   $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
     <div class="item thank-item">
@@ -3274,6 +3780,9 @@ function bindForm(id, handler) {
       toast("已保存");
     } catch (error) {
       toast(error.message);
+      if (error.status === 409) {
+        refreshPageData(state.currentPage).catch(() => {});
+      }
     }
   });
 }
@@ -3328,7 +3837,7 @@ async function submitUserEditForm(form) {
   }
 }
 
-function renderReactionControls(targetType, targetId, reactions = []) {
+function renderReactionControls(targetType, targetId, reactions = [], replyAction = "", trailingAction = "") {
   const renderCount = (item) => `${renderReactionMark(item.reaction)} <span>+${Number(item.count || 0)}</span>`;
   if (isGuest() || !canOperate("members", "create")) {
     if (!reactions.length) return "";
@@ -3337,10 +3846,10 @@ function renderReactionControls(targetType, targetId, reactions = []) {
     </div>`;
   }
   return `<div class="chat-reactions chat-reaction-wrap">
-    <div class="chat-reaction-summary">
-      ${reactions.length ? reactions.map((item) => `<button type="button" class="chat-reaction-chip ${item.mine ? "active" : ""}" data-reaction-target="${targetType}" data-reaction-id="${targetId}" data-reaction="${escapeHtml(item.reaction)}">${renderCount(item)}</button>`).join("") : ""}
-      <button type="button" class="chat-reaction-picker-toggle" data-reaction-target="${targetType}" data-reaction-id="${targetId}">＋回应</button>
-    </div>
+    <button type="button" class="chat-reaction-picker-toggle" data-reaction-target="${targetType}" data-reaction-id="${targetId}">表情</button>
+    ${replyAction}
+    ${reactions.length ? `<span class="chat-action-caption">回应</span>${reactions.map((item) => `<button type="button" class="chat-reaction-chip ${item.mine ? "active" : ""}" data-reaction-target="${targetType}" data-reaction-id="${targetId}" data-reaction="${escapeHtml(item.reaction)}">${renderCount(item)}</button>`).join("")}` : ""}
+    ${trailingAction}
   </div>`;
 }
 
@@ -3357,9 +3866,16 @@ function reactionAssetKey(reaction) {
 
 function renderReactionMark(reaction) {
   const text = String(reaction || "");
+  const label = teamReactionLabels[text] || "历史表情";
   const asset = teamReactionEmojiAssets[reactionAssetKey(text)];
-  if (!asset) return `<span class="chat-reaction-text">${escapeHtml(text)}</span>`;
-  return `<img class="chat-reaction-emoji-img" src="${asset}" alt="${escapeHtml(text)}" loading="lazy" decoding="async">`;
+  if (!asset) {
+    const looksLikeEmoji = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text);
+    if (looksLikeEmoji) {
+      return `<span class="chat-reaction-text" title="${escapeHtml(label)}">${escapeHtml(text)}</span>`;
+    }
+    return `<span class="chat-reaction-text">${escapeHtml(text)}</span>`;
+  }
+  return `<img class="chat-reaction-emoji-img" src="${asset}" alt="${escapeHtml(label)}" title="${escapeHtml(label)}" loading="lazy" decoding="async">`;
 }
 
 function closeReactionPopover() {
@@ -3393,12 +3909,19 @@ function ensureReactionPopover() {
   popover.id = "teamReactionPopover";
   popover.className = "chat-reaction-picker hidden";
   popover.innerHTML = `
-    <div class="chat-reaction-picker-title">选择回应</div>
-    <div class="chat-reaction-picker-section-title">快捷回应</div>
+    <div class="chat-reaction-picker-title">选择表情</div>
+    <div class="chat-reaction-picker-section-title">本地表情与快捷文字</div>
     <div class="chat-reaction-quick team-reaction-static-grid">
-      ${teamReactionOptions.map((reaction) => `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}" aria-label="${escapeHtml(reaction)}" title="${escapeHtml(reaction)}">${renderReactionMark(reaction)}</button>`).join("")}
+      ${teamReactionOptions.map((reaction) => {
+        const label = teamReactionLabels[reaction] || reaction;
+        const hasLocalImage = Boolean(teamReactionEmojiAssets[reactionAssetKey(reaction)]);
+        const content = hasLocalImage
+          ? `${renderReactionMark(reaction)}<span class="chat-reaction-option-label">${escapeHtml(label)}</span>`
+          : `<span class="chat-reaction-option-label">${escapeHtml(label)}</span>`;
+        return `<button type="button" class="chat-reaction-option" data-reaction="${escapeHtml(reaction)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${content}</button>`;
+      }).join("")}
     </div>
-    <div class="chat-reaction-picker-section-title">表情库</div>
+    <div class="chat-reaction-picker-section-title">Emoji 表情库</div>
     <div class="team-reaction-emoji-library">
       <emoji-picker class="team-reaction-emoji-picker" locale="zh" data-source="${teamReactionEmojiDataSource}"></emoji-picker>
     </div>`;
@@ -3418,10 +3941,7 @@ function ensureReactionPopover() {
     picker.dataSource = teamReactionEmojiDataSource;
     picker.addEventListener("emoji-click", (event) => {
       const reaction = event.detail?.unicode || event.detail?.emoji?.unicode || event.detail?.emoji?.emoji || "";
-      if (!reaction) {
-        toast("没有识别到表情，请重新选择");
-        return;
-      }
+      if (!reaction) return toast("没有识别到表情，请重新选择");
       const targetType = popover.dataset.reactionTarget || activeReactionTarget?.type;
       const targetId = popover.dataset.reactionId || activeReactionTarget?.id;
       sendTeamReaction(targetType, targetId, reaction).catch((error) => toast(error.message));
@@ -3468,11 +3988,16 @@ function renderTeamReplies(post, replies = post.replies || [], depth = 0) {
       <div class="chat-reply" data-reply-id="${reply.id}" style="--reply-depth:${Math.min(depth, 4)}">
         <p>${escapeHtml(reply.content)}</p>
         <small>${escapeHtml(reply.display_name)} · ${escapeHtml(shortDateTime(reply.created_at || ""))}</small>
-        ${renderReactionControls("reply", reply.id, reply.reactions || [])}
+        ${isGuest() || !canOperate("members", "create") ? renderReactionControls("reply", reply.id, reply.reactions || []) : ""}
         ${isGuest() || !canOperate("members", "create") ? "" : `
           <div class="chat-reply-actions">
-            <button type="button" class="chat-reply-toggle" data-post-id="${post.id}" data-parent-reply-id="${reply.id}">回复</button>
-            ${(canOperate("members", "delete") && (reply.mine || isAdminView())) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : ""}
+            ${renderReactionControls(
+              "reply",
+              reply.id,
+              reply.reactions || [],
+              `<button type="button" class="chat-reply-toggle" data-post-id="${post.id}" data-parent-reply-id="${reply.id}">回复</button>`,
+              (canOperate("members", "delete") && (reply.mine || isAdminView())) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : "",
+            )}
           </div>
           <form class="chat-reply-form hidden" data-post-id="${post.id}">
             <input name="parent_reply_id" type="hidden" value="${reply.id}">
@@ -3494,16 +4019,16 @@ function renderTeamChat(posts, preserveScroll = false) {
       <span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span>
       <p>${escapeHtml(post.content)}</p>
       <small>${escapeHtml(post.display_name)} · ${escapeHtml(post.created_at || "")}</small>
-      ${renderTeamReactions(post)}
-      ${renderTeamReplies(post)}
+      ${isGuest() || !canOperate("members", "create") ? renderTeamReactions(post) : ""}
       ${isGuest() || !canOperate("members", "create") ? "" : `
         <div class="chat-reply-tools">
-          <button type="button" class="chat-reply-toggle" data-post-id="${post.id}">回复</button>
+          ${renderReactionControls("post", post.id, post.reactions || [], `<button type="button" class="chat-reply-toggle" data-post-id="${post.id}">回复</button>`)}
           <form class="chat-reply-form hidden" data-post-id="${post.id}">
             <input name="content" placeholder="回复这条对话，最多 200 字" maxlength="200" required>
             <button type="submit">发送</button>
           </form>
         </div>`}
+      ${renderTeamReplies(post)}
     </div>`).join("") : "<p>还没有团队对话，来开个头。</p>";
   list.scrollTop = preserveScroll ? previousTop : list.scrollHeight;
 }
@@ -3558,6 +4083,29 @@ function openPasswordModal() {
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   form.elements.old_password?.focus();
+  loadSessions().catch((error) => toast(error.message));
+}
+
+function renderSessions() {
+  const target = $("#sessionList");
+  if (!target) return;
+  target.innerHTML = state.sessions.length ? state.sessions.map((session) => `
+    <article class="session-row ${session.current ? "current" : ""}">
+      <div class="session-device-mark" aria-hidden="true">${session.device?.includes("手机") ? "▯" : "▱"}</div>
+      <div class="session-row-main">
+        <strong>${escapeHtml(session.device || "浏览器会话")}${session.current ? " · 当前设备" : ""}</strong>
+        <span>${escapeHtml(session.ip_address || "未知地址")} · 最近活动 ${escapeHtml(shortDateTime(session.last_seen_at))}</span>
+        <small>登录于 ${escapeHtml(shortDateTime(session.created_at))}，到期 ${escapeHtml(shortDateTime(session.expires_at))}</small>
+      </div>
+      <button class="${session.current ? "secondary" : "danger"} session-revoke-btn" type="button" data-session-id="${session.id}">${session.current ? "退出当前" : "撤销"}</button>
+    </article>`).join("") : '<p class="empty-note">没有有效登录会话</p>';
+}
+
+async function loadSessions() {
+  if (isGuest()) return;
+  const data = await api("/api/sessions");
+  state.sessions = data.sessions || [];
+  renderSessions();
 }
 
 function closeMemberEditModal() {
@@ -3801,12 +4349,23 @@ function moveMeetingMonth(delta) {
 }
 
 function bindEvents() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.user) syncAuthState().catch(() => {});
+  });
+  window.addEventListener("focus", () => {
+    if (state.user) syncAuthState().catch(() => {});
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (state.user && event.persisted) syncAuthState(true).catch(() => {});
+  });
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const data = await api("/api/login", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
       state.user = data.user;
       state.permissions = data.permissions;
+      state.permissionPreview = null;
+      state.rulesPeriodInitialized = false;
       state.showLogin = false;
       applyAuthView();
       await refreshAll();
@@ -3816,12 +4375,12 @@ function bindEvents() {
   });
 
   $("#logoutBtn").addEventListener("click", async () => {
-    await api("/api/logout", { method: "POST", body: "{}" });
-    state.user = null;
-    state.permissions = {};
-    state.showLogin = false;
-    applyAuthView();
-    await refreshAll();
+    try {
+      await api("/api/logout", { method: "POST", body: "{}" });
+    } finally {
+      await transitionToLoggedOut(true, true);
+    }
+    toast("已退出登录");
   });
 
   $("#loginEntryBtn")?.addEventListener("click", () => {
@@ -3859,6 +4418,11 @@ function bindEvents() {
     toast(`已切换到 ${label}`);
   });
   $("#viewModeBtn").addEventListener("click", async () => {
+    if (state.permissionPreview) {
+      exitPermissionPreview();
+      toast("已退出权限预览");
+      return;
+    }
     setViewMode(isAdminView() ? "user" : "admin");
     if (!canAccessPage(state.currentPage)) {
       switchPage(firstAccessiblePage());
@@ -3866,6 +4430,10 @@ function bindEvents() {
     applyAuthView();
     await refreshAll();
     toast(isAdminView() ? "已切换到管理视图" : "已切换到用户视图");
+  });
+  $("#exitPermissionPreviewBtn")?.addEventListener("click", () => {
+    exitPermissionPreview();
+    toast("已退出权限预览");
   });
   $("#prevMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(-1));
   $("#nextMeetingMonthBtn").addEventListener("click", () => moveMeetingMonth(1));
@@ -3876,12 +4444,35 @@ function bindEvents() {
   $("#scoreYear")?.addEventListener("change", () => {
     loadRulesAndScores().catch((error) => toast(error.message));
   });
+  $("#blackVisibilityForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
+    try {
+      const settings = {
+        red_black_show_black_points: form.elements.show_points.checked ? "1" : "0",
+        red_black_show_black_details: form.elements.show_details.checked ? "1" : "0",
+      };
+      const data = await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ settings }),
+      });
+      state.settings = data.settings || state.settings;
+      state.publicSettings = { ...state.publicSettings, ...settings };
+      await loadRulesAndScores();
+      toast("红黑榜显示设置已保存");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
 
   bindForm("#userForm", (data) => api("/api/users", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#userTypeForm", (data) => api("/api/user-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#ruleForm", (data) => api("/api/rules", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#scoreForm", (data) => api("/api/scores", { method: "POST", body: JSON.stringify(data) }));
-  bindForm("#meetingForm", (data) => api("/api/meetings", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#meetingGenerateForm", (data) => api("/api/meetings/bulk-generate", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#morningItemForm", (data) => {
     if (state.morningReadOnly) throw new Error("历史日期只读，不能新增");
@@ -3907,6 +4498,93 @@ function bindEvents() {
   bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
+
+  [$("#meetingForm"), $("#meetingCreateForm")].filter(Boolean).forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await createMeetingFromForm(event.currentTarget);
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  });
+
+  $("#meetingEmailForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    submit.textContent = "正在生成";
+    try {
+      await openMeetingEmail(form.elements.meeting_id.value, Boolean(form.elements.include_thanks.checked));
+      closeMeetingEmailModal();
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "生成邮件";
+    }
+  });
+
+  $("#meetingAgendaPickerForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const items = $$(".meeting-agenda-option", form).map((row) => {
+      const checkbox = $(".meeting-agenda-option-check", row);
+      if (!checkbox?.checked) return null;
+      return {
+        option_id: Number(checkbox.value),
+        owner_id: $(".meeting-agenda-owner", row)?.value || null,
+      };
+    }).filter(Boolean);
+    if (!items.length) return toast("请至少勾选一个预设议题");
+    const submit = $("#meetingAgendaSubmitBtn");
+    submit.disabled = true;
+    submit.textContent = "正在加入";
+    try {
+      const response = await api(`/api/meetings/${form.elements.meeting_id.value}/agenda-options`, {
+        method: "POST",
+        body: JSON.stringify({ items }),
+      });
+      state.meetings = response.meetings || state.meetings;
+      closeMeetingAgendaModal();
+      const current = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
+      renderMeetingCalendar(state.meetings);
+      renderMeetingList(state.meetings);
+      renderMeetingDetail(current || null);
+      toast(response.message || "议题已加入");
+    } catch (error) {
+      toast(error.message);
+      updateMeetingAgendaSelection();
+    } finally {
+      submit.textContent = "加入本场会议";
+    }
+  });
+
+  $("#meetingAgendaPickerForm")?.addEventListener("change", (event) => {
+    const groupToggle = event.target.closest(".meeting-agenda-group-check");
+    if (groupToggle) {
+      $$(".meeting-agenda-option-check:not(:disabled)", groupToggle.closest(".meeting-agenda-group"))
+        .forEach((checkbox) => { checkbox.checked = groupToggle.checked; });
+    }
+    if (event.target.closest(".meeting-agenda-option-check, .meeting-agenda-group-check")) {
+      updateMeetingAgendaSelection();
+    }
+  });
+
+  $("#meetingAgendaSearch")?.addEventListener("input", (event) => {
+    const query = event.target.value.trim().toLowerCase();
+    $$(".meeting-agenda-group", $("#meetingAgendaPickerList")).forEach((group) => {
+      let visibleOptions = 0;
+      $$(".meeting-agenda-option", group).forEach((row) => {
+        const visible = !query || row.dataset.search.includes(query);
+        row.classList.toggle("hidden", !visible);
+        if (visible) visibleOptions += 1;
+      });
+      group.classList.toggle("hidden", visibleOptions === 0);
+    });
+  });
   $("#archiveSearchForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -3978,9 +4656,16 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePasswordModal();
+      closeUserTypePermissionModal();
+      closeUserAccountModal();
       closeMemberEditModal();
       closeMorningHistoryModal();
       closeMeetingMinuteModal();
+      closeMeetingAgendaModal();
+      closeMeetingAttendanceModal();
+      closeMeetingCreateModal();
+      closeMeetingEmailModal();
+      closeMemberScoreModal();
       closeLinkEditModal();
       closeLinkDeleteModal();
       closeLinkActionMenus();
@@ -4001,6 +4686,83 @@ function bindEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
+    const scoreMemberButton = event.target.closest("[data-score-user-id]");
+    if (scoreMemberButton) {
+      openMemberScoreModal(scoreMemberButton.dataset.scoreUserId, scoreMemberButton.dataset.scoreUserName)
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const userTypeConfig = event.target.closest(".user-type-config-btn");
+    if (userTypeConfig) {
+      openUserTypePermissionModal(userTypeConfig.dataset.typeKey);
+      return;
+    }
+    const userAccountEdit = event.target.closest(".user-account-edit-btn");
+    if (userAccountEdit) {
+      openUserAccountModal(userAccountEdit.dataset.userId);
+      return;
+    }
+    if (event.target.closest("[data-user-type-modal-close]") || event.target === $("#userTypePermissionModal")) {
+      closeUserTypePermissionModal();
+      return;
+    }
+    if (event.target.closest("[data-user-account-modal-close]") || event.target === $("#userAccountModal")) {
+      closeUserAccountModal();
+      return;
+    }
+    if (event.target.closest("#userBulkClearBtn")) {
+      clearUserBulkSelection();
+      return;
+    }
+    if (event.target.closest("#userBulkApplyBtn")) {
+      const userIds = selectedBulkUserIds();
+      const userType = $("#userBulkType")?.value || "";
+      if (!userIds.length) return toast("请先选择账号");
+      if (!userType) return toast("请选择目标用户类型");
+      const targetName = state.userTypes.find((type) => type.key === userType)?.name || "目标类型";
+      if (!window.confirm(`确定将 ${userIds.length} 个账号批量调整为“${targetName}”吗？`)) return;
+      api("/api/users/bulk-type", { method: "PATCH", body: JSON.stringify({ user_ids: userIds, user_type: userType }) })
+        .then(() => {
+          state.thankUsers = [];
+          return loadUsers();
+        })
+        .then(() => toast(`已批量调整 ${userIds.length} 个账号`))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const permissionPreview = event.target.closest(".permission-preview-btn");
+    if (permissionPreview) {
+      const form = permissionPreview.closest(".user-type-permission-form");
+      if (form) closeUserTypePermissionModal();
+      enterPermissionPreview(
+        permissionPreview.dataset.typeKey,
+        form ? permissionFormPermissions(form) : null,
+        form?.elements.name?.value || "",
+      );
+      return;
+    }
+    const permissionImpact = event.target.closest(".permission-impact-btn");
+    if (permissionImpact) {
+      const form = permissionImpact.closest(".user-type-permission-form");
+      assessPermissionImpact(form).catch((error) => toast(error.message));
+      return;
+    }
+    const sessionRevoke = event.target.closest(".session-revoke-btn");
+    if (sessionRevoke) {
+      const current = sessionRevoke.closest(".session-row")?.classList.contains("current");
+      if (!window.confirm(current ? "确定退出当前设备吗？" : "确定撤销这个登录设备吗？")) return;
+      api(`/api/sessions/${sessionRevoke.dataset.sessionId}`, { method: "DELETE" })
+        .then((data) => {
+          if (data.current_revoked) {
+            closePasswordModal();
+            return transitionToLoggedOut(true, true);
+          }
+          return loadSessions();
+        })
+        .then(() => toast("登录会话已撤销"))
+        .catch((error) => toast(error.message));
+      return;
+    }
     const permissionCheckbox = event.target.closest("[data-permission-action]");
     if (permissionCheckbox) {
       const form = permissionCheckbox.closest(".user-type-permission-form");
@@ -4012,6 +4774,8 @@ function bindEvents() {
       if (!permissionCheckbox.checked && permissionCheckbox.dataset.permissionAction === "view") {
         $$(`[data-permission-module="${moduleKey}"]`, form).forEach((input) => { input.checked = false; });
       }
+      const impact = form.querySelector("[data-permission-impact]");
+      if (impact) impact.innerHTML = "<strong>配置已调整</strong><span>点击“评估变更影响”查看受影响账号和权限项</span>";
       return;
     }
     if (event.target.closest("[data-reminder-close]") || event.target === $("#reminderModal")) {
@@ -4129,6 +4893,40 @@ function bindEvents() {
     }
     if (event.target.closest("[data-meeting-minute-close]") || event.target === $("#meetingMinuteModal")) {
       closeMeetingMinuteModal();
+      return;
+    }
+    if (event.target.closest("[data-meeting-agenda-close]") || event.target === $("#meetingAgendaModal")) {
+      closeMeetingAgendaModal();
+      return;
+    }
+    if (event.target.closest("[data-meeting-attendance-close]") || event.target === $("#meetingAttendanceModal")) {
+      closeMeetingAttendanceModal();
+      return;
+    }
+    if (event.target.closest("[data-meeting-create-close]") || event.target === $("#meetingCreateModal")) {
+      closeMeetingCreateModal();
+      return;
+    }
+    if (event.target.closest("[data-meeting-email-close]") || event.target === $("#meetingEmailModal")) {
+      closeMeetingEmailModal();
+      return;
+    }
+    if (event.target.closest("[data-member-score-close]") || event.target === $("#memberScoreModal")) {
+      closeMemberScoreModal();
+      return;
+    }
+    if (event.target.closest("#openMeetingCreateBtn")) {
+      openMeetingCreateModal();
+      return;
+    }
+    const meetingAgendaPicker = event.target.closest(".meeting-agenda-picker-btn");
+    if (meetingAgendaPicker) {
+      openMeetingAgendaModal(meetingAgendaPicker.dataset.meetingId);
+      return;
+    }
+    const meetingAttendance = event.target.closest(".meeting-attendance-btn");
+    if (meetingAttendance) {
+      openMeetingAttendanceModal(meetingAttendance.dataset.meetingId);
       return;
     }
     if (event.target.closest("[data-link-edit-close]") || event.target === $("#linkEditModal")) {
@@ -4281,7 +5079,10 @@ function bindEvents() {
         return;
       }
       if (!window.confirm("确定删除这条早例会事项吗？")) return;
-      api(`/api/morning-items/${morningDelete.dataset.itemId}`, { method: "DELETE" })
+      api(`/api/morning-items/${morningDelete.dataset.itemId}`, {
+        method: "DELETE",
+        body: JSON.stringify({ expected_version: Number(morningDelete.dataset.itemVersion || 1) }),
+      })
         .then((data) => {
           state.morningItems = data.items || state.morningItems;
           state.morningUsers = data.users || state.morningUsers;
@@ -4383,7 +5184,7 @@ function bindEvents() {
     }
     const meetingEmail = event.target.closest(".meeting-email-btn");
     if (meetingEmail) {
-      openMeetingEmail(meetingEmail.dataset.meetingId).catch((error) => toast(error.message));
+      openMeetingEmailModal(meetingEmail.dataset.meetingId);
       return;
     }
     const meetingSelect = event.target.closest(".meeting-select-btn");
@@ -4466,6 +5267,20 @@ function bindEvents() {
   });
 
   document.body.addEventListener("change", (event) => {
+    if (event.target.matches('.participation-toggle input[name="participation"]')) {
+      const impact = event.target.closest(".user-type-permission-form")?.querySelector("[data-permission-impact]");
+      if (impact) impact.innerHTML = "<strong>参与范围已调整</strong><span>点击“评估影响”查看受影响账号和名单变化</span>";
+      return;
+    }
+    if (event.target.matches("#userBulkSelectAll")) {
+      $$(".user-bulk-checkbox").forEach((input) => { input.checked = event.target.checked; });
+      updateUserBulkToolbar();
+      return;
+    }
+    if (event.target.matches(".user-bulk-checkbox")) {
+      updateUserBulkToolbar();
+      return;
+    }
     if (event.target.matches('#memberEditForm input[name="avatar_file"]')) {
       const file = event.target.files?.[0];
       const member = state.members.find((item) => Number(item.id) === Number($("#memberEditForm")?.dataset.memberId));
@@ -4532,28 +5347,25 @@ function bindEvents() {
         return;
       }
       if (permissionForm) {
-        const permissions = {};
-        state.moduleCatalog.forEach((module) => {
-          permissions[module.key] = { view: false, create: false, edit: false, delete: false };
-        });
-        new FormData(permissionForm).getAll("permission").forEach((value) => {
-          const [moduleKey, action] = String(value).split(":");
-          if (permissions[moduleKey] && Object.hasOwn(permissions[moduleKey], action)) {
-            permissions[moduleKey][action] = true;
-          }
-        });
+        const permissions = permissionFormPermissions(permissionForm);
+        const participation = permissionFormParticipation(permissionForm);
+        await assessPermissionImpact(permissionForm);
         const data = await api(`/api/user-types/${permissionForm.dataset.typeKey}/permissions`, {
           method: "PATCH",
           body: JSON.stringify({
             permissions,
+            participation,
             name: permissionForm.elements.name?.value || undefined,
             description: permissionForm.elements.description?.value || "",
+            expected_version: Number(permissionForm.elements.expected_version?.value || 1),
           }),
         });
         state.userTypes = data.types || state.userTypes;
         state.moduleCatalog = data.modules || state.moduleCatalog;
         if (data.permissions) state.permissions = data.permissions;
-        renderUserTypePermissions();
+        closeUserTypePermissionModal();
+        state.thankUsers = [];
+        await loadUsers();
         applyAuthView();
         toast(permissionForm.dataset.typeKey === "guest" ? "访客访问范围已保存" : "用户类型与权限已保存");
         return;
@@ -4601,6 +5413,7 @@ function bindEvents() {
       }
       if (userEditForm) {
         await submitUserEditForm(userEditForm);
+        closeUserAccountModal();
         await refreshAll();
         toast("用户已更新");
         return;
@@ -4641,6 +5454,7 @@ function bindEvents() {
       toast("已更新");
     } catch (error) {
       toast(error.message);
+      if (error.status === 409) refreshPageData(state.currentPage).catch(() => {});
     }
   });
 }
