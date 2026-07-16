@@ -25,6 +25,8 @@ TeamMeeting/
 ├─ scripts/
 │  ├─ dev_server.py             # 文件监视与开发热更新
 │  ├─ smoke_test.py             # 部署后的只读冒烟测试
+│  ├─ sso_smoke_test.py         # OAuth2/OIDC 工号关联集成测试
+│  ├─ forum_smoke_test.py       # 讨论区权限、回复、表情和回收测试
 │  └─ db_snapshot.py            # SQLite 一致性快照
 ├─ deploy.ps1                   # 灰度、正式、回滚和状态管理
 ├─ start_*.bat / deploy_*.bat   # Windows 双击入口
@@ -116,7 +118,11 @@ if path == "/api/example":
 
 登录会话持久化在 SQLite 中，只保存令牌摘要。新增认证功能时同时考虑超时、撤销、密码修改后的其他设备退出、失败次数锁定和 401 后前端自动回到登录视图。
 
-团队对话的完整 Emoji 选择器和中文数据都放在 `static/vendor/emoji-picker-element/` 与 `static/vendor/emoji-picker-element-data/`。部署环境不得依赖 CDN；修改选择器后应在断网或仅局域网条件下验证表情分类、搜索、发送和再次点击撤销。
+企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户，再按配置自动建号；`external_subject` 保存身份平台稳定主体。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、自动建号、敏感配置隔离和 Cookie 会话。
+
+团队讨论区的完整 Emoji 选择器和中文数据都放在 `static/vendor/emoji-picker-element/` 与 `static/vendor/emoji-picker-element-data/`。部署环境不得依赖 CDN；修改选择器后应在断网或仅局域网条件下验证表情分类、搜索、发送和再次点击撤销。
+
+讨论主题采用软删除。主题作者可编辑、删除自己的内容，管理员可置顶、发布公告、标记已解决及从回收站恢复。公告分类和置顶能力必须在服务端校验；列表、详情、回复写入都必须排除已删除主题。修改论坛链路后运行 `python scripts\forum_smoke_test.py`，验证越权拦截、嵌套回复、任意 Emoji、删除隐藏与恢复后回复保留。
 
 会议创建遵循 `meetings.create` 操作权限，不应写死为管理员；一级议题分类和二级预设议题的维护仍是管理员能力。创建会议后通过 `/api/meetings/{id}/agenda-options` 批量加入预设议题并指定责任人。`meetings.start_time` 使用 `HH:MM`，为空表示未指定开始时间。
 
@@ -168,9 +174,11 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py
 node --check static\app.js
 git diff --check
+python scripts\sso_smoke_test.py
+python scripts\forum_smoke_test.py
 ```
 
 功能验证至少覆盖：

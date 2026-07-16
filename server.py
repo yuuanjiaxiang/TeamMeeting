@@ -1,7 +1,11 @@
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.request import Request, urlopen
 import argparse
+import base64
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import hmac
@@ -11,6 +15,7 @@ import os
 import re
 import secrets
 import sqlite3
+import traceback
 import uuid
 
 
@@ -40,10 +45,28 @@ DEFAULT_SETTINGS = [
     ("session_timeout_minutes", "登录有效时长（分钟）", "480", "number", "无操作超过该时长后需要重新登录"),
     ("login_max_attempts", "登录失败次数上限", "5", "number", "同一账号和地址连续失败达到上限后临时锁定"),
     ("login_lock_minutes", "登录锁定时长（分钟）", "15", "number", "触发失败次数上限后的临时锁定时间"),
+    ("sso_enabled", "启用企业 SSO", "0", "boolean", "启用后登录页显示企业 SSO 入口"),
+    ("sso_auto_login", "首页自动 SSO 登录", "1", "boolean", "未登录访问首页时自动跳转企业登录；失败后回退系统账号登录"),
+    ("sso_mode", "OAuth2 配置方式", "discovery", "choice", "推荐使用 OIDC 自动发现；不支持 Discovery 时选择手动 OAuth2 端点"),
+    ("sso_button_label", "SSO 按钮名称", "企业 SSO 登录", "text", "登录页统一身份入口的显示名称"),
+    ("sso_issuer_url", "OIDC Issuer 地址", "", "text", "企业身份平台的 Issuer，不含 /.well-known/openid-configuration"),
+    ("sso_authorization_url", "OAuth2 授权地址", "", "text", "手动模式必填，例如 https://sso.example.com/oauth2/authorize"),
+    ("sso_token_url", "OAuth2 Token 地址", "", "text", "手动模式必填，例如 https://sso.example.com/oauth2/token"),
+    ("sso_userinfo_url", "OAuth2 用户信息地址", "", "text", "手动模式必填，需返回工号与姓名字段"),
+    ("sso_client_id", "OAuth2 Client ID", "", "text", "身份平台为 Team Loop 分配的 Client ID"),
+    ("sso_client_secret", "OAuth2 Client Secret", "", "password", "建议通过 TEAM_LOOP_SSO_CLIENT_SECRET 环境变量提供；留空表示不修改"),
+    ("sso_redirect_uri", "OAuth2 回调地址", "", "text", "正式部署必须填写，例如 https://team.example.com/api/sso/callback；本机可自动生成"),
+    ("sso_scopes", "OAuth2 Scopes", "openid profile email", "text", "OIDC 通常使用 openid profile email；普通 OAuth2 按企业平台要求填写"),
+    ("sso_username_claim", "SSO 工号字段", "preferred_username", "text", "用于关联用户管理工号的 UserInfo 字段，如 employee_id、employeeNumber 或 preferred_username"),
+    ("sso_display_name_claim", "SSO 姓名字段", "name", "text", "用于显示姓名的 UserInfo 字段"),
+    ("sso_default_user_type", "SSO 默认用户类型", "default", "text", "自动创建 SSO 用户时分配的用户类型"),
+    ("sso_auto_provision", "自动创建 SSO 用户", "1", "boolean", "关闭后，仅已存在且账号字段匹配的用户可通过 SSO 登录"),
 ]
 
 MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate", "last"}
 TEAM_REACTIONS = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"]
+TEAM_POST_CATEGORIES = {"general", "field", "retrospective", "roast", "announcement"}
+TEAM_POST_STATUSES = {"open", "resolved"}
 
 MODULE_CATALOG = [
     {"key": "members", "name": "团队成员", "description": "成员档案、职责画像和团队对话"},
@@ -188,11 +211,19 @@ def link_meeting_topic(conn, meeting_id, type_id, created_by=None):
     )
 
 
+@contextmanager
 def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def make_hash(password, salt=None):
@@ -613,6 +644,127 @@ def get_float_setting(conn, key, default, minimum=None, maximum=None):
     return value
 
 
+def sso_setting(conn, key, default=""):
+    env_key = f"TEAM_LOOP_{key.upper()}"
+    env_value = os.environ.get(env_key)
+    if env_value is not None:
+        return env_value.strip()
+    return str(get_setting_value(conn, key, default) or "").strip()
+
+
+def sso_configuration(conn):
+    enabled = sso_setting(conn, "sso_enabled", "0").lower() in ("1", "true", "yes", "on", "启用")
+    mode = sso_setting(conn, "sso_mode", "discovery").lower()
+    if mode not in ("discovery", "manual"):
+        mode = "discovery"
+    return {
+        "enabled": enabled,
+        "auto_login": sso_setting(conn, "sso_auto_login", "1").lower() in ("1", "true", "yes", "on", "启用"),
+        "mode": mode,
+        "button_label": sso_setting(conn, "sso_button_label", "企业 SSO 登录") or "企业 SSO 登录",
+        "issuer_url": sso_setting(conn, "sso_issuer_url").rstrip("/"),
+        "authorization_url": sso_setting(conn, "sso_authorization_url"),
+        "token_url": sso_setting(conn, "sso_token_url"),
+        "userinfo_url": sso_setting(conn, "sso_userinfo_url"),
+        "client_id": sso_setting(conn, "sso_client_id"),
+        "client_secret": sso_setting(conn, "sso_client_secret"),
+        "redirect_uri": sso_setting(conn, "sso_redirect_uri"),
+        "scopes": sso_setting(conn, "sso_scopes", "openid profile email") or "openid profile email",
+        "username_claim": sso_setting(conn, "sso_username_claim", "preferred_username") or "preferred_username",
+        "display_name_claim": sso_setting(conn, "sso_display_name_claim", "name") or "name",
+        "default_user_type": sso_setting(conn, "sso_default_user_type", DEFAULT_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY,
+        "auto_provision": sso_setting(conn, "sso_auto_provision", "1").lower() in ("1", "true", "yes", "on", "启用"),
+    }
+
+
+def validate_sso_url(value, label):
+    parsed = urlparse(value or "")
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if not parsed.hostname or parsed.scheme not in ("http", "https"):
+        raise AppError(400, f"{label}不是合法的 HTTP 地址")
+    if parsed.scheme != "https" and parsed.hostname.lower() not in local_hosts:
+        raise AppError(400, f"{label}必须使用 HTTPS")
+    if parsed.username or parsed.password:
+        raise AppError(400, f"{label}不能包含账号或密码")
+    return value
+
+
+def fetch_json(url, method="GET", form=None, headers=None):
+    validate_sso_url(url, "OIDC 服务地址")
+    request_headers = {"Accept": "application/json", "User-Agent": "TeamLoop-OIDC/1.0", **(headers or {})}
+    body = None
+    if form is not None:
+        body = urlencode(form).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    request = Request(url, data=body, headers=request_headers, method=method)
+    try:
+        with urlopen(request, timeout=12) as response:
+            payload = response.read(1024 * 1024 + 1)
+    except HTTPError as exc:
+        raise AppError(502, f"企业身份平台返回 HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise AppError(502, "无法连接企业身份平台，请检查 SSO 地址和网络") from exc
+    if len(payload) > 1024 * 1024:
+        raise AppError(502, "企业身份平台响应过大")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AppError(502, "企业身份平台返回了无效数据") from exc
+    if not isinstance(data, dict):
+        raise AppError(502, "企业身份平台响应格式不正确")
+    return data
+
+
+def load_oidc_discovery(config):
+    if config.get("mode") == "manual":
+        endpoints = {
+            "authorization_endpoint": config.get("authorization_url"),
+            "token_endpoint": config.get("token_url"),
+            "userinfo_endpoint": config.get("userinfo_url"),
+        }
+        for key, value in endpoints.items():
+            if not value:
+                raise AppError(400, "手动 OAuth2 模式必须填写授权、Token 和用户信息地址")
+            validate_sso_url(value, key)
+        endpoints["issuer"] = (config.get("issuer_url") or "").rstrip("/")
+        endpoints["token_endpoint_auth_methods_supported"] = ["client_secret_post"]
+        return endpoints
+    issuer = validate_sso_url(config.get("issuer_url"), "OIDC Issuer 地址").rstrip("/")
+    discovery = fetch_json(f"{issuer}/.well-known/openid-configuration")
+    discovered_issuer = str(discovery.get("issuer") or "").rstrip("/")
+    if discovered_issuer and discovered_issuer != issuer:
+        raise AppError(502, "OIDC Discovery 返回的 Issuer 与系统配置不一致")
+    for key in ("authorization_endpoint", "token_endpoint", "userinfo_endpoint"):
+        if not discovery.get(key):
+            raise AppError(502, f"OIDC Discovery 缺少 {key}")
+        validate_sso_url(discovery[key], key)
+    return discovery
+
+
+def sso_configuration_ready(config):
+    if not config.get("enabled") or not config.get("client_id"):
+        return False
+    if config.get("mode") == "manual":
+        return all(config.get(key) for key in ("authorization_url", "token_url", "userinfo_url"))
+    return bool(config.get("issuer_url"))
+
+
+def base64url_digest(value):
+    digest = hashlib.sha256(value.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def claim_value(claims, path):
+    value = claims
+    for part in str(path or "").split("."):
+        if not part or not isinstance(value, dict):
+            return ""
+        value = value.get(part)
+    if isinstance(value, (str, int)):
+        return str(value).strip()
+    return ""
+
+
 def write_audit(conn, user, action, entity_type, entity_id=None, summary="", metadata=None, ip_address=""):
     user_id = user.get("id") if isinstance(user, dict) else user
     conn.execute(
@@ -759,6 +911,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
+                employee_id TEXT,
                 salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 display_name TEXT NOT NULL,
@@ -820,7 +973,15 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 kind TEXT NOT NULL CHECK(kind IN ('comment', 'roast')),
+                title TEXT,
+                category TEXT NOT NULL DEFAULT 'general',
+                status TEXT NOT NULL DEFAULT 'open',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                view_count INTEGER NOT NULL DEFAULT 0,
                 content TEXT NOT NULL,
+                updated_at TEXT,
+                deleted_at TEXT,
+                deleted_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL
             );
 
@@ -1040,6 +1201,16 @@ def init_db():
                 PRIMARY KEY(username, ip_address)
             );
 
+            CREATE TABLE IF NOT EXISTS sso_login_states (
+                state_hash TEXT PRIMARY KEY,
+                nonce TEXT NOT NULL,
+                code_verifier TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS thank_you_votes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 voter_id INTEGER NOT NULL REFERENCES users(id),
@@ -1103,6 +1274,9 @@ def init_db():
             """
         )
         ensure_column(conn, "users", "user_type", "TEXT NOT NULL DEFAULT 'default'")
+        ensure_column(conn, "users", "auth_source", "TEXT NOT NULL DEFAULT 'local'")
+        ensure_column(conn, "users", "external_subject", "TEXT")
+        ensure_column(conn, "users", "employee_id", "TEXT")
         ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
@@ -1121,6 +1295,14 @@ def init_db():
         ensure_column(conn, "team_post_replies", "parent_reply_id", "INTEGER")
         ensure_column(conn, "team_post_replies", "deleted_at", "TEXT")
         ensure_column(conn, "team_post_replies", "deleted_by", "INTEGER")
+        ensure_column(conn, "team_posts", "title", "TEXT")
+        ensure_column(conn, "team_posts", "category", "TEXT NOT NULL DEFAULT 'general'")
+        ensure_column(conn, "team_posts", "status", "TEXT NOT NULL DEFAULT 'open'")
+        ensure_column(conn, "team_posts", "pinned", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "team_posts", "view_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "team_posts", "updated_at", "TEXT")
+        ensure_column(conn, "team_posts", "deleted_at", "TEXT")
+        ensure_column(conn, "team_posts", "deleted_by", "INTEGER")
         ensure_column(conn, "links", "pinned", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "invalid", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "click_count", "INTEGER NOT NULL DEFAULT 0")
@@ -1169,7 +1351,16 @@ def init_db():
         ensure_column(conn, "morning_items", "active", "INTEGER NOT NULL DEFAULT 1")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active ON auth_sessions(user_id, revoked_at, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity ON users(auth_source, external_subject) WHERE external_subject IS NOT NULL AND external_subject<>''")
+        conn.execute("UPDATE users SET employee_id=username WHERE employee_id IS NULL OR trim(employee_id)=''")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee_id ON users(employee_id COLLATE NOCASE) WHERE employee_id IS NOT NULL AND trim(employee_id)<>''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sso_states_expiry ON sso_login_states(expires_at, used_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
+        conn.execute("UPDATE team_posts SET title=substr(content, 1, 40) WHERE title IS NULL OR trim(title)=''")
+        conn.execute("UPDATE team_posts SET category=CASE WHEN kind='roast' THEN 'roast' ELSE 'general' END WHERE category IS NULL OR trim(category)=''")
+        conn.execute("UPDATE team_posts SET status='open' WHERE status IS NULL OR trim(status)=''")
+        conn.execute("UPDATE team_posts SET updated_at=created_at WHERE updated_at IS NULL OR trim(updated_at)=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_type='weekly' WHERE recurrence_type IS NULL OR recurrence_type=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_value IS NULL OR recurrence_value=''")
         conn.execute("UPDATE meeting_topic_options SET recurrence_value=CAST(COALESCE(recurrence_weeks, 1) AS TEXT) WHERE recurrence_type='weekly'")
@@ -1199,12 +1390,12 @@ def init_db():
             admin_salt, admin_hash = make_hash("admin123")
             user_salt, user_hash = make_hash("user123")
             conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?)",
-                ("admin", admin_salt, admin_hash, "管理员", "admin", DEFAULT_USER_TYPE_KEY, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("admin", "admin", admin_salt, admin_hash, "管理员", "admin", DEFAULT_USER_TYPE_KEY, now_iso()),
             )
             conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?)",
-                ("user", user_salt, user_hash, "示例成员", "user", DEFAULT_USER_TYPE_KEY, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("user", "user", user_salt, user_hash, "示例成员", "user", DEFAULT_USER_TYPE_KEY, now_iso()),
             )
             conn.execute(
                 "INSERT INTO machines(name, description) VALUES(?, ?)",
@@ -1256,6 +1447,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
                 ensure_daily_backup()
+            if parsed.path in ("/api/sso/login", "/api/sso/callback") and method == "GET":
+                try:
+                    if parsed.path == "/api/sso/login":
+                        self.start_sso_login()
+                    else:
+                        self.complete_sso_login(parse_qs(parsed.query))
+                except AppError as exc:
+                    self.send_redirect(f"/?sso_error={quote(exc.message, safe='')}")
+                except Exception:
+                    traceback.print_exc()
+                    message = "企业 SSO 登录处理失败，请联系管理员查看服务日志"
+                    self.send_redirect(f"/?sso_error={quote(message, safe='')}")
+                return
             if parsed.path == "/api/backups/download" and method == "GET":
                 self.send_backup_file(parse_qs(parsed.query))
                 return
@@ -1308,6 +1512,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
         self.wfile.flush()
+
+    def send_redirect(self, location, headers=None):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.close_connection = True
+        self.end_headers()
 
     def send_link_redirect(self, link_id):
         user = self.current_user(required=False)
@@ -1369,7 +1584,7 @@ class Handler(BaseHTTPRequestHandler):
             if session:
                 user = conn.execute(
                     """
-                    SELECT u.id, u.username, u.display_name, u.role, u.user_type,
+                    SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
                            t.name AS user_type_name,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
@@ -1564,6 +1779,13 @@ class Handler(BaseHTTPRequestHandler):
                 return {"posts": self.list_team_posts(user)}
             if method == "POST":
                 return self.create_team_post(user)
+        if len(parts) == 3 and parts[:2] == ["api", "team-posts"]:
+            if method == "GET":
+                return self.get_team_post(int(parts[2]), user)
+            if method == "PATCH":
+                return self.update_team_post(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_team_post(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "replies" and method == "POST":
             return self.create_team_post_reply(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "team-posts"] and parts[3] == "reactions" and method == "POST":
@@ -1723,6 +1945,223 @@ class Handler(BaseHTTPRequestHandler):
 
         raise AppError(404, "接口不存在")
 
+    def sso_redirect_uri(self, config):
+        configured = (config.get("redirect_uri") or "").strip()
+        if configured:
+            return validate_sso_url(configured, "OIDC 回调地址")
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not re.fullmatch(r"(?:localhost|127\.0\.0\.1)(?::\d{1,5})?", host):
+            raise AppError(400, "正式部署必须在系统配置中填写 OIDC 回调地址")
+        return f"http://{host}/api/sso/callback"
+
+    def issue_session(self, conn, user, action, summary, metadata=None, secure_cookie=False):
+        user_data = dict(user)
+        now = dt.datetime.now().replace(microsecond=0)
+        timeout = get_int_setting(conn, "session_timeout_minutes", 480, minimum=15, maximum=43200)
+        token = secrets.token_urlsafe(32)
+        expires_at = now + dt.timedelta(minutes=timeout)
+        cursor = conn.execute(
+            """
+            INSERT INTO auth_sessions(token_hash, user_id, ip_address, user_agent, created_at, last_seen_at, expires_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                token_digest(token), user_data["id"], self.client_address[0],
+                (self.headers.get("User-Agent") or "")[:500], now.isoformat(), now.isoformat(), expires_at.isoformat(),
+            ),
+        )
+        self.current_session_id = cursor.lastrowid
+        conn.execute("DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL AND revoked_at<?", ((now - dt.timedelta(days=30)).isoformat(),))
+        safe_keys = (
+            "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
+            "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
+            "active", "created_at", "auth_source",
+        )
+        safe_user = {key: user_data.get(key) for key in safe_keys if key in user_data}
+        write_audit(conn, safe_user, action, "session", safe_user["id"], summary, metadata or {}, self.client_address[0])
+        secure = "; Secure" if secure_cookie else ""
+        cookie = f"weekly_session={token}; Path=/; Max-Age={timeout * 60}; HttpOnly; SameSite=Lax{secure}"
+        return safe_user, cookie
+
+    def start_sso_login(self):
+        with connect() as conn:
+            config = sso_configuration(conn)
+            if not config["enabled"]:
+                raise AppError(400, "企业 SSO 尚未启用")
+            if not sso_configuration_ready(config):
+                raise AppError(400, "企业 SSO 配置不完整，请联系管理员")
+            redirect_uri = self.sso_redirect_uri(config)
+            discovery = load_oidc_discovery(config)
+            state = secrets.token_urlsafe(32)
+            nonce = secrets.token_urlsafe(32)
+            verifier = secrets.token_urlsafe(64)
+            now = dt.datetime.now().replace(microsecond=0)
+            conn.execute("DELETE FROM sso_login_states WHERE expires_at<? OR used_at IS NOT NULL", ((now - dt.timedelta(minutes=10)).isoformat(),))
+            conn.execute(
+                """
+                INSERT INTO sso_login_states(state_hash, nonce, code_verifier, redirect_uri, created_at, expires_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (token_digest(state), nonce, verifier, redirect_uri, now.isoformat(), (now + dt.timedelta(minutes=10)).isoformat()),
+            )
+        parameters = {
+            "response_type": "code",
+            "client_id": config["client_id"],
+            "redirect_uri": redirect_uri,
+            "scope": config["scopes"],
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": base64url_digest(verifier),
+            "code_challenge_method": "S256",
+        }
+        separator = "&" if "?" in discovery["authorization_endpoint"] else "?"
+        self.send_redirect(f"{discovery['authorization_endpoint']}{separator}{urlencode(parameters)}")
+
+    def complete_sso_login(self, query):
+        provider_error = (query.get("error_description") or query.get("error") or [""])[0]
+        if provider_error:
+            raise AppError(401, f"企业身份平台拒绝登录：{str(provider_error)[:160]}")
+        code = (query.get("code") or [""])[0]
+        state = (query.get("state") or [""])[0]
+        if not code or not state:
+            raise AppError(400, "SSO 回调缺少授权码或状态参数")
+        now = dt.datetime.now().replace(microsecond=0)
+        with connect() as conn:
+            config = sso_configuration(conn)
+            row = conn.execute(
+                "SELECT * FROM sso_login_states WHERE state_hash=? AND used_at IS NULL",
+                (token_digest(state),),
+            ).fetchone()
+            if not row or (parse_iso_datetime(row["expires_at"]) or now) <= now:
+                raise AppError(400, "SSO 登录请求已失效，请重新发起登录")
+            conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=?", (now.isoformat(), token_digest(state)))
+            redirect_uri = row["redirect_uri"]
+            verifier = row["code_verifier"]
+        if not sso_configuration_ready(config):
+            raise AppError(400, "企业 SSO 配置已变更，请重新登录")
+        discovery = load_oidc_discovery(config)
+        token_form = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": config["client_id"],
+            "code_verifier": verifier,
+        }
+        token_headers = {}
+        if config["client_secret"]:
+            supported = discovery.get("token_endpoint_auth_methods_supported") or []
+            if "client_secret_basic" in supported:
+                credentials = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode("utf-8")).decode("ascii")
+                token_headers["Authorization"] = f"Basic {credentials}"
+            else:
+                token_form["client_secret"] = config["client_secret"]
+        tokens = fetch_json(discovery["token_endpoint"], method="POST", form=token_form, headers=token_headers)
+        access_token = str(tokens.get("access_token") or "")
+        if not access_token:
+            raise AppError(502, "企业身份平台未返回访问令牌")
+        claims = fetch_json(discovery["userinfo_endpoint"], headers={"Authorization": f"Bearer {access_token}"})
+        employee_id = claim_value(claims, config["username_claim"])
+        if not employee_id:
+            for fallback in ("employee_id", "employeeNumber", "employee_no", "job_number", "preferred_username", "upn", "email"):
+                employee_id = claim_value(claims, fallback)
+                if employee_id:
+                    break
+        subject = claim_value(claims, "sub") or employee_id
+        display_name = claim_value(claims, config["display_name_claim"]) or claim_value(claims, "name") or employee_id
+        employee_id = employee_id.strip()[:120]
+        username = employee_id
+        display_name = display_name.strip()[:120]
+        if not subject or not employee_id or not display_name or re.search(r"[\x00-\x1f\x7f]", employee_id):
+            raise AppError(400, f"企业账号信息缺少工号字段 {config['username_claim']} 或姓名字段")
+        provider_key = (config.get("issuer_url") or urlparse(discovery["authorization_endpoint"]).netloc).rstrip("/")
+        identity = f"{provider_key}|{subject}"
+        auth_source = "oauth2" if config.get("mode") == "manual" else "oidc"
+        with connect() as conn:
+            user = conn.execute(
+                """
+                SELECT u.*, t.name AS user_type_name,
+                       COALESCE(t.include_in_members, 1) AS eligible_members,
+                       COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                       COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                       COALESCE(t.include_in_thanks, 1) AS eligible_thanks
+                FROM users u LEFT JOIN user_types t ON t.key=u.user_type
+                WHERE u.auth_source IN ('oidc', 'oauth2') AND u.external_subject=?
+                """,
+                (identity,),
+            ).fetchone()
+            linked_existing = False
+            created = False
+            if not user:
+                existing = conn.execute(
+                    "SELECT * FROM users WHERE LOWER(employee_id)=LOWER(?) OR LOWER(username)=LOWER(?) ORDER BY CASE WHEN LOWER(employee_id)=LOWER(?) THEN 0 ELSE 1 END LIMIT 1",
+                    (employee_id, employee_id, employee_id),
+                ).fetchone()
+                if existing:
+                    if not existing["active"]:
+                        raise AppError(403, "该企业账号对应的系统用户已停用")
+                    if existing["external_subject"] and existing["external_subject"] != identity:
+                        raise AppError(409, "该系统账号已绑定其他企业身份")
+                    conn.execute(
+                        "UPDATE users SET auth_source=?, external_subject=?, employee_id=? WHERE id=?",
+                        (auth_source, identity, employee_id, existing["id"]),
+                    )
+                    linked_existing = True
+                    user_id = existing["id"]
+                else:
+                    if not config["auto_provision"]:
+                        raise AppError(403, "该企业账号尚未在系统中创建，请联系管理员")
+                    user_type = conn.execute(
+                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
+                        (config["default_user_type"], GUEST_USER_TYPE_KEY),
+                    ).fetchone()
+                    if not user_type:
+                        raise AppError(400, "SSO 默认用户类型无效，请联系管理员")
+                    salt, password_hash = make_hash(secrets.token_urlsafe(48))
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, active, created_at, auth_source, external_subject)
+                        VALUES(?,?,?,?,?,?,?,1,?,?,?)
+                        """,
+                        (username, employee_id, salt, password_hash, display_name, "user", user_type["key"], now_iso(), auth_source, identity),
+                    )
+                    user_id = cursor.lastrowid
+                    sync_member_for_user(conn, user_id)
+                    created = True
+                user = conn.execute(
+                    """
+                    SELECT u.*, t.name AS user_type_name,
+                           COALESCE(t.include_in_members, 1) AS eligible_members,
+                           COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                           COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                           COALESCE(t.include_in_thanks, 1) AS eligible_thanks
+                    FROM users u LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.id=? AND u.active=1
+                    """,
+                    (user_id,),
+                ).fetchone()
+            elif str(user["employee_id"] or "").lower() != employee_id.lower():
+                duplicate = conn.execute(
+                    "SELECT id FROM users WHERE LOWER(employee_id)=LOWER(?) AND id<>?",
+                    (employee_id, user["id"]),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(409, "该工号已关联其他系统用户，请联系管理员处理")
+                conn.execute("UPDATE users SET employee_id=?, auth_source=? WHERE id=?", (employee_id, auth_source, user["id"]))
+                user = dict(user)
+                user["employee_id"] = employee_id
+                user["auth_source"] = auth_source
+            if not user or not user["active"]:
+                raise AppError(403, "企业账号对应的系统用户不可用")
+            safe_user, cookie = self.issue_session(
+                conn,
+                user,
+                "auth.sso_login",
+                "用户通过企业 SSO 登录",
+                {"created": created, "linked_existing": linked_existing, "provider": provider_key, "employee_id": employee_id},
+                secure_cookie=redirect_uri.startswith("https://"),
+            )
+        self.send_redirect("/?sso=success", {"Set-Cookie": cookie})
+
     def login(self):
         data = read_json(self)
         username = (data.get("username") or "").strip()
@@ -1749,7 +2188,7 @@ class Handler(BaseHTTPRequestHandler):
                        COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                 FROM users u
                 LEFT JOIN user_types t ON t.key = u.user_type
-                WHERE u.username=? AND u.active=1
+                WHERE LOWER(u.username)=LOWER(?) AND u.active=1
                 """,
                 (username,),
             ).fetchone()
@@ -1794,9 +2233,9 @@ class Handler(BaseHTTPRequestHandler):
             safe_user = {
                 key: user[key]
                 for key in (
-                    "id", "username", "display_name", "role", "user_type", "user_type_name",
+                    "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
                     "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
-                    "active", "created_at",
+                    "active", "created_at", "auth_source",
                 )
             }
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
@@ -2237,7 +2676,7 @@ class Handler(BaseHTTPRequestHandler):
             return rows_to_list(
                 conn.execute(
                     """
-                    SELECT u.id, u.username, u.display_name, u.role, u.user_type,
+                    SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
                            COALESCE(t.name, u.user_type) AS user_type_name,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
@@ -2334,11 +2773,12 @@ class Handler(BaseHTTPRequestHandler):
         admin = self.require_admin()
         data = read_json(self)
         username = str(data.get("username") or "").strip()
+        employee_id = str(data.get("employee_id") or username).strip()
         display_name = str(data.get("display_name") or username).strip()
         role = data.get("role") or "user"
         user_type = str(data.get("user_type") or "").strip()
-        if not username or not display_name:
-            raise AppError(400, "账号和姓名不能为空")
+        if not username or not employee_id or not display_name:
+            raise AppError(400, "账号、工号和姓名不能为空")
         if role not in ("admin", "user"):
             raise AppError(400, "账号授权方式不正确")
         if not user_type or user_type == GUEST_USER_TYPE_KEY:
@@ -2347,9 +2787,11 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             if not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (user_type,)).fetchone():
                 raise AppError(400, "用户类型不存在，请先创建用户类型")
+            if conn.execute("SELECT id FROM users WHERE LOWER(employee_id)=LOWER(?)", (employee_id,)).fetchone():
+                raise AppError(400, "工号已关联其他用户")
             cursor = conn.execute(
-                "INSERT INTO users(username, salt, password_hash, display_name, role, user_type, active, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (username, salt, password_hash, display_name, role, user_type, 1, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, active, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (username, employee_id, salt, password_hash, display_name, role, user_type, 1, now_iso()),
             )
             sync_member_for_user(conn, cursor.lastrowid)
             write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": username, "role": role, "user_type": user_type}, self.client_address[0])
@@ -2366,6 +2808,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "账号不能为空")
             fields.append("username=?")
             values.append(username)
+        if "employee_id" in data:
+            employee_id = (data.get("employee_id") or "").strip()
+            if not employee_id:
+                raise AppError(400, "工号不能为空")
+            fields.append("employee_id=?")
+            values.append(employee_id)
         for key in ("display_name", "role", "active", "user_type"):
             if key in data:
                 fields.append(f"{key}=?")
@@ -2385,6 +2833,13 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if duplicate:
                     raise AppError(400, "账号已存在")
+            if "employee_id" in data:
+                duplicate = conn.execute(
+                    "SELECT id FROM users WHERE LOWER(employee_id)=LOWER(?) AND id<>?",
+                    ((data.get("employee_id") or "").strip(), user_id),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(400, "工号已关联其他用户")
             if "role" in data and data.get("role") not in ("admin", "user"):
                 raise AppError(400, "账号授权方式不正确")
             if "user_type" in data:
@@ -2549,10 +3004,11 @@ class Handler(BaseHTTPRequestHandler):
             posts = rows_to_list(
                 conn.execute(
                     """
-                    SELECT p.*, u.display_name
+                    SELECT p.*, u.display_name, u.username
                     FROM team_posts p
                     JOIN users u ON u.id = p.user_id
-                    ORDER BY p.created_at ASC, p.id ASC
+                    WHERE p.deleted_at IS NULL
+                    ORDER BY p.pinned DESC, COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
                     """
                 ).fetchall()
             )
@@ -2618,6 +3074,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         reply_lookup = {}
         root_replies = {}
+        reply_count_map = {}
+        latest_reply_map = {}
         for reply in replies:
             reply["reactions"] = sorted(
                 reply_reaction_map.get(reply["id"], []),
@@ -2626,6 +3084,8 @@ class Handler(BaseHTTPRequestHandler):
             reply["replies"] = []
             reply["mine"] = bool(user and reply["user_id"] == user["id"])
             reply_lookup[reply["id"]] = reply
+            reply_count_map[reply["post_id"]] = reply_count_map.get(reply["post_id"], 0) + 1
+            latest_reply_map[reply["post_id"]] = reply
         for reply in replies:
             parent = reply_lookup.get(reply.get("parent_reply_id"))
             if parent and parent["post_id"] == reply["post_id"]:
@@ -2635,26 +3095,146 @@ class Handler(BaseHTTPRequestHandler):
         for post in posts:
             post["replies"] = root_replies.get(post["id"], [])
             post["mine"] = bool(user and post["user_id"] == user["id"])
+            post["reply_count"] = reply_count_map.get(post["id"], 0)
+            latest_reply = latest_reply_map.get(post["id"])
+            post["last_reply_at"] = latest_reply.get("created_at") if latest_reply else None
+            post["last_reply_name"] = latest_reply.get("display_name") if latest_reply else None
             post["reactions"] = sorted(
                 reaction_map.get(post["id"], []),
                 key=lambda item: (reaction_rank.get(item["reaction"], 99), -int(item["count"] or 0), item["reaction"]),
             )
         return posts
 
+    def get_team_post(self, post_id, user=None):
+        with connect() as conn:
+            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
+            if not post:
+                raise AppError(404, "讨论主题不存在")
+            conn.execute("UPDATE team_posts SET view_count=view_count+1 WHERE id=?", (post_id,))
+        result = next((item for item in self.list_team_posts(user) if item["id"] == post_id), None)
+        if not result:
+            raise AppError(404, "讨论主题不存在")
+        return {"post": result}
+
     def create_team_post(self, user):
         data = read_json(self)
-        kind = data.get("kind") if data.get("kind") in ("comment", "roast") else "comment"
+        category = str(data.get("category") or "general").strip()
+        if category not in TEAM_POST_CATEGORIES:
+            raise AppError(400, "讨论分类不正确")
+        if category == "announcement" and user.get("role") != "admin":
+            raise AppError(403, "仅管理员可发布团队公告")
+        kind = "roast" if category == "roast" else "comment"
+        title = (data.get("title") or "").strip()
         content = (data.get("content") or "").strip()
+        if not title:
+            title = content[:40]
+        if not title:
+            raise AppError(400, "主题标题不能为空")
+        if len(title) > 80:
+            raise AppError(400, "主题标题最多 80 字")
         if not content:
             raise AppError(400, "内容不能为空")
-        if len(content) > 300:
-            raise AppError(400, "团队对话最多 300 字")
+        if len(content) > 2000:
+            raise AppError(400, "讨论内容最多 2000 字")
+        created_at = now_iso()
         with connect() as conn:
-            conn.execute(
-                "INSERT INTO team_posts(user_id, kind, content, created_at) VALUES(?,?,?,?)",
-                (user["id"], kind, content, now_iso()),
+            cursor = conn.execute(
+                """
+                INSERT INTO team_posts(user_id, kind, title, category, status, pinned, view_count, content, updated_at, created_at)
+                VALUES(?,?,?,?, 'open', 0, 0, ?, ?, ?)
+                """,
+                (user["id"], kind, title, category, content, created_at, created_at),
             )
+            write_audit(conn, user, "team_post.create", "team_post", cursor.lastrowid, "团队讨论主题已发布", {"title": title, "category": category}, self.client_address[0])
         return {"message": "已发布", "posts": self.list_team_posts(user)}
+
+    def update_team_post(self, post_id, user):
+        data = read_json(self)
+        with connect() as conn:
+            post = conn.execute("SELECT * FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
+            if not post:
+                raise AppError(404, "讨论主题不存在")
+            is_admin = user.get("role") == "admin"
+            is_owner = post["user_id"] == user["id"]
+            if not is_admin and not is_owner:
+                raise AppError(403, "只能修改自己发布的主题")
+            fields = []
+            values = []
+            if "title" in data:
+                title = str(data.get("title") or "").strip()
+                if not title or len(title) > 80:
+                    raise AppError(400, "主题标题需为 1 至 80 字")
+                fields.append("title=?")
+                values.append(title)
+            if "content" in data:
+                content = str(data.get("content") or "").strip()
+                if not content or len(content) > 2000:
+                    raise AppError(400, "讨论内容需为 1 至 2000 字")
+                fields.append("content=?")
+                values.append(content)
+            if "category" in data:
+                category = str(data.get("category") or "").strip()
+                if category not in TEAM_POST_CATEGORIES:
+                    raise AppError(400, "讨论分类不正确")
+                if category == "announcement" and not is_admin:
+                    raise AppError(403, "仅管理员可发布团队公告")
+                fields.extend(["category=?", "kind=?"])
+                values.extend([category, "roast" if category == "roast" else "comment"])
+            if "status" in data:
+                status = str(data.get("status") or "").strip()
+                if status not in TEAM_POST_STATUSES:
+                    raise AppError(400, "讨论状态不正确")
+                fields.append("status=?")
+                values.append(status)
+            if "pinned" in data:
+                if not is_admin:
+                    raise AppError(403, "仅管理员可置顶主题")
+                fields.append("pinned=?")
+                values.append(1 if data.get("pinned") else 0)
+            if not fields:
+                raise AppError(400, "没有可更新字段")
+            fields.append("updated_at=?")
+            values.append(now_iso())
+            values.append(post_id)
+            conn.execute(f"UPDATE team_posts SET {', '.join(fields)} WHERE id=?", values)
+            write_audit(conn, user, "team_post.update", "team_post", post_id, "团队讨论主题已更新", {"fields": list(data.keys())}, self.client_address[0])
+        return {"message": "主题已更新", "posts": self.list_team_posts(user)}
+
+    def delete_team_post(self, post_id, user):
+        with connect() as conn:
+            post = conn.execute(
+                "SELECT id, user_id, title, deleted_at FROM team_posts WHERE id=?",
+                (post_id,),
+            ).fetchone()
+            if not post:
+                raise AppError(404, "讨论主题不存在")
+            if post["user_id"] != user["id"] and user.get("role") != "admin":
+                raise AppError(403, "只能删除自己发布的主题")
+            if post["deleted_at"]:
+                raise AppError(400, "讨论主题已经在回收站中")
+            conn.execute(
+                "UPDATE team_posts SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now_iso(), user["id"], post_id),
+            )
+            add_recycle_record(
+                conn,
+                "team_post",
+                post_id,
+                (post["title"] or "团队讨论")[:60],
+                user,
+                {},
+            )
+            write_audit(
+                conn,
+                user,
+                "team_post.delete",
+                "team_post",
+                post_id,
+                "团队讨论主题已删除",
+                {},
+                self.client_address[0],
+            )
+        return {"message": "讨论主题已移入回收站", "posts": self.list_team_posts(user)}
 
     def create_team_post_reply(self, post_id, user):
         data = read_json(self)
@@ -2670,7 +3250,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 raise AppError(400, "回复层级不正确")
         with connect() as conn:
-            post = conn.execute("SELECT id FROM team_posts WHERE id=?", (post_id,)).fetchone()
+            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
             if not post:
                 raise AppError(404, "对话不存在")
             if parent_reply_id is not None:
@@ -2684,6 +3264,8 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO team_post_replies(post_id, parent_reply_id, user_id, content, created_at) VALUES(?,?,?,?,?)",
                 (post_id, parent_reply_id, user["id"], content, now_iso()),
             )
+            conn.execute("UPDATE team_posts SET updated_at=? WHERE id=?", (now_iso(), post_id))
+            write_audit(conn, user, "team_reply.create", "team_post", post_id, "团队讨论新增回复", {"parent_reply_id": parent_reply_id}, self.client_address[0])
         return {"message": "已回复", "posts": self.list_team_posts(user)}
 
     def toggle_team_post_reaction(self, post_id, user):
@@ -2692,7 +3274,7 @@ class Handler(BaseHTTPRequestHandler):
         if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
             raise AppError(400, "回应内容不支持")
         with connect() as conn:
-            post = conn.execute("SELECT id FROM team_posts WHERE id=?", (post_id,)).fetchone()
+            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
             if not post:
                 raise AppError(404, "对话不存在")
             existing = conn.execute(
@@ -2714,7 +3296,15 @@ class Handler(BaseHTTPRequestHandler):
         if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
             raise AppError(400, "回应内容不支持")
         with connect() as conn:
-            reply = conn.execute("SELECT id FROM team_post_replies WHERE id=? AND deleted_at IS NULL", (reply_id,)).fetchone()
+            reply = conn.execute(
+                """
+                SELECT r.id
+                FROM team_post_replies r
+                JOIN team_posts p ON p.id = r.post_id
+                WHERE r.id=? AND r.deleted_at IS NULL AND p.deleted_at IS NULL
+                """,
+                (reply_id,),
+            ).fetchone()
             if not reply:
                 raise AppError(404, "回复不存在")
             existing = conn.execute(
@@ -4621,6 +5211,7 @@ class Handler(BaseHTTPRequestHandler):
         labels = {
             "user": "用户",
             "link": "常用链接",
+            "team_post": "讨论主题",
             "team_reply": "团队回复",
             "meeting_item": "会议议题",
         }
@@ -4648,6 +5239,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE links SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
             elif entity_type == "meeting_item":
                 conn.execute("UPDATE meeting_items SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
+            elif entity_type == "team_post":
+                conn.execute("UPDATE team_posts SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
             elif entity_type == "team_reply":
                 reply_ids = [int(value) for value in payload.get("reply_ids") or [item["entity_id"]]]
                 placeholders = ",".join("?" for _ in reply_ids)
@@ -4683,6 +5276,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM links WHERE id=?", (item["entity_id"],))
             elif item["entity_type"] == "meeting_item":
                 conn.execute("DELETE FROM meeting_items WHERE id=?", (item["entity_id"],))
+            elif item["entity_type"] == "team_post":
+                conn.execute("DELETE FROM team_posts WHERE id=?", (item["entity_id"],))
             elif item["entity_type"] == "team_reply":
                 reply_ids = [int(value) for value in payload.get("reply_ids") or [item["entity_id"]]]
                 placeholders = ",".join("?" for _ in reply_ids)
@@ -4708,8 +5303,8 @@ class Handler(BaseHTTPRequestHandler):
         sources = [
             ("meetings", "会议", "meetings", "meeting_date", "1=1"),
             ("meeting_items", "会议议题", "meeting_items", "created_at", "deleted_at IS NULL"),
-            ("team_posts", "团队对话", "team_posts", "created_at", "1=1"),
-            ("team_replies", "团队回复", "team_post_replies", "created_at", "deleted_at IS NULL"),
+            ("team_posts", "团队讨论", "team_posts", "created_at", "deleted_at IS NULL"),
+            ("team_replies", "团队回复", "team_post_replies", "created_at", "deleted_at IS NULL AND post_id IN (SELECT id FROM team_posts WHERE deleted_at IS NULL)"),
             ("morning", "早例会事项", "morning_items", "item_date", "active=1"),
         ]
         allowed = {
@@ -4828,16 +5423,16 @@ class Handler(BaseHTTPRequestHandler):
 
             if wants("team_posts") and self.can_view_module(user, "members"):
                 params = []
-                where = "1=1"
+                where = "p.deleted_at IS NULL"
                 if keyword:
-                    where += " AND (p.content LIKE ? OR u.display_name LIKE ?)"
-                    params.extend([like, like])
+                    where += " AND (COALESCE(p.title, '') LIKE ? OR p.content LIKE ? OR COALESCE(p.category, '') LIKE ? OR u.display_name LIKE ?)"
+                    params.extend([like, like, like, like])
                 if year:
                     where += in_year("p.created_at")
                     params.append(year)
                 rows = rows_to_list(conn.execute(
                     f"""
-                    SELECT p.id, p.kind, p.content, p.created_at, u.display_name AS owner
+                    SELECT p.id, p.kind, p.category, p.title, p.content, p.created_at, u.display_name AS owner
                     FROM team_posts p
                     JOIN users u ON u.id = p.user_id
                     WHERE {where}
@@ -4847,11 +5442,11 @@ class Handler(BaseHTTPRequestHandler):
                     [*params, limit],
                 ).fetchall())
                 for row in rows:
-                    add_result("team_posts", "团队对话", row["id"], "评论" if row["kind"] == "comment" else "吐槽", row["content"], row["created_at"], row.get("owner"), "members")
+                    add_result("team_posts", "团队讨论", row["id"], row.get("title") or row.get("category") or "讨论主题", row["content"], row["created_at"], row.get("owner"), "members")
 
             if wants("team_replies") and self.can_view_module(user, "members"):
                 params = []
-                where = "r.deleted_at IS NULL"
+                where = "r.deleted_at IS NULL AND p.deleted_at IS NULL"
                 if keyword:
                     where += " AND (r.content LIKE ? OR u.display_name LIKE ?)"
                     params.extend([like, like])
@@ -4862,6 +5457,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"""
                     SELECT r.id, r.content, r.created_at, u.display_name AS owner
                     FROM team_post_replies r
+                    JOIN team_posts p ON p.id = r.post_id
                     JOIN users u ON u.id = r.user_id
                     WHERE {where}
                     ORDER BY r.created_at DESC, r.id DESC
@@ -5031,7 +5627,7 @@ class Handler(BaseHTTPRequestHandler):
     def list_settings(self):
         self.require_admin()
         with connect() as conn:
-            return rows_to_list(
+            settings = rows_to_list(
                 conn.execute(
                     """
                     SELECT s.*, u.display_name AS updated_by_name
@@ -5041,6 +5637,12 @@ class Handler(BaseHTTPRequestHandler):
                     """
                 ).fetchall()
             )
+            for setting in settings:
+                if setting["value_type"] != "password":
+                    continue
+                setting["configured"] = bool(sso_setting(conn, setting["key"]))
+                setting["value"] = ""
+            return settings
 
     def public_settings(self):
         keys = (
@@ -5048,6 +5650,9 @@ class Handler(BaseHTTPRequestHandler):
             "app_team_name",
             "red_black_show_black_points",
             "red_black_show_black_details",
+            "sso_enabled",
+            "sso_auto_login",
+            "sso_button_label",
         )
         placeholders = ",".join("?" for _ in keys)
         with connect() as conn:
@@ -5057,8 +5662,13 @@ class Handler(BaseHTTPRequestHandler):
                     keys,
                 ).fetchall()
             )
+            config = sso_configuration(conn)
         values = {key: value for key, _, value, _, _ in DEFAULT_SETTINGS if key in keys}
         values.update({row["key"]: row["value"] for row in rows})
+        values["sso_enabled"] = "1" if config["enabled"] else "0"
+        values["sso_auto_login"] = "1" if config["auto_login"] else "0"
+        values["sso_button_label"] = config["button_label"]
+        values["sso_ready"] = "1" if sso_configuration_ready(config) else "0"
         return values
 
     def update_settings(self):
@@ -5076,6 +5686,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not row:
                     continue
                 normalized = str(value).strip()
+                if row["value_type"] == "password" and not normalized:
+                    continue
                 if row["value_type"] == "number":
                     try:
                         normalized = str(max(0, int(float(normalized))))
@@ -5083,10 +5695,48 @@ class Handler(BaseHTTPRequestHandler):
                         raise AppError(400, f"{key} 必须是数字")
                 if row["value_type"] == "boolean":
                     normalized = "1" if normalized in ("1", "true", "on", "yes", "启用") else "0"
+                if key in ("sso_issuer_url", "sso_redirect_uri", "sso_authorization_url", "sso_token_url", "sso_userinfo_url") and normalized:
+                    labels = {
+                        "sso_issuer_url": "OIDC Issuer",
+                        "sso_redirect_uri": "OIDC 回调地址",
+                        "sso_authorization_url": "OAuth2 授权地址",
+                        "sso_token_url": "OAuth2 Token 地址",
+                        "sso_userinfo_url": "OAuth2 用户信息地址",
+                    }
+                    validate_sso_url(normalized, labels[key])
+                if key == "sso_mode" and normalized not in ("discovery", "manual"):
+                    raise AppError(400, "OAuth2 配置方式不正确")
+                if key == "sso_default_user_type" and normalized:
+                    user_type = conn.execute(
+                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
+                        (normalized, GUEST_USER_TYPE_KEY),
+                    ).fetchone()
+                    if not user_type:
+                        raise AppError(400, "SSO 默认用户类型必须是有效的非访客类型")
                 conn.execute(
                     "UPDATE system_settings SET value=?, updated_by=?, updated_at=? WHERE key=?",
                     (normalized, admin["id"], now_iso(), key),
                 )
+            config = sso_configuration(conn)
+            if config["enabled"]:
+                if not sso_configuration_ready(config):
+                    if config["mode"] == "manual":
+                        raise AppError(400, "启用企业 SSO 前必须填写 Client ID 以及三个 OAuth2 服务地址")
+                    raise AppError(400, "启用企业 SSO 前必须填写 OIDC Issuer 和 Client ID")
+                if config["mode"] == "manual":
+                    for key, label in (("authorization_url", "OAuth2 授权地址"), ("token_url", "OAuth2 Token 地址"), ("userinfo_url", "OAuth2 用户信息地址")):
+                        validate_sso_url(config[key], label)
+                else:
+                    validate_sso_url(config["issuer_url"], "OIDC Issuer")
+                if config["redirect_uri"]:
+                    validate_sso_url(config["redirect_uri"], "OIDC 回调地址")
+                if config["auto_provision"]:
+                    default_type = conn.execute(
+                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
+                        (config["default_user_type"], GUEST_USER_TYPE_KEY),
+                    ).fetchone()
+                    if not default_type:
+                        raise AppError(400, "启用 SSO 自动建号前必须选择有效的默认用户类型")
             write_audit(
                 conn,
                 admin,

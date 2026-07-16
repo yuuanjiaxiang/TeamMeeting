@@ -8,6 +8,14 @@ const state = {
   permissions: {},
   users: [],
   members: [],
+  teamPosts: [],
+  forumCategory: "all",
+  forumSearch: "",
+  forumSort: "recent",
+  forumMineOnly: false,
+  forumPage: 1,
+  selectedForumPostId: null,
+  editingForumPostId: null,
   rules: [],
   machines: [],
   topics: [],
@@ -55,9 +63,9 @@ const state = {
 };
 
 const pages = [
-  ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队对话都在这里。"],
+  ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队讨论都在这里。"],
   ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
-  ["archive", "⌕", "搜索归档", "跨年度搜索会议、对话和早例会事项。"],
+  ["archive", "⌕", "搜索归档", "跨年度搜索会议、讨论和早例会事项。"],
   ["morning", "☀", "早例会", "按人追踪当天事项、风险和下一步。"],
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
@@ -73,6 +81,14 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"];
+const forumCategoryMeta = {
+  general: { label: "普通讨论", tone: "general" },
+  field: { label: "现场问题", tone: "field" },
+  retrospective: { label: "经验复盘", tone: "retrospective" },
+  roast: { label: "吐槽广场", tone: "roast" },
+  announcement: { label: "团队公告", tone: "announcement" },
+};
+const forumPageSize = 6;
 const teamReactionLabels = {
   "+1": "+1",
   "👍": "点赞",
@@ -113,6 +129,30 @@ function safeStorageSet(key, value) {
     localStorage.setItem(key, value);
   } catch {
     // Theme preference is cosmetic; ignore storage failures.
+  }
+}
+
+function safeSessionGet(key, fallback = "") {
+  try {
+    return sessionStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeSessionSet(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    // Authentication fallback still works when session storage is unavailable.
+  }
+}
+
+function safeSessionRemove(key) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures.
   }
 }
 
@@ -448,7 +488,13 @@ function applyAuthView() {
     $("#permissionPreviewSummary").textContent = `可查看 ${state.permissionPreview.modules.length} 个模块，服务端仍保持管理员身份`;
   }
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
-  $("#teamChatForm")?.classList.toggle("hidden", guest || !canOperate("members", "create"));
+  $("#forumCreateButton")?.classList.toggle("hidden", guest || !canOperate("members", "create"));
+  $$('[data-forum-create-open]').forEach((button) => button.classList.toggle("hidden", guest || !canOperate("members", "create")));
+  $("#forumMineButton")?.classList.toggle("hidden", guest);
+  $$('[data-admin-category]').forEach((option) => {
+    option.hidden = !isAdminView();
+    option.disabled = !isAdminView();
+  });
   $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("thanks", "create"));
   $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("links", "create"));
   $("#openMeetingCreateBtn")?.classList.toggle("hidden", guest || !canOperate("meetings", "create"));
@@ -472,7 +518,9 @@ async function transitionToLoggedOut(showLogin = true, refresh = true) {
   state.sessions = [];
   state.thankUsers = [];
   state.showLogin = showLogin;
+  applyBranding();
   applyAuthView();
+  if (showLogin && maybeStartSsoAutoLogin()) return;
   if (refresh) await refreshAll();
 }
 
@@ -693,7 +741,50 @@ function applyBranding() {
   if (brandNameEl) brandNameEl.textContent = brandName;
   if (brandTeamEl) brandTeamEl.textContent = teamName;
   if (brandMarkEl) brandMarkEl.textContent = mark;
+  const ssoSection = $("#ssoLoginSection");
+  const ssoButton = $("#ssoLoginBtn");
+  const ssoMode = settingValue("sso_mode", "discovery");
+  const configuredInAdminView = settingEnabled("sso_enabled", false)
+    && Boolean(settingValue("sso_client_id"))
+    && (ssoMode === "manual"
+      ? Boolean(settingValue("sso_authorization_url")) && Boolean(settingValue("sso_token_url")) && Boolean(settingValue("sso_userinfo_url"))
+      : Boolean(settingValue("sso_issuer_url")));
+  const ssoReady = String(state.publicSettings?.sso_ready || "0") === "1" || configuredInAdminView;
+  if (ssoSection) ssoSection.classList.toggle("hidden", !ssoReady);
+  if (ssoButton) ssoButton.textContent = settingValue("sso_button_label", "企业 SSO 登录") || "企业 SSO 登录";
   document.title = `${teamName}周例会`;
+}
+
+function handleSsoCallbackNotice() {
+  const url = new URL(window.location.href);
+  const success = url.searchParams.get("sso") === "success";
+  const error = url.searchParams.get("sso_error");
+  if (!success && !error) return "";
+  url.searchParams.delete("sso");
+  url.searchParams.delete("sso_error");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  if (success) {
+    safeSessionRemove("teamLoopSsoAttempted");
+    safeSessionRemove("teamLoopSsoSkip");
+    toast("企业 SSO 登录成功");
+    return "success";
+  }
+  safeSessionRemove("teamLoopSsoAttempted");
+  safeSessionSet("teamLoopSsoSkip", "1");
+  state.showLogin = true;
+  applyAuthView();
+  toast(`企业 SSO 登录失败：${error}`);
+  return "error";
+}
+
+function maybeStartSsoAutoLogin(callbackState = "") {
+  const ready = String(state.publicSettings?.sso_ready || "0") === "1";
+  const automatic = String(state.publicSettings?.sso_auto_login || "0") === "1";
+  if (state.user || !ready || !automatic || callbackState === "error") return false;
+  if (safeSessionGet("teamLoopSsoSkip") === "1" || safeSessionGet("teamLoopSsoAttempted") === "1") return false;
+  safeSessionSet("teamLoopSsoAttempted", "1");
+  window.location.replace("/api/sso/login");
+  return true;
 }
 
 function formatBytes(value = 0) {
@@ -1447,13 +1538,13 @@ function renderUserTypeOptions(selected) {
 
 function renderUserTable(users) {
   if (!users.length) return "<p>暂无数据</p>";
-  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号 / 工号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
       <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}"></td>
-      <td><strong>${escapeHtml(user.username)}</strong></td>
+      <td><strong>${escapeHtml(user.username)}</strong><small>工号 ${escapeHtml(user.employee_id || user.username)}</small></td>
       <td>${escapeHtml(user.display_name)}</td>
       <td><span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span></td>
-      <td>${user.role === "admin" ? '<span class="pill admin">系统管理员</span>' : "按类型授权"}</td>
+      <td>${user.role === "admin" ? '<span class="pill admin">系统管理员</span>' : user.auth_source === "oidc" || user.auth_source === "oauth2" ? '<span class="pill status-done">企业 SSO</span>' : "系统账号"}</td>
       <td><div class="user-scope-mini">${[
         ["members", "成员"], ["morning", "早会"], ["rules", "榜单"], ["thanks", "感谢"],
       ].map(([scope, label]) => `<span class="${Boolean(user[`eligible_${scope}`]) ? "on" : "off"}">${label}</span>`).join("")}</div></td>
@@ -1491,6 +1582,7 @@ function openUserAccountModal(userId) {
   if (!user || !form) return;
   form.dataset.userId = String(user.id);
   form.elements.username.value = user.username || "";
+  form.elements.employee_id.value = user.employee_id || user.username || "";
   form.elements.display_name.value = user.display_name || "";
   form.elements.user_type.innerHTML = renderUserTypeOptions(user.user_type);
   form.elements.user_type.value = user.user_type;
@@ -1739,31 +1831,73 @@ async function markRemindersRead(keys = [], all = false) {
   renderReminders(Number(data.unread || 0));
 }
 
+function renderSettingField(setting) {
+  const key = escapeHtml(setting.key);
+  const modeClass = setting.key === "sso_issuer_url" ? " sso-discovery-only" : ["sso_authorization_url", "sso_token_url", "sso_userinfo_url"].includes(setting.key) ? " sso-manual-only" : "";
+  if (setting.key === "sso_mode") {
+    return `<label class="setting-field">
+      <span>${escapeHtml(setting.label)}</span>
+      <select name="${key}" id="ssoModeSelect">
+        <option value="discovery" ${setting.value !== "manual" ? "selected" : ""}>OIDC 自动发现（推荐）</option>
+        <option value="manual" ${setting.value === "manual" ? "selected" : ""}>手动 OAuth2 端点</option>
+      </select>
+      <small>${escapeHtml(setting.description || "")}</small>
+    </label>`;
+  }
+  if (setting.value_type === "boolean") {
+    return `<label class="setting-field">
+      <span>${escapeHtml(setting.label)}</span>
+      <select name="${key}">
+        <option value="1" ${setting.value === "1" ? "selected" : ""}>启用</option>
+        <option value="0" ${setting.value === "0" ? "selected" : ""}>停用</option>
+      </select>
+      <small>${escapeHtml(setting.description || "")}</small>
+    </label>`;
+  }
+  if (setting.key === "sso_default_user_type") {
+    const options = state.userTypes
+      .filter((item) => item.key !== "guest" && (item.active || item.key === setting.value))
+      .map((item) => `<option value="${escapeHtml(item.key)}" ${item.key === setting.value ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
+      .join("");
+    return `<label class="setting-field">
+      <span>${escapeHtml(setting.label)}</span>
+      <select name="${key}">${options}</select>
+      <small>${escapeHtml(setting.description || "")}</small>
+    </label>`;
+  }
+  const inputType = setting.value_type === "number" ? "number" : setting.value_type === "password" ? "password" : "text";
+  const placeholder = setting.value_type === "password" && setting.configured ? "已配置，留空保持不变" : "";
+  return `<label class="setting-field${modeClass}">
+    <span>${escapeHtml(setting.label)}</span>
+    <input name="${key}" type="${inputType}" value="${escapeHtml(setting.value || "")}" placeholder="${placeholder}">
+    <small>${escapeHtml(setting.description || "")}</small>
+  </label>`;
+}
+
 function renderSettings() {
   const form = $("#settingsForm");
   if (!form) return;
+  const ssoOrder = ["sso_enabled", "sso_auto_login", "sso_mode", "sso_issuer_url", "sso_authorization_url", "sso_token_url", "sso_userinfo_url", "sso_client_id", "sso_client_secret", "sso_redirect_uri", "sso_scopes", "sso_username_claim", "sso_display_name_claim", "sso_default_user_type", "sso_auto_provision", "sso_button_label"];
+  const ssoSettings = state.settings.filter((setting) => setting.key.startsWith("sso_"))
+    .sort((left, right) => ssoOrder.indexOf(left.key) - ssoOrder.indexOf(right.key));
+  const generalSettings = state.settings.filter((setting) => !setting.key.startsWith("sso_"));
   form.innerHTML = `
     <div class="settings-grid">
-      ${state.settings.map((setting) => {
-        const inputType = setting.value_type === "number" ? "number" : "text";
-        if (setting.value_type === "boolean") {
-          return `<label class="setting-field">
-            <span>${escapeHtml(setting.label)}</span>
-            <select name="${escapeHtml(setting.key)}">
-              <option value="1" ${setting.value === "1" ? "selected" : ""}>启用</option>
-              <option value="0" ${setting.value === "0" ? "selected" : ""}>停用</option>
-            </select>
-            <small>${escapeHtml(setting.description || "")}</small>
-          </label>`;
-        }
-        return `<label class="setting-field">
-          <span>${escapeHtml(setting.label)}</span>
-          <input name="${escapeHtml(setting.key)}" type="${inputType}" value="${escapeHtml(setting.value)}">
-          <small>${escapeHtml(setting.description || "")}</small>
-        </label>`;
-      }).join("")}
+      ${generalSettings.map(renderSettingField).join("")}
     </div>
+    <details class="settings-group" open>
+      <summary>企业 SSO 登录</summary>
+      <p class="settings-group-note">推荐只填写 Issuer、Client ID、回调地址和工号字段；不支持 Discovery 的平台可切换为手动 OAuth2 端点。全程使用授权码 + PKCE。</p>
+      <div class="settings-grid">${ssoSettings.map(renderSettingField).join("")}</div>
+    </details>
     <button>保存系统配置</button>`;
+  updateSsoModeFields();
+}
+
+function updateSsoModeFields() {
+  const manual = $("#ssoModeSelect")?.value === "manual";
+  $$(".sso-discovery-only").forEach((field) => field.classList.toggle("hidden", manual));
+  $$(".sso-manual-only").forEach((field) => field.classList.toggle("hidden", !manual));
 }
 
 function renderBackups() {
@@ -2369,11 +2503,13 @@ function renderMeetingAgendaPicker(meeting) {
   const existing = new Set((meeting.items || []).map((item) => Number(item.option_id)).filter(Boolean));
   const groups = state.topics.filter((topic) => (topic.options || []).length);
   list.innerHTML = groups.length ? groups.map((topic, index) => {
+    const total = (topic.options || []).length;
     const available = (topic.options || []).filter((option) => !existing.has(Number(option.id))).length;
+    const added = total - available;
     return `<section class="meeting-agenda-group" data-search="${escapeHtml(`${topic.name} ${(topic.options || []).map((option) => option.title).join(" ")}`.toLowerCase())}">
       <div class="meeting-agenda-group-head">
         <label><input class="meeting-agenda-group-check" type="checkbox" ${available ? "" : "disabled"}><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span><strong>${escapeHtml(topic.name)}</strong></label>
-        <span>${available} 项可选</span>
+        <span>${available} 项可选${added ? ` · ${added} 项已加入` : ""}</span>
       </div>
       <div class="meeting-agenda-group-options">
         ${(topic.options || []).map((option) => {
@@ -3977,56 +4113,220 @@ function openReactionPopover(button) {
   popover.style.top = `${top}px`;
 }
 
-function renderTeamReplies(post, replies = post.replies || [], depth = 0) {
+function forumCategory(post = {}) {
+  return forumCategoryMeta[post.category] || forumCategoryMeta.general;
+}
+
+function forumFilteredPosts() {
+  const keyword = state.forumSearch.trim().toLowerCase();
+  const items = state.teamPosts.filter((post) => {
+    if (state.forumCategory !== "all" && post.category !== state.forumCategory) return false;
+    if (state.forumMineOnly && Number(post.user_id) !== Number(state.user?.id)) return false;
+    if (!keyword) return true;
+    return [post.title, post.content, post.display_name, post.username]
+      .some((value) => String(value || "").toLowerCase().includes(keyword));
+  });
+  return items.sort((left, right) => {
+    if (Number(right.pinned || 0) !== Number(left.pinned || 0)) return Number(right.pinned || 0) - Number(left.pinned || 0);
+    if (state.forumSort === "popular") return Number(right.reply_count || 0) - Number(left.reply_count || 0);
+    if (state.forumSort === "views") return Number(right.view_count || 0) - Number(left.view_count || 0);
+    return String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || ""));
+  });
+}
+
+function renderForumSidebar() {
+  const hotList = $("#forumHotTopics");
+  const activeList = $("#forumActiveMembers");
+  if (!hotList || !activeList) return;
+  const hot = [...state.teamPosts]
+    .sort((left, right) => (Number(right.reply_count || 0) * 3 + Number(right.view_count || 0)) - (Number(left.reply_count || 0) * 3 + Number(left.view_count || 0)))
+    .slice(0, 3);
+  hotList.innerHTML = hot.length ? hot.map((post, index) => `
+    <button type="button" data-forum-post-id="${post.id}">
+      <span>${index + 1}</span><span><strong>${escapeHtml(post.title || post.content)}</strong><small>${Number(post.reply_count || 0)} 回复 · ${Number(post.view_count || 0)} 浏览</small></span>
+    </button>`).join("") : "<p class=\"forum-empty-note\">暂无热门讨论</p>";
+
+  const activity = new Map();
+  state.teamPosts.forEach((post) => activity.set(post.display_name, (activity.get(post.display_name) || 0) + 1 + Number(post.reply_count || 0)));
+  const active = [...activity.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  $("#forumActiveCount").textContent = `${active.length} 人`;
+  activeList.innerHTML = active.length ? active.map(([name]) => `<span title="${escapeHtml(name)}">${escapeHtml(String(name || "?").slice(0, 1))}</span>`).join("") : "<small>暂无活跃成员</small>";
+}
+
+function renderForumTopics() {
+  const list = $("#teamChatList");
+  const pagination = $("#forumPagination");
+  if (!list || !pagination) return;
+  const filtered = forumFilteredPosts();
+  const pages = Math.max(1, Math.ceil(filtered.length / forumPageSize));
+  state.forumPage = Math.min(Math.max(1, state.forumPage), pages);
+  $$("[data-forum-category]").forEach((button) => {
+    const active = button.dataset.forumCategory === state.forumCategory;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  const start = (state.forumPage - 1) * forumPageSize;
+  const items = filtered.slice(start, start + forumPageSize);
+  list.innerHTML = items.length ? items.map((post) => {
+    const category = forumCategory(post);
+    const lastName = post.last_reply_name || post.display_name;
+    const lastTime = post.last_reply_at || post.updated_at || post.created_at;
+    return `<article class="forum-topic-row ${post.pinned ? "pinned" : ""}" data-forum-post-id="${post.id}" tabindex="0">
+      <div class="forum-topic-main">
+        <div class="forum-topic-title-line">
+          ${post.pinned ? '<span class="forum-status-badge pinned">置顶</span>' : ""}
+          ${post.status === "resolved" ? '<span class="forum-status-badge resolved">已解决</span>' : `<span class="forum-status-badge ${category.tone}">${category.label}</span>`}
+          <h3>${escapeHtml(post.title || post.content)}</h3>
+        </div>
+        <p>${escapeHtml(post.content || "")}</p>
+        <div class="forum-topic-meta"><span class="forum-author-avatar">${escapeHtml(String(post.display_name || "?").slice(0, 1))}</span><span>${escapeHtml(post.display_name || "")}</span><span>·</span><time>${escapeHtml(shortDateTime(post.created_at || ""))}</time></div>
+      </div>
+      <strong class="forum-topic-stat"><b>${Number(post.reply_count || 0)}</b><small>条回复</small></strong>
+      <strong class="forum-topic-stat"><b>${Number(post.view_count || 0)}</b><small>次浏览</small></strong>
+      <div class="forum-topic-update"><strong>${escapeHtml(lastName || "")}</strong><small>${escapeHtml(shortDateTime(lastTime || ""))}</small></div>
+    </article>`;
+  }).join("") : `<div class="forum-empty"><strong>没有找到讨论主题</strong><p>换个分类或关键词试试，也可以发起一条新讨论。</p></div>`;
+  pagination.innerHTML = filtered.length > forumPageSize ? `
+    <span>共 ${filtered.length} 个主题</span>
+    <div>
+      <button type="button" data-forum-page="${state.forumPage - 1}" ${state.forumPage === 1 ? "disabled" : ""}>‹</button>
+      ${Array.from({ length: pages }, (_, index) => index + 1).map((page) => `<button type="button" data-forum-page="${page}" class="${page === state.forumPage ? "active" : ""}">${page}</button>`).join("")}
+      <button type="button" data-forum-page="${state.forumPage + 1}" ${state.forumPage === pages ? "disabled" : ""}>›</button>
+    </div>` : `<span>共 ${filtered.length} 个主题</span>`;
+  renderForumSidebar();
+}
+
+function renderForumReplies(post, replies = post.replies || [], depth = 0) {
   if (!replies.length) return "";
-  return `<div class="chat-replies">
+  return `<div class="forum-replies ${depth ? "nested" : ""}">
     ${replies.map((reply) => `
-      <div class="chat-reply" data-reply-id="${reply.id}" style="--reply-depth:${Math.min(depth, 4)}">
-        <p>${escapeHtml(reply.content)}</p>
-        <small>${escapeHtml(reply.display_name)} · ${escapeHtml(shortDateTime(reply.created_at || ""))}</small>
-        ${isGuest() || !canOperate("members", "create") ? renderReactionControls("reply", reply.id, reply.reactions || []) : ""}
-        ${isGuest() || !canOperate("members", "create") ? "" : `
-          <div class="chat-reply-actions">
-            ${renderReactionControls(
-              "reply",
-              reply.id,
-              reply.reactions || [],
-              `<button type="button" class="chat-reply-toggle" data-post-id="${post.id}" data-parent-reply-id="${reply.id}">回复</button>`,
-              (canOperate("members", "delete") && (reply.mine || isAdminView())) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : "",
-            )}
-          </div>
-          <form class="chat-reply-form hidden" data-post-id="${post.id}">
-            <input name="parent_reply_id" type="hidden" value="${reply.id}">
-            <input name="content" placeholder="回复 ${escapeHtml(reply.display_name)}，最多 200 字" maxlength="200" required>
-            <button type="submit">发送</button>
-          </form>`}
-        ${renderTeamReplies(post, reply.replies || [], depth + 1)}
-      </div>`).join("")}
+      <article class="forum-reply" data-reply-id="${reply.id}">
+        <div class="forum-reply-avatar">${escapeHtml(String(reply.display_name || "?").slice(0, 1))}</div>
+        <div class="forum-reply-content">
+          <div class="forum-reply-author"><strong>${escapeHtml(reply.display_name)}</strong><time>${escapeHtml(shortDateTime(reply.created_at || ""))}</time></div>
+          <p>${escapeHtml(reply.content)}</p>
+          ${isGuest() || !canOperate("members", "create") ? renderReactionControls("reply", reply.id, reply.reactions || []) : `
+            <div class="chat-reply-actions">
+              ${renderReactionControls(
+                "reply",
+                reply.id,
+                reply.reactions || [],
+                `<button type="button" class="chat-reply-toggle" data-post-id="${post.id}" data-parent-reply-id="${reply.id}">回复</button>`,
+                (canOperate("members", "delete") && (reply.mine || isAdminView())) ? `<button type="button" class="chat-reply-delete" data-reply-id="${reply.id}">删除</button>` : "",
+              )}
+            </div>
+            <form class="chat-reply-form hidden" data-post-id="${post.id}">
+              <input name="parent_reply_id" type="hidden" value="${reply.id}">
+              <input name="content" placeholder="回复 ${escapeHtml(reply.display_name)}，最多 200 字" maxlength="200" required>
+              <button type="submit">发送</button>
+            </form>`}
+          ${renderForumReplies(post, reply.replies || [], depth + 1)}
+        </div>
+      </article>`).join("")}
   </div>`;
 }
 
-function renderTeamChat(posts, preserveScroll = false) {
-  const list = $("#teamChatList");
-  if (!list) return;
-  const previousTop = list.scrollTop;
-  const items = posts || [];
-  list.innerHTML = items.length ? items.map((post) => `
-    <div class="chat-bubble ${post.kind === "roast" ? "roast" : ""}" data-post-id="${post.id}">
-      <span class="pill ${post.kind === "roast" ? "warn" : ""}">${post.kind === "roast" ? "吐槽" : "评论"}</span>
-      <p>${escapeHtml(post.content)}</p>
-      <small>${escapeHtml(post.display_name)} · ${escapeHtml(post.created_at || "")}</small>
-      ${isGuest() || !canOperate("members", "create") ? renderTeamReactions(post) : ""}
-      ${isGuest() || !canOperate("members", "create") ? "" : `
-        <div class="chat-reply-tools">
-          ${renderReactionControls("post", post.id, post.reactions || [], `<button type="button" class="chat-reply-toggle" data-post-id="${post.id}">回复</button>`)}
-          <form class="chat-reply-form hidden" data-post-id="${post.id}">
-            <input name="content" placeholder="回复这条对话，最多 200 字" maxlength="200" required>
-            <button type="submit">发送</button>
-          </form>
-        </div>`}
-      ${renderTeamReplies(post)}
-    </div>`).join("") : "<p>还没有团队对话，来开个头。</p>";
-  list.scrollTop = preserveScroll ? previousTop : list.scrollHeight;
+function renderForumDetail(post) {
+  const body = $("#forumDetailBody");
+  if (!body || !post) return;
+  const category = forumCategory(post);
+  $("#forumDetailTitle").textContent = post.title || post.content;
+  const categoryBadge = $("#forumDetailCategory");
+  categoryBadge.className = `forum-status-badge ${post.status === "resolved" ? "resolved" : category.tone}`;
+  categoryBadge.textContent = post.status === "resolved" ? "已解决" : category.label;
+  const canEditPost = canOperate("members", "edit") && (post.mine || isAdminView());
+  const canDeletePost = canOperate("members", "delete") && (post.mine || isAdminView());
+  body.innerHTML = `
+    <article class="forum-original-post">
+      <div class="forum-original-meta"><span class="forum-author-avatar">${escapeHtml(String(post.display_name || "?").slice(0, 1))}</span><strong>${escapeHtml(post.display_name || "")}</strong><time>${escapeHtml(shortDateTime(post.created_at || ""))}</time><span>${Number(post.view_count || 0)} 次浏览</span></div>
+      <div class="forum-original-content">${escapeHtml(post.content || "").replace(/\n/g, "<br>")}</div>
+      <div class="forum-original-actions">
+        ${renderReactionControls("post", post.id, post.reactions || [])}
+        ${canEditPost ? `<button type="button" class="secondary forum-edit-post" data-post-id="${post.id}">编辑主题</button>` : ""}
+        ${canEditPost ? `<button type="button" class="secondary forum-status-toggle" data-post-id="${post.id}" data-next-status="${post.status === "resolved" ? "open" : "resolved"}">${post.status === "resolved" ? "重新讨论" : "标记已解决"}</button>` : ""}
+        ${isAdminView() ? `<button type="button" class="secondary forum-pin-toggle" data-post-id="${post.id}" data-next-pinned="${post.pinned ? "0" : "1"}">${post.pinned ? "取消置顶" : "置顶主题"}</button>` : ""}
+        ${canDeletePost ? `<button type="button" class="danger forum-delete-post" data-post-id="${post.id}" data-post-title="${escapeHtml(post.title || "该讨论")}">删除主题</button>` : ""}
+      </div>
+    </article>
+    <section class="forum-reply-section">
+      <div class="forum-reply-section-head"><h3>${Number(post.reply_count || 0)} 条回复</h3><span>按时间顺序</span></div>
+      ${renderForumReplies(post)}
+      ${post.reply_count ? "" : '<div class="forum-no-replies">还没有回复，来补充第一条信息。</div>'}
+    </section>
+    ${isGuest() || !canOperate("members", "create") ? "" : `
+      <form class="chat-reply-form forum-root-reply-form" data-post-id="${post.id}">
+        <textarea name="content" maxlength="200" rows="3" placeholder="写下你的回复，最多 200 字" required></textarea>
+        <button type="submit">发表回复</button>
+      </form>`}`;
+}
+
+function renderTeamChat(posts) {
+  state.teamPosts = posts || [];
+  renderForumTopics();
+  if (state.selectedForumPostId) {
+    const selected = state.teamPosts.find((post) => Number(post.id) === Number(state.selectedForumPostId));
+    if (selected) renderForumDetail(selected);
+  }
+}
+
+function openForumCreateModal(post = null) {
+  const action = post ? "edit" : "create";
+  if (isGuest() || !canOperate("members", action)) return toast(post ? "当前账号无权编辑讨论" : "当前账号无权发起讨论");
+  const modal = $("#forumCreateModal");
+  const form = $("#teamChatForm");
+  form?.reset();
+  state.editingForumPostId = post ? Number(post.id) : null;
+  if (post) {
+    form.elements.category.value = post.category || "general";
+    form.elements.title.value = post.title || "";
+    form.elements.content.value = post.content || "";
+  }
+  $("#forumCreateTitle").textContent = post ? "编辑讨论" : "发起讨论";
+  $("#forumCreateDescription").textContent = post ? "修改分类、标题或正文，保存后会更新主题时间。" : "标题说清问题，正文补充背景、现象和期望结果。";
+  $("#forumSubmitButton").textContent = post ? "保存修改" : "发布讨论";
+  $("#forumContentCount").textContent = `${form?.elements.content?.value.length || 0} / 2000`;
+  modal?.classList.remove("hidden");
+  modal?.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form?.elements.title?.focus();
+}
+
+function closeForumCreateModal() {
+  const modal = $("#forumCreateModal");
+  modal?.classList.add("hidden");
+  modal?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  state.editingForumPostId = null;
+}
+
+async function openForumDetail(postId) {
+  const modal = $("#forumDetailModal");
+  state.selectedForumPostId = Number(postId);
+  const cached = state.teamPosts.find((post) => Number(post.id) === Number(postId));
+  if (cached) renderForumDetail(cached);
+  modal?.classList.remove("hidden");
+  modal?.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  const data = await api(`/api/team-posts/${postId}`);
+  const index = state.teamPosts.findIndex((post) => Number(post.id) === Number(postId));
+  if (index >= 0) state.teamPosts[index] = data.post;
+  renderForumTopics();
+  renderForumDetail(data.post);
+}
+
+function closeForumDetailModal() {
+  const modal = $("#forumDetailModal");
+  modal?.classList.add("hidden");
+  modal?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  state.selectedForumPostId = null;
+  closeReactionPopover();
+}
+
+async function updateForumPost(postId, payload) {
+  const data = await api(`/api/team-posts/${postId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  renderTeamChat(data.posts);
+  toast("讨论主题已更新");
 }
 
 function filledText(value) {
@@ -4362,6 +4662,8 @@ function bindEvents() {
       state.permissions = data.permissions;
       state.permissionPreview = null;
       state.showLogin = false;
+      safeSessionRemove("teamLoopSsoAttempted");
+      safeSessionRemove("teamLoopSsoSkip");
       applyAuthView();
       await refreshAll();
     } catch (error) {
@@ -4369,7 +4671,16 @@ function bindEvents() {
     }
   });
 
+  $("#ssoLoginBtn")?.addEventListener("click", (event) => {
+    safeSessionRemove("teamLoopSsoSkip");
+    safeSessionSet("teamLoopSsoAttempted", "1");
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = "正在跳转...";
+    window.location.assign("/api/sso/login");
+  });
+
   $("#logoutBtn").addEventListener("click", async () => {
+    safeSessionSet("teamLoopSsoSkip", "1");
     try {
       await api("/api/logout", { method: "POST", body: "{}" });
     } finally {
@@ -4379,6 +4690,7 @@ function bindEvents() {
   });
 
   $("#loginEntryBtn")?.addEventListener("click", () => {
+    safeSessionSet("teamLoopSsoSkip", "1");
     state.showLogin = true;
     applyAuthView();
   });
@@ -4386,6 +4698,7 @@ function bindEvents() {
   $("#passwordBtn")?.addEventListener("click", openPasswordModal);
 
   $("#guestBrowseBtn")?.addEventListener("click", async () => {
+    safeSessionSet("teamLoopSsoSkip", "1");
     state.showLogin = false;
     applyAuthView();
     switchPage(firstAccessiblePage());
@@ -4493,7 +4806,26 @@ function bindEvents() {
     return api("/api/shifts", { method: "POST", body: JSON.stringify(data) });
   });
   bindForm("#thankForm", (_, form) => api("/api/thank-you", { method: "POST", body: JSON.stringify(thankFormPayload(form)) }));
-  bindForm("#teamChatForm", (data) => api("/api/team-posts", { method: "POST", body: JSON.stringify(data) }));
+  $("#teamChatForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      const editingId = state.editingForumPostId;
+      const data = await api(editingId ? `/api/team-posts/${editingId}` : "/api/team-posts", {
+        method: editingId ? "PATCH" : "POST",
+        body: JSON.stringify(formData(form)),
+      });
+      renderTeamChat(data.posts);
+      closeForumCreateModal();
+      toast(editingId ? "讨论已更新" : "讨论已发布");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
@@ -4651,6 +4983,20 @@ function bindEvents() {
     });
   }
 
+  $("#forumSearchInput")?.addEventListener("input", (event) => {
+    state.forumSearch = event.target.value || "";
+    state.forumPage = 1;
+    renderForumTopics();
+  });
+  $("#forumSortSelect")?.addEventListener("change", (event) => {
+    state.forumSort = event.target.value || "recent";
+    state.forumPage = 1;
+    renderForumTopics();
+  });
+  $("#teamChatForm")?.elements.content?.addEventListener("input", (event) => {
+    $("#forumContentCount").textContent = `${event.target.value.length} / 2000`;
+  });
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePasswordModal();
@@ -4668,6 +5014,8 @@ function bindEvents() {
       closeLinkDeleteModal();
       closeLinkActionMenus();
       closeReminderModal();
+      closeForumCreateModal();
+      closeForumDetailModal();
       closeShiftPopover();
       return;
     }
@@ -4681,9 +5029,87 @@ function bindEvents() {
       event.preventDefault();
       focusPersonalMorningChain(personalDoneItem.dataset.personalCalendarFocus);
     }
+    const forumTopic = event.target.closest?.("[data-forum-post-id]");
+    if (forumTopic && !event.target.closest("button, input, select, textarea, label, a") && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openForumDetail(forumTopic.dataset.forumPostId).catch((error) => toast(error.message));
+    }
   });
 
   document.body.addEventListener("click", (event) => {
+    if (event.target.closest("#forumCreateButton, [data-forum-create-open]")) {
+      openForumCreateModal();
+      return;
+    }
+    if (event.target.closest("[data-forum-create-close]") || event.target === $("#forumCreateModal")) {
+      closeForumCreateModal();
+      return;
+    }
+    if (event.target.closest("[data-forum-detail-close]") || event.target === $("#forumDetailModal")) {
+      closeForumDetailModal();
+      return;
+    }
+    const forumCategoryTab = event.target.closest("[data-forum-category]");
+    if (forumCategoryTab) {
+      state.forumCategory = forumCategoryTab.dataset.forumCategory || "all";
+      state.forumPage = 1;
+      $$("[data-forum-category]").forEach((button) => {
+        const active = button === forumCategoryTab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      renderForumTopics();
+      return;
+    }
+    if (event.target.closest("#forumMineButton")) {
+      state.forumMineOnly = !state.forumMineOnly;
+      state.forumPage = 1;
+      $("#forumMineButton").classList.toggle("active", state.forumMineOnly);
+      $("#forumMineButton").setAttribute("aria-pressed", String(state.forumMineOnly));
+      renderForumTopics();
+      return;
+    }
+    const forumPageButton = event.target.closest("[data-forum-page]");
+    if (forumPageButton && !forumPageButton.disabled) {
+      state.forumPage = Number(forumPageButton.dataset.forumPage) || 1;
+      renderForumTopics();
+      return;
+    }
+    const forumStatusToggle = event.target.closest(".forum-status-toggle");
+    if (forumStatusToggle) {
+      updateForumPost(forumStatusToggle.dataset.postId, { status: forumStatusToggle.dataset.nextStatus }).catch((error) => toast(error.message));
+      return;
+    }
+    const forumPinToggle = event.target.closest(".forum-pin-toggle");
+    if (forumPinToggle) {
+      updateForumPost(forumPinToggle.dataset.postId, { pinned: forumPinToggle.dataset.nextPinned === "1" }).catch((error) => toast(error.message));
+      return;
+    }
+    const forumEditPost = event.target.closest(".forum-edit-post");
+    if (forumEditPost) {
+      const post = state.teamPosts.find((item) => Number(item.id) === Number(forumEditPost.dataset.postId));
+      if (!post) return toast("讨论主题已更新，请刷新后重试");
+      closeForumDetailModal();
+      openForumCreateModal(post);
+      return;
+    }
+    const forumDeletePost = event.target.closest(".forum-delete-post");
+    if (forumDeletePost) {
+      if (!window.confirm(`确定删除“${forumDeletePost.dataset.postTitle || "该讨论"}”吗？主题和回复将从讨论区隐藏，可由管理员在回收站恢复。`)) return;
+      api(`/api/team-posts/${forumDeletePost.dataset.postId}`, { method: "DELETE" })
+        .then((data) => {
+          closeForumDetailModal();
+          renderTeamChat(data.posts);
+          toast("讨论主题已删除");
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const forumTopic = event.target.closest("[data-forum-post-id]");
+    if (forumTopic && (forumTopic.matches("button") || !event.target.closest("button, input, select, textarea, label, a"))) {
+      openForumDetail(forumTopic.dataset.forumPostId).catch((error) => toast(error.message));
+      return;
+    }
     const scoreMemberButton = event.target.closest("[data-score-user-id]");
     if (scoreMemberButton) {
       openMemberScoreModal(scoreMemberButton.dataset.scoreUserId, scoreMemberButton.dataset.scoreUserName)
@@ -5265,6 +5691,10 @@ function bindEvents() {
   });
 
   document.body.addEventListener("change", (event) => {
+    if (event.target.matches("#ssoModeSelect")) {
+      updateSsoModeFields();
+      return;
+    }
     if (event.target.matches('.participation-toggle input[name="participation"]')) {
       const impact = event.target.closest(".user-type-permission-form")?.querySelector("[data-permission-impact]");
       if (impact) impact.innerHTML = "<strong>参与范围已调整</strong><span>点击“评估影响”查看受影响账号和名单变化</span>";
@@ -5468,6 +5898,8 @@ async function boot() {
     state.publicSettings = data.settings || {};
     applyBranding();
     applyAuthView();
+    const callbackState = handleSsoCallbackNotice();
+    if (maybeStartSsoAutoLogin(callbackState)) return;
     switchPage("members");
     await refreshAll();
   } catch {
@@ -5477,6 +5909,8 @@ async function boot() {
     applyBranding();
     state.showLogin = false;
     applyAuthView();
+    const callbackState = handleSsoCallbackNotice();
+    if (maybeStartSsoAutoLogin(callbackState)) return;
     await refreshAll();
   }
 }

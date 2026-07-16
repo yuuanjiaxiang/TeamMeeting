@@ -49,6 +49,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 1. 管理员检查用户所属“用户类型”；
 2. 检查该类型的模块及查看/新增/修改/删除权限；
 3. 用户退出后重新登录；
+
+## 企业 SSO 登录失败
+
+- 登录页没有 SSO 按钮：自动发现模式检查 Issuer 与 Client ID；手动模式检查授权、Token、UserInfo 三个地址与 Client ID；
+- 提示回调不一致：企业身份平台登记值必须与“OAuth2 回调地址”逐字一致；
+- 提示无法连接身份平台：检查服务器 DNS、代理、防火墙、HTTPS 证书和系统时间；
+- 登录后回到系统账号页：页面会在 SSO 失败后主动停止循环跳转，先查看页面错误提示和服务日志，修复后点击“企业 SSO 登录”重试；
+- 提示工号缺失或关联冲突：核对“SSO 工号字段”和 UserInfo 返回值，并在“用户管理”确认工号唯一；
+- 登录后提示默认类型无效：选择一个启用的非访客用户类型；
+- 其他电脑可打开页面但不能 SSO：不要使用局域网 HTTP 地址作为正式回调，应通过 HTTPS 域名和反向代理访问；
+- Windows 运行时出现 TLS/OpenSSL 错误：改用系统安装的 Python 3.10+ 启动，并确认 `python -c "import ssl; print(ssl.OPENSSL_VERSION)"` 正常。
 4. 管理员切换到用户视图进行复现；
 5. 确认前端和后端都已注册新模块权限。
 
@@ -78,4 +89,3 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 ## 数据误删
 
 先到系统管理的回收站恢复。用户、链接、会议议题和团队回复等主要对象采用软删除。只有管理员执行“永久删除”后才不能从回收站恢复，此时需要从数据库备份恢复。
-

@@ -108,6 +108,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Sto
 | `TEAM_LOOP_BACKUP_DIR` | 备份目录 |
 | `TEAM_LOOP_ENV` | `development`、`gray` 或 `production` |
 | `TEAM_LOOP_RELEASE` | 健康接口显示的发布版本 |
+| `TEAM_LOOP_SSO_CLIENT_SECRET` | OAuth2 Client Secret，推荐使用环境变量而非写入数据库 |
 
 自定义数据盘示例：
 
@@ -118,7 +119,21 @@ python server.py --host 0.0.0.0 --port 8000
 
 使用自定义变量时，启动服务的 Windows 账号必须拥有目录读写权限。
 
-## 9. 运维建议
+## 9. 企业 SSO 部署
+
+1. 在企业身份平台创建 OAuth2/OIDC Web 应用，启用 Authorization Code 和 PKCE；
+2. 将回调地址登记为 `https://你的域名/api/sso/callback`；
+3. 在 Team Loop“系统管理”中选择配置方式：优先填写 Issuer 自动发现；不支持 Discovery 时填写授权、Token、UserInfo 三个地址；
+4. 填写 Client ID、回调地址、工号字段、姓名字段和默认用户类型。工号字段必须与 UserInfo 实际返回字段一致，例如 `employee_id` 或 `employeeNumber`；
+5. 在“用户管理”中提前维护账号工号，可让首次 SSO 登录直接关联现有用户；
+6. 通过服务器环境变量配置 `TEAM_LOOP_SSO_CLIENT_SECRET`，再启用企业 SSO 与首页自动登录；
+7. 先在灰度环境完成已有工号关联、自动建号、权限、失败回退和退出验证，再提升正式环境。
+
+所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。
+
+生产 SSO 必须通过 HTTPS 域名访问，反向代理需原样转发 Cookie 和 `/api/sso/*`。身份平台和 Team Loop 服务器时间应保持同步。项目优先使用系统安装的 Python 3.10+；若运行时缺少可用的 TLS/OpenSSL，OAuth2 HTTPS 请求将无法工作。
+
+## 10. 运维建议
 
 - 每日确认自动备份状态，至少每月执行一次恢复校验；
 - 发布前通知用户避免同时写入；
@@ -126,4 +141,3 @@ python server.py --host 0.0.0.0 --port 8000
 - 不通过聊天工具发送正式数据库；
 - 服务器休眠会停止访问，正式电脑应关闭自动睡眠；
 - 端口冲突时优先调整测试端口，不随意终止未知进程。
-

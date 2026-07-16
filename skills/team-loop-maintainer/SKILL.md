@@ -57,12 +57,14 @@ Use these references conditionally:
 ### Cross-module behavior
 
 - Keep users and member profiles consistent.
+- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, prevent auto-login redirect loops, and validate SSO with the isolated PKCE smoke test.
 - Keep workbench and morning-meeting data synchronized.
 - Keep shared date filters initialized to the current month without page-specific overrides.
 - Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.
 - Keep meeting state locks enforced by the server.
 - Keep meeting creation controlled by `meetings.create`, while first-level topic categories and second-level preset maintenance remain administrator-only.
-- Keep the full chat Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
+- Keep the forum-style team discussion area searchable and paginated; enforce author/admin edit, announcement, pin, soft-delete, and restore boundaries in the backend.
+- Keep the full discussion Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
 - Keep Thank You weekly limits and red/black independent scoring semantics.
 - Enforce black-score summary/detail visibility in backend responses; frontend hiding alone is insufficient.
 - Keep guest access read-only and entirely driven by the reserved `guest` permission template.
@@ -73,7 +75,9 @@ Use these references conditionally:
 Run at minimum:
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py
+python scripts\sso_smoke_test.py
+python scripts\forum_smoke_test.py
 node --check static\app.js
 git diff --check
 ```

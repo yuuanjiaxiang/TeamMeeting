@@ -26,14 +26,17 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `users` | 账号、姓名、角色、用户类型、密码哈希和启用状态 |
+| `users` | 账号、姓名、角色、用户类型、密码哈希、认证来源、企业身份标识和启用状态 |
 | `user_types` | 管理员自定义的用户类型、版本号、四类业务参与开关，以及保留的 `guest` 访客模板 |
 | `module_permissions` | 用户类型对模块的查看、新增、修改、删除权限 |
 | `members` | 与用户关联的成员画像、头像、标签、职责和排序 |
 | `auth_sessions` | 持久化登录会话、设备摘要、最后活动时间、到期和撤销状态 |
 | `login_attempts` | 按账号和来源地址统计失败次数及临时锁定时间 |
+| `sso_login_states` | OAuth2/OIDC 登录的一次性 state 摘要、nonce、PKCE verifier、回调地址和有效期 |
 
 `users.user_type` 必须指向一个启用的、非访客用户类型。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 仅代表未登录访问范围，服务端会强制其所有写权限和业务参与开关为关闭。
+
+`users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`sso_login_states` 只保存短期登录事务，成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
 
 `user_types.include_in_members/include_in_morning/include_in_rules/include_in_thanks` 控制当前名单展示与新业务数据写入，不删除历史事实。`user_types.version` 和 `morning_items.version` 用于乐观并发控制，更新语句必须同时匹配客户端读取到的版本号。
 
@@ -41,11 +44,13 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `team_posts` | 团队对话主消息 |
+| `team_posts` | 团队讨论主题，包含分类、状态、标题、浏览量、置顶和软删除字段 |
 | `team_post_replies` | 支持父子关系的楼中回复 |
 | `team_post_reactions` | 主消息快捷回应 |
 | `team_reply_reactions` | 回复快捷回应 |
 | `member_posts` | 早期成员评论兼容数据 |
+
+`team_posts.deleted_at` 与 `deleted_by` 用于主题软删除。回收站以 `team_post` 作为实体类型；恢复时只清空主题删除标记，彻底清除时由外键级联删除回复与回应。作者可以维护自己的主题，管理员承担公告、置顶和恢复治理职责。
 
 ### 会议与早例会
 

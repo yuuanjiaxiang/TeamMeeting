@@ -27,6 +27,8 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/login` | 登录，正文包含 `username`、`password` |
+| GET | `/api/sso/login` | 发起 OAuth2/OIDC 授权码登录，生成一次性 state、nonce 和 PKCE 校验参数后跳转身份平台 |
+| GET | `/api/sso/callback` | OAuth2/OIDC 回调，完成换令牌、按工号关联账号和会话签发后跳回首页 |
 | POST | `/api/logout` | 退出并清除当前会话 |
 | GET | `/api/me` | 当前用户、权限、模块目录和公开设置 |
 | PATCH | `/api/me/password` | 修改当前用户密码 |
@@ -42,6 +44,8 @@ if (!response.ok) throw new Error(data.error || "请求失败");
   "password": "current-password"
 }
 ```
+
+SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。`/api/me` 只公开 SSO 是否可用、是否自动登录及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
 
 ## 3. 用户、成员与权限
 
@@ -62,13 +66,20 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 
 用户类型的 `participation` 与模块权限互相独立，包含 `members`、`morning`、`rules`、`thanks` 四个布尔值。例如拥有红黑榜查看权限，并不代表账号必须进入积分名单。类型更新和早例会编辑使用版本号防止覆盖其他管理员或成员刚提交的修改。
 
-## 4. 团队对话
+## 4. 团队讨论区
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/team-posts` | 获取或发表团队消息 |
-| POST | `/api/team-posts/{id}/replies` | 回复主消息或指定父回复 |
-| POST | `/api/team-posts/{id}/reactions` | 对主消息添加/取消回应 |
+| GET/POST | `/api/team-posts` | 获取讨论主题列表或发表主题；支持分类、状态、关键词、排序和分页 |
+| GET | `/api/team-posts/{id}` | 获取主题详情、回复树与回应统计，并记录浏览量 |
+| PATCH | `/api/team-posts/{id}` | 作者编辑标题、正文、分类和状态；管理员还可置顶，公告分类仅管理员可用 |
+| DELETE | `/api/team-posts/{id}` | 作者或管理员软删除主题并写入回收站 |
+| POST | `/api/team-posts/{id}/replies` | 回复主题或指定父回复 |
+| POST | `/api/team-posts/{id}/reactions` | 对主题添加或取消 Emoji 回应 |
+| DELETE | `/api/team-replies/{id}` | 回复作者或管理员软删除回复 |
+| POST | `/api/team-replies/{id}/reactions` | 对回复添加或取消 Emoji 回应 |
+
+主题列表只返回未删除数据。主题删除后，其回复和回应随主题隐藏；管理员从回收站恢复主题时，原回复与回应一并恢复。所有分类、置顶和删除权限必须由服务端校验，不能依赖前端按钮是否可见。
 | POST | `/api/team-replies/{id}/reactions` | 对楼中回复添加/取消回应 |
 | DELETE | `/api/team-replies/{id}` | 删除自己的回复及子回复 |
 

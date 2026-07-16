@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Loop 团队讨论区概念稿</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --ink: #172033;
+      --muted: #697386;
+      --line: #e4e8f0;
+      --blue: #4f6df5;
+      --blue-soft: #eef2ff;
+      --green: #169b71;
+      --green-soft: #eaf8f3;
+      --amber: #d87918;
+      --amber-soft: #fff5e8;
+      --red: #d94d5c;
+      --red-soft: #fff0f2;
+      --purple: #7656c9;
+      --canvas: #f6f8fb;
+    }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 14px;
+    }
+    button, input { font: inherit; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 184px 1fr; }
+    .sidebar {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      border-right: 1px solid var(--line);
+      background: #fff;
+      padding: 18px 14px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 18px; border-bottom: 1px solid var(--line); }
+    .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; color: #fff; background: var(--blue); font-weight: 900; }
+    .brand strong { display: block; font-size: 15px; }
+    .brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .nav { display: grid; gap: 3px; margin-top: 15px; }
+    .nav-item { display: flex; align-items: center; gap: 10px; height: 39px; padding: 0 10px; border-radius: 6px; color: #4f596b; font-weight: 700; }
+    .nav-item .icon { width: 18px; text-align: center; color: #939cad; }
+    .nav-item.active { color: #fff; background: #1d2230; }
+    .nav-item.active .icon { color: #fff; }
+    .account { margin-top: auto; padding: 14px 6px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.7; }
+    .main { min-width: 0; padding: 20px 26px 32px; }
+    .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+    .page-head h1 { margin: 0 0 6px; font-size: 27px; letter-spacing: 0; }
+    .page-head p { margin: 0; color: var(--muted); }
+    .head-actions { display: flex; gap: 9px; }
+    .button { height: 38px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); padding: 0 15px; font-weight: 800; }
+    .button.primary { border-color: var(--blue); color: #fff; background: var(--blue); }
+    .forum-shell { border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; }
+    .forum-toolbar { display: grid; grid-template-columns: auto minmax(260px, 1fr) auto; align-items: center; gap: 14px; min-height: 62px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+    .tabs { display: flex; gap: 4px; }
+    .tab { height: 34px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-weight: 800; }
+    .tab.active { color: var(--blue); background: var(--blue-soft); }
+    .search { position: relative; }
+    .search input { width: 100%; height: 38px; border: 1px solid var(--line); border-radius: 6px; outline: none; padding: 0 38px 0 13px; background: #fafbfc; }
+    .search span { position: absolute; right: 13px; top: 9px; color: #98a1b1; font-size: 17px; }
+    .sort { height: 36px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--muted); padding: 0 12px; font-weight: 700; }
+    .forum-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; min-height: 670px; }
+    .thread-area { min-width: 0; border-right: 1px solid var(--line); }
+    .thread-list-head { display: grid; grid-template-columns: minmax(0, 1fr) 76px 76px 116px; gap: 10px; align-items: center; height: 42px; padding: 0 16px; color: #8b94a4; background: #fafbfc; border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 800; }
+    .thread-row { display: grid; grid-template-columns: minmax(0, 1fr) 76px 76px 116px; gap: 10px; align-items: center; min-height: 92px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+    .thread-row:hover { background: #fafcff; }
+    .thread-main { min-width: 0; display: grid; gap: 7px; }
+    .thread-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .thread-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+    .badge { display: inline-flex; align-items: center; height: 21px; flex: 0 0 auto; padding: 0 7px; border-radius: 4px; font-size: 10px; font-weight: 900; }
+    .badge.pin { color: var(--red); background: var(--red-soft); }
+    .badge.solved { color: var(--green); background: var(--green-soft); }
+    .badge.discuss { color: var(--amber); background: var(--amber-soft); }
+    .badge.notice { color: var(--purple); background: #f2effc; }
+    .thread-preview { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .thread-meta { display: flex; align-items: center; gap: 7px; color: #8b94a4; font-size: 11px; }
+    .avatar { width: 22px; height: 22px; display: inline-grid; place-items: center; border-radius: 50%; color: #344054; background: #e9edf5; font-size: 10px; font-weight: 900; }
+    .tag { color: #5e6a7f; background: #f1f3f7; border-radius: 4px; padding: 2px 6px; }
+    .metric { color: #3f495a; text-align: center; font-weight: 800; }
+    .metric small { display: block; margin-top: 3px; color: #9aa2b1; font-size: 10px; font-weight: 600; }
+    .last-update { color: #586275; font-size: 11px; line-height: 1.55; }
+    .last-update strong { display: block; color: #293247; font-size: 12px; }
+    .side { padding: 16px; background: #fcfdff; }
+    .side .button { width: 100%; }
+    .side-section { margin-top: 22px; }
+    .side-section h3 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 11px; font-size: 14px; }
+    .side-section h3 span { color: var(--muted); font-size: 11px; font-weight: 600; }
+    .hot-list { display: grid; gap: 11px; }
+    .hot-item { display: grid; grid-template-columns: 24px 1fr; gap: 8px; align-items: start; }
+    .hot-no { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: #fff; background: #8893a7; font-size: 10px; font-weight: 900; }
+    .hot-item:nth-child(1) .hot-no { background: var(--red); }
+    .hot-item:nth-child(2) .hot-no { background: var(--amber); }
+    .hot-text { color: #3e485a; font-size: 12px; line-height: 1.5; }
+    .hot-text small { display: block; color: #9aa2b1; }
+    .people { display: flex; gap: 7px; flex-wrap: wrap; }
+    .people .avatar { width: 34px; height: 34px; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
+    .rules { display: grid; gap: 7px; color: #7a8496; font-size: 11px; line-height: 1.55; }
+    .forum-foot { display: flex; justify-content: space-between; align-items: center; min-height: 50px; padding: 0 16px; color: var(--muted); font-size: 11px; }
+    .pager { display: flex; gap: 5px; }
+    .pager span { min-width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
+    .pager .current { color: #fff; border-color: var(--blue); background: var(--blue); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 76px 1fr; }
+      .brand > div, .nav-item:not(.active) { font-size: 0; }
+      .nav-item { justify-content: center; }
+      .forum-body { grid-template-columns: 1fr; }
+      .side { display: none; }
+      .thread-area { border-right: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">T</div><div><strong>Team Loop</strong><small>技术项目团队</small></div></div>
+      <nav class="nav">
+        <div class="nav-item"><span class="icon">◆</span>团队成员</div>
+        <div class="nav-item"><span class="icon">⌂</span>工作台</div>
+        <div class="nav-item active"><span class="icon">▤</span>团队讨论</div>
+        <div class="nav-item"><span class="icon">☀</span>早例会</div>
+        <div class="nav-item"><span class="icon">▦</span>会议沙盘</div>
+        <div class="nav-item"><span class="icon">◴</span>机台排班</div>
+        <div class="nav-item"><span class="icon">★</span>红黑榜</div>
+        <div class="nav-item"><span class="icon">♥</span>Thank You</div>
+        <div class="nav-item"><span class="icon">↗</span>常用链接</div>
+      </nav>
+      <div class="account">管理员 · 管理视图<br>UI 风格 · Miro 白板协作</div>
+    </aside>
+
+    <main class="main">
+      <header class="page-head">
+        <div><h1>团队讨论区</h1><p>围绕现场问题、经验复盘和团队协作展开讨论。</p></div>
+        <div class="head-actions"><button class="button">我的讨论</button><button class="button primary">＋ 发起讨论</button></div>
+      </header>
+
+      <section class="forum-shell">
+        <div class="forum-toolbar">
+          <div class="tabs"><button class="tab active">全部</button><button class="tab">现场问题</button><button class="tab">经验复盘</button><button class="tab">吐槽广场</button></div>
+          <label class="search"><input placeholder="搜索标题、内容或成员"><span>⌕</span></label>
+          <button class="sort">最近更新 ▾</button>
+        </div>
+
+        <div class="forum-body">
+          <div class="thread-area">
+            <div class="thread-list-head"><span>主题</span><span style="text-align:center">回复</span><span style="text-align:center">浏览</span><span>最后更新</span></div>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><span class="badge pin">置顶</span><strong>7 月夜班重点风险与交接说明</strong></div><div class="thread-preview">TOPTB 温控波动需要连续观察，交接前请补齐趋势截图和点检记录。</div><div class="thread-meta"><span class="avatar">管</span><span>管理员</span><span>·</span><span>今天 09:20</span><span class="tag">团队公告</span></div></div>
+              <div class="metric">18<small>条回复</small></div><div class="metric">126<small>次浏览</small></div><div class="last-update"><strong>张工</strong>10 分钟前</div>
+            </article>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><span class="badge discuss">讨论中</span><strong>机台 A 报警截图缺失，夜班如何补齐？</strong></div><div class="thread-preview">凌晨 02:30 的报警截图没有归档，想确认监控导出权限和后续统一流程。</div><div class="thread-meta"><span class="avatar">陈</span><span>陈工</span><span>·</span><span>今天 08:46</span><span class="tag">TOPTB</span><span class="tag">夜班</span></div></div>
+              <div class="metric">9<small>条回复</small></div><div class="metric">74<small>次浏览</small></div><div class="last-update"><strong>王工</strong>25 分钟前</div>
+            </article>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><span class="badge solved">已解决</span><strong>温控波动复盘模板已经更新</strong></div><div class="thread-preview">新增趋势截图、影响范围和复现条件，后续复盘可以直接从常用链接打开。</div><div class="thread-meta"><span class="avatar">李</span><span>李工</span><span>·</span><span>昨天 16:12</span><span class="tag">经验复盘</span></div></div>
+              <div class="metric">12<small>条回复</small></div><div class="metric">93<small>次浏览</small></div><div class="last-update"><strong>普通成员</strong>昨天 18:40</div>
+            </article>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><span class="badge notice">经验</span><strong>如何快速定位 TOPTB 节拍异常</strong></div><div class="thread-preview">整理了三个高频检查点：数据时间窗、PLC 参数和交接记录，欢迎补充。</div><div class="thread-meta"><span class="avatar">张</span><span>张工</span><span>·</span><span>7 月 14 日</span><span class="tag">知识沉淀</span></div></div>
+              <div class="metric">7<small>条回复</small></div><div class="metric">68<small>次浏览</small></div><div class="last-update"><strong>管理员</strong>7 月 15 日</div>
+            </article>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><strong>夜班交接记录能不能再少填一张表？</strong></div><div class="thread-preview">目前同一件事要在三个地方重复记录，希望合并字段，减少重复录入。</div><div class="thread-meta"><span class="avatar">王</span><span>王工</span><span>·</span><span>7 月 13 日</span><span class="tag">吐槽广场</span></div></div>
+              <div class="metric">21<small>条回复</small></div><div class="metric">142<small>次浏览</small></div><div class="last-update"><strong>李工</strong>7 月 15 日</div>
+            </article>
+
+            <article class="thread-row">
+              <div class="thread-main"><div class="thread-title"><span class="badge solved">已解决</span><strong>供应商备件预计周五到货</strong></div><div class="thread-preview">已确认物流单号，机台 B 风险窗口保持到周五上午，到货后更新状态。</div><div class="thread-meta"><span class="avatar">普</span><span>普通成员</span><span>·</span><span>7 月 12 日</span><span class="tag">供应商</span></div></div>
+              <div class="metric">5<small>条回复</small></div><div class="metric">41<small>次浏览</small></div><div class="last-update"><strong>陈工</strong>7 月 13 日</div>
+            </article>
+
+            <div class="forum-foot"><span>共 38 个主题</span><div class="pager"><span>‹</span><span class="current">1</span><span>2</span><span>3</span><span>›</span></div></div>
+          </div>
+
+          <aside class="side">
+            <button class="button primary">＋ 发起新讨论</button>
+            <section class="side-section"><h3>热门讨论 <span>本周</span></h3><div class="hot-list">
+              <div class="hot-item"><span class="hot-no">1</span><div class="hot-text">夜班重点风险与交接说明<small>18 回复 · 126 浏览</small></div></div>
+              <div class="hot-item"><span class="hot-no">2</span><div class="hot-text">夜班交接能否少填一张表<small>21 回复 · 142 浏览</small></div></div>
+              <div class="hot-item"><span class="hot-no">3</span><div class="hot-text">TOPTB 节拍异常定位方法<small>7 回复 · 68 浏览</small></div></div>
+            </div></section>
+            <section class="side-section"><h3>活跃成员 <span>6 人</span></h3><div class="people"><span class="avatar">张</span><span class="avatar">李</span><span class="avatar">王</span><span class="avatar">陈</span><span class="avatar">管</span><span class="avatar">普</span></div></section>
+            <section class="side-section"><h3>讨论区约定</h3><div class="rules"><span>主题标题写清对象和问题</span><span>解决后及时标记“已解决”</span><span>敏感信息不要发布在讨论区</span></div></section>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
