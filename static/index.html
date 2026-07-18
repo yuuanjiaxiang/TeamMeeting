@@ -66,6 +66,7 @@
               <label>密码<input name="password" type="password" autocomplete="current-password" /></label>
               <button type="submit">使用系统账号登录</button>
             </form>
+            <small id="loginTransportWarning" class="login-security-warning hidden">当前地址不是 HTTPS，系统已禁止提交账号密码。请使用管理员提供的正式 HTTPS 域名。</small>
             <div id="ssoLoginSection" class="sso-login-section hidden">
               <div class="login-divider"><span>或</span></div>
               <button id="ssoLoginBtn" class="secondary sso-login-button" type="button">企业 SSO 登录</button>
@@ -182,7 +183,7 @@
                     <option value="all">全部团队</option>
                   </select>
                 </label>
-                <label>SSO 默认用户类型<select name="default_user_type"></select></label>
+                <label>账号分类建议<select name="default_user_type"></select><small>仅供管理员分类时参考；SSO 新账号仍先使用访客只读权限。</small></label>
                 <label>排序<input name="sort_order" type="number" value="0" /></label>
                 <label class="org-groups-field">SSO 群组映射<textarea name="sso_groups" rows="3" placeholder="每行或逗号分隔，例如：ESS-MO、CN-MO-Team"></textarea><small>登录返回任一群组匹配时，自动关联到该团队；优先匹配最深层级。</small></label>
                 <div class="modal-actions">

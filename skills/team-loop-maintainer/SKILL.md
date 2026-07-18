@@ -60,8 +60,8 @@ Use these references conditionally:
 ### Cross-module behavior
 
 - Keep users and member profiles consistent.
-- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, map the deepest configured SSO group to an organization route, preserve an existing organization when no group matches, prevent auto-login redirect loops, and validate SSO with the isolated PKCE smoke test.
-- Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; HTTPS proxy requests must issue Secure cookies.
+- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, map the deepest configured SSO group to an organization route, preserve an existing organization when no group matches, and auto-provision unknown identities only as `guest` accounts with `classification_pending=1` until an administrator assigns a type.
+- Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; production must use `TEAM_LOOP_REQUIRE_HTTPS=1`, reject direct HTTP login and mutations, and issue Secure cookies for HTTPS proxy requests.
 - Keep workbench and morning-meeting data synchronized.
 - Keep shared date filters initialized to the current month without page-specific overrides.
 - Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.

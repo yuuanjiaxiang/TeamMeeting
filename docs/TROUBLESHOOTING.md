@@ -57,7 +57,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - 提示无法连接身份平台：检查服务器 DNS、代理、防火墙、HTTPS 证书和系统时间；
 - 登录后回到系统账号页：页面会在 SSO 失败后主动停止循环跳转，先查看页面错误提示和服务日志，修复后点击“企业 SSO 登录”重试；
 - 提示工号缺失或关联冲突：核对“SSO 工号字段”和 UserInfo 返回值，并在“用户管理”确认工号唯一；
-- 登录后提示默认类型无效：选择一个启用的非访客用户类型；
+- 首次 SSO 登录后只有只读权限：这是待分类保护；管理员在“用户管理”筛选“访客 / 待分类”，为账号单个或批量分配正式类型；
 - 其他电脑可打开页面但不能 SSO：不要使用局域网 HTTP 地址作为正式回调，应通过 HTTPS 域名和反向代理访问；
 - Windows 运行时出现 TLS/OpenSSL 错误：改用系统安装的 Python 3.10+ 启动，并确认 `python -c "import ssl; print(ssl.OPENSSL_VERSION)"` 正常。
 4. 管理员切换到用户视图进行复现；
@@ -107,4 +107,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - SSO 回调后跳转失败：身份平台和系统配置中的回调必须完全等于 `https://域名/api/sso/callback`；
 - 会话 IP 全是 `127.0.0.1`：确认 Team Loop 进程启动前设置了 `TEAM_LOOP_TRUST_PROXY=1`，并确认后端仅监听 `127.0.0.1`；
 - 登录 Cookie 没有 `Secure`：检查 Nginx 是否发送 `X-Forwarded-Proto https`，以及 Team Loop 是否启用了可信代理；
+- 登录或保存返回 HTTP 426：当前请求没有经过可信 HTTPS 代理；请使用正式 HTTPS 域名，不要直接访问生产后端端口；
 - HTTPS 出现重定向循环：不要在其他上游代理中把 HTTPS 请求错误标记为 HTTP，检查每一层 `X-Forwarded-Proto`。

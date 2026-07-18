@@ -11,7 +11,7 @@
 - 错误响应：`{"error": "可读错误原因"}`；
 - 未登录通常返回 401，无权限返回 403，资源不存在返回 404；并发编辑冲突返回 409。
 
-公共域名由本机 Nginx 提供 HTTPS，后端基础地址保持 `http://127.0.0.1:8000`。启用 `TEAM_LOOP_TRUST_PROXY=1` 后，后端仅接受回环代理传入的 `X-Forwarded-For` 与 `X-Forwarded-Proto`；HTTPS 请求的会话 Cookie 会增加 `Secure`。
+公共域名由本机 Nginx 提供 HTTPS，后端基础地址保持 `http://127.0.0.1:8000`。生产部署默认启用 `TEAM_LOOP_TRUST_PROXY=1` 和 `TEAM_LOOP_REQUIRE_HTTPS=1`：后端仅接受回环代理传入的 `X-Forwarded-For` 与 `X-Forwarded-Proto`，拒绝未经 HTTPS 转发的登录及所有 POST/PATCH/DELETE 请求，HTTPS 会话 Cookie 增加 `Secure`。
 
 示例：
 
@@ -48,7 +48,7 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 }
 ```
 
-SSO 回调成功后按群组匹配到的组织跳转，例如 `/org/ess/mo/ws?sso=success`；失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。`/api/me` 只公开 SSO 是否可用、是否自动登录及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
+SSO 回调成功后按群组匹配到的组织跳转，例如 `/org/ess/mo/ws?sso=success`；失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。首次登录可自动建号，新账号返回 `classification_pending=1` 并使用 `guest` 只读权限；管理员通过 `PATCH /api/users/{id}` 或 `PATCH /api/users/bulk-type` 分配正式类型后解除待分类。`/api/me` 只公开 SSO 是否可用、是否自动登录、是否强制 HTTPS 及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
 
 ## 3. 用户、成员与权限
 

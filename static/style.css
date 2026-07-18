@@ -388,6 +388,18 @@ main {
   box-shadow: var(--shadow);
 }
 
+.login-security-warning {
+  display: block;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid #f2b8b5;
+  border-radius: 6px;
+  background: #fff3f2;
+  color: #9f2520;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .sso-login-section {
   display: grid;
   gap: 10px;
@@ -5100,6 +5112,17 @@ th {
 .user-management-table td strong,
 .user-management-table td small {
   display: block;
+}
+
+.user-management-table tr.user-row-pending td {
+  background: #fffaf0;
+}
+
+.user-pending-pill {
+  border-color: #e6b95c;
+  background: #fff1c7;
+  color: #744b00;
+  font-weight: 800;
 }
 
 .user-management-table td small {

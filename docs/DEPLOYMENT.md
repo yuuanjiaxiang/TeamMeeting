@@ -117,6 +117,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Sto
 | `TEAM_LOOP_RELEASE` | 健康接口显示的发布版本 |
 | `TEAM_LOOP_SSO_CLIENT_SECRET` | OAuth2 Client Secret，推荐使用环境变量而非写入数据库 |
 | `TEAM_LOOP_TRUST_PROXY` | 设为 `1` 后，仅信任来自本机代理的 `X-Forwarded-For/Proto`；Nginx 部署必须启用 |
+| `TEAM_LOOP_REQUIRE_HTTPS` | 设为 `1` 后，拒绝没有可信 HTTPS 标记的登录及所有写请求；正式部署脚本自动启用 |
 
 自定义数据盘示例：
 
@@ -132,10 +133,10 @@ python server.py --host 0.0.0.0 --port 8000
 1. 在企业身份平台创建 OAuth2/OIDC Web 应用，启用 Authorization Code 和 PKCE；
 2. 将回调地址登记为 `https://你的域名/api/sso/callback`；
 3. 在 Team Loop“系统管理”中选择配置方式：优先填写 Issuer 自动发现；不支持 Discovery 时填写授权、Token、UserInfo 三个地址；
-4. 填写 Client ID、回调地址、工号字段、姓名字段和默认用户类型。工号字段必须与 UserInfo 实际返回字段一致，例如 `employee_id` 或 `employeeNumber`；
-5. 在“用户管理”中提前维护账号工号，可让首次 SSO 登录直接关联现有用户；
+4. 填写 Client ID、回调地址、工号字段和姓名字段。工号字段必须与 UserInfo 实际返回字段一致，例如 `employee_id` 或 `employeeNumber`；
+5. 在“用户管理”中提前维护账号工号，可让首次 SSO 登录直接关联现有用户；否则系统自动创建“访客 / 待分类”只读账号，由管理员随后分配正式类型；
 6. 通过服务器环境变量配置 `TEAM_LOOP_SSO_CLIENT_SECRET`，再启用企业 SSO 与首页自动登录；
-7. 先在灰度环境完成已有工号关联、自动建号、权限、失败回退和退出验证，再提升正式环境。
+7. 先在灰度环境完成已有工号关联、待分类自动建号、管理员归类、权限、失败回退和退出验证，再提升正式环境。
 
 所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。
 
@@ -155,16 +156,15 @@ python server.py --host 0.0.0.0 --port 8000
 
 ### 10.2 启动只监听本机的正式服务
 
-在启动 Team Loop 的同一个 PowerShell 会话中启用可信代理，然后部署正式服务：
+部署只监听回环地址的正式服务：
 
 ```powershell
-$env:TEAM_LOOP_TRUST_PROXY = '1'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 `
   -Action StartProduction `
   -HostAddress 127.0.0.1
 ```
 
-如果使用计划任务或服务账号，应把 `TEAM_LOOP_TRUST_PROXY=1` 配置到该运行账号的环境中，不能只在临时命令行设置。
+`deploy.ps1` 对正式进程自动设置 `TEAM_LOOP_TRUST_PROXY=1` 和 `TEAM_LOOP_REQUIRE_HTTPS=1`；灰度进程保持本机 HTTP，方便在 8001 端口验收。若绕过部署脚本自行注册 Windows 服务，必须显式设置这两个变量，并确保后端只监听回环地址。
 
 ### 10.3 生成并启动 Nginx 配置
 
@@ -217,8 +217,11 @@ https://meeting.example.com/
 - HTTP 会跳转到 HTTPS；
 - `/api/health` 返回 `status: ok`；
 - 本地账号和 SSO 登录返回的 `weekly_session` Cookie 带 `Secure`；
+- 直接访问 `http://127.0.0.1:8000` 仍可读取健康检查，但登录和写操作返回 426；
 - 用户会话和审计日志记录客户端真实 IP，而不是统一显示 `127.0.0.1`；
 - SSO 登录后仍停留在公共域名，不跳回 8000 端口。
+
+浏览器提交登录表单时，请求体中仍会包含密码字段，这是服务器校验密码所必需的；HTTPS 会加密包括 URL、请求头和请求体在内的传输内容，网络中无法看到明文密码。不要用前端哈希替代 TLS：固定哈希本身会成为可重放的登录凭据。
 
 ## 11. 运维建议
 

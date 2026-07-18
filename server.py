@@ -28,6 +28,7 @@ BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups
 DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
 RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
 TRUST_PROXY = (os.environ.get("TEAM_LOOP_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes", "on"}
+REQUIRE_HTTPS = (os.environ.get("TEAM_LOOP_REQUIRE_HTTPS") or ("1" if DEPLOY_ENV == "production" else "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 DEFAULT_SETTINGS = [
     ("app_brand_name", "系统名称", "Team Loop", "text", "左侧顶部显示的系统名称"),
@@ -62,7 +63,7 @@ DEFAULT_SETTINGS = [
     ("sso_username_claim", "SSO 工号字段", "preferred_username", "text", "用于关联用户管理工号的 UserInfo 字段，如 employee_id、employeeNumber 或 preferred_username"),
     ("sso_display_name_claim", "SSO 姓名字段", "name", "text", "用于显示姓名的 UserInfo 字段"),
     ("sso_group_claim", "SSO 群组字段", "groups", "text", "用于匹配团队层级的群组字段，支持 groups、roles 等点分路径"),
-    ("sso_default_user_type", "SSO 默认用户类型", "default", "text", "自动创建 SSO 用户时分配的用户类型"),
+    ("sso_default_user_type", "SSO 新用户初始权限", "guest", "text", "自动创建的 SSO 用户先使用访客只读权限，等待管理员分类"),
     ("sso_auto_provision", "自动创建 SSO 用户", "1", "boolean", "关闭后，仅已存在且账号字段匹配的用户可通过 SSO 登录"),
 ]
 
@@ -95,7 +96,7 @@ GUEST_USER_TYPE_KEY = "guest"
 LEGACY_GUEST_MODULES = {"members", "shifts", "rules", "thanks", "links"}
 SYSTEM_USER_TYPES = [
     (DEFAULT_USER_TYPE_KEY, "默认用户类型", "管理员可修改名称和权限，也可以在迁移用户后删除。", 10, 0),
-    (GUEST_USER_TYPE_KEY, "访客", "未登录用户使用的只读权限模板。", 9999, 1),
+    (GUEST_USER_TYPE_KEY, "访客 / 待分类", "未登录访问与待管理员分类的 SSO 账号共用的只读权限模板。", 9999, 1),
 ]
 INITIAL_TYPE_OPERATIONS = {
     DEFAULT_USER_TYPE_KEY: {
@@ -821,7 +822,7 @@ def sso_configuration(conn):
         "username_claim": sso_setting(conn, "sso_username_claim", "preferred_username") or "preferred_username",
         "display_name_claim": sso_setting(conn, "sso_display_name_claim", "name") or "name",
         "group_claim": sso_setting(conn, "sso_group_claim", "groups") or "groups",
-        "default_user_type": sso_setting(conn, "sso_default_user_type", DEFAULT_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY,
+        "default_user_type": GUEST_USER_TYPE_KEY,
         "auto_provision": sso_setting(conn, "sso_auto_provision", "1").lower() in ("1", "true", "yes", "on", "启用"),
     }
 
@@ -1441,6 +1442,7 @@ def init_db():
         ensure_column(conn, "users", "external_subject", "TEXT")
         ensure_column(conn, "users", "employee_id", "TEXT")
         ensure_column(conn, "users", "org_unit_id", "INTEGER")
+        ensure_column(conn, "users", "classification_pending", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
@@ -1553,6 +1555,15 @@ def init_db():
         seed_organization_units(conn)
         conn.execute(
             """
+            UPDATE system_settings
+            SET label='SSO 新用户初始权限', value=?,
+                description='自动创建的 SSO 用户先使用访客只读权限，等待管理员分类'
+            WHERE key='sso_default_user_type'
+            """,
+            (GUEST_USER_TYPE_KEY,),
+        )
+        conn.execute(
+            """
             UPDATE user_types
             SET include_in_members=0, include_in_morning=0, include_in_rules=0, include_in_thanks=0
             WHERE key=?
@@ -1640,14 +1651,21 @@ class Handler(BaseHTTPRequestHandler):
     def request_is_https(self):
         return bool(getattr(self, "forwarded_https", False))
 
+    def require_https_transport(self, purpose="该操作"):
+        if REQUIRE_HTTPS and not self.request_is_https():
+            raise AppError(426, f"{purpose}只允许通过 HTTPS 访问，请使用正式 HTTPS 域名")
+
     def handle_request(self, method):
         self.apply_forwarded_request_context()
         parsed = urlparse(self.path)
         try:
+            if parsed.path.startswith("/api/") and method in {"POST", "PATCH", "DELETE"}:
+                self.require_https_transport("登录和数据写入")
             if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
                 ensure_daily_backup()
             if parsed.path in ("/api/sso/login", "/api/sso/callback") and method == "GET":
                 try:
+                    self.require_https_transport("企业 SSO 登录")
                     if parsed.path == "/api/sso/login":
                         self.start_sso_login()
                     else:
@@ -1683,6 +1701,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -1934,6 +1955,7 @@ class Handler(BaseHTTPRequestHandler):
                 user = conn.execute(
                     """
                     SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
+                           u.classification_pending,
                            t.name AS user_type_name,
                            u.org_unit_id, o.name AS org_unit_name, o.slug AS org_unit_slug,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
@@ -2345,7 +2367,7 @@ class Handler(BaseHTTPRequestHandler):
             "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
             "org_unit_id", "org_unit_name", "org_unit_slug",
             "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
-            "active", "created_at", "auth_source",
+            "active", "created_at", "auth_source", "classification_pending",
         )
         safe_user = {key: user_data.get(key) for key in safe_keys if key in user_data}
         write_audit(conn, safe_user, action, "session", safe_user["id"], summary, metadata or {}, self.client_address[0])
@@ -2491,23 +2513,21 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if not config["auto_provision"]:
                         raise AppError(403, "该企业账号尚未在系统中创建，请联系管理员")
-                    preferred_type = (provision_org or {}).get("default_user_type") or config["default_user_type"]
                     user_type = conn.execute(
-                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
-                        (preferred_type, GUEST_USER_TYPE_KEY),
+                        "SELECT key FROM user_types WHERE key=? AND active=1",
+                        (GUEST_USER_TYPE_KEY,),
                     ).fetchone()
                     if not user_type:
-                        raise AppError(400, "SSO 默认用户类型无效，请联系管理员")
+                        raise AppError(500, "访客权限模板不可用，请联系管理员")
                     salt, password_hash = make_hash(secrets.token_urlsafe(48))
                     cursor = conn.execute(
                         """
-                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, active, created_at, auth_source, external_subject)
-                        VALUES(?,?,?,?,?,?,?,?,1,?,?,?)
+                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, active, created_at, auth_source, external_subject, classification_pending)
+                        VALUES(?,?,?,?,?,?,?,?,1,?,?,?,1)
                         """,
                         (username, employee_id, salt, password_hash, display_name, "user", user_type["key"], provision_org_id, now_iso(), auth_source, identity),
                     )
                     user_id = cursor.lastrowid
-                    sync_member_for_user(conn, user_id)
                     created = True
                 user = conn.execute(
                     """
@@ -2637,7 +2657,7 @@ class Handler(BaseHTTPRequestHandler):
                     "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
                     "org_unit_id", "org_unit_name", "org_unit_slug",
                     "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
-                    "active", "created_at", "auth_source",
+                    "active", "created_at", "auth_source", "classification_pending",
                 )
             }
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
@@ -2745,6 +2765,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Connection", "close")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         self.close_connection = True
         for key, value in headers.items():
             self.send_header(key, value)
@@ -3212,6 +3235,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute(
                     """
                     SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
+                           u.classification_pending,
                            COALESCE(t.name, u.user_type) AS user_type_name,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
@@ -3291,7 +3315,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(users) != len(user_ids):
                 raise AppError(400, "部分账号不存在或已停用，请刷新后重试")
             conn.execute(
-                f"UPDATE users SET user_type=? WHERE active=1 AND id IN ({placeholders})",
+                f"UPDATE users SET user_type=?, classification_pending=0 WHERE active=1 AND id IN ({placeholders})",
                 [user_type, *user_ids],
             )
             for user_id in user_ids:
@@ -3445,6 +3469,8 @@ class Handler(BaseHTTPRequestHandler):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(data[key])
+        if "user_type" in data:
+            fields.append("classification_pending=0")
         if data.get("password"):
             salt, password_hash = make_hash(data["password"])
             fields.extend(["salt=?", "password_hash=?"])
@@ -6375,6 +6401,7 @@ class Handler(BaseHTTPRequestHandler):
         values["sso_auto_login"] = "1" if config["auto_login"] else "0"
         values["sso_button_label"] = config["button_label"]
         values["sso_ready"] = "1" if sso_configuration_ready(config) else "0"
+        values["https_required"] = "1" if REQUIRE_HTTPS else "0"
         return values
 
     def update_settings(self):
@@ -6412,13 +6439,8 @@ class Handler(BaseHTTPRequestHandler):
                     validate_sso_url(normalized, labels[key])
                 if key == "sso_mode" and normalized not in ("discovery", "manual"):
                     raise AppError(400, "OAuth2 配置方式不正确")
-                if key == "sso_default_user_type" and normalized:
-                    user_type = conn.execute(
-                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
-                        (normalized, GUEST_USER_TYPE_KEY),
-                    ).fetchone()
-                    if not user_type:
-                        raise AppError(400, "SSO 默认用户类型必须是有效的非访客类型")
+                if key == "sso_default_user_type":
+                    normalized = GUEST_USER_TYPE_KEY
                 conn.execute(
                     "UPDATE system_settings SET value=?, updated_by=?, updated_at=? WHERE key=?",
                     (normalized, admin["id"], now_iso(), key),
@@ -6436,13 +6458,11 @@ class Handler(BaseHTTPRequestHandler):
                     validate_sso_url(config["issuer_url"], "OIDC Issuer")
                 if config["redirect_uri"]:
                     validate_sso_url(config["redirect_uri"], "OIDC 回调地址")
-                if config["auto_provision"]:
-                    default_type = conn.execute(
-                        "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
-                        (config["default_user_type"], GUEST_USER_TYPE_KEY),
-                    ).fetchone()
-                    if not default_type:
-                        raise AppError(400, "启用 SSO 自动建号前必须选择有效的默认用户类型")
+                if config["auto_provision"] and not conn.execute(
+                    "SELECT key FROM user_types WHERE key=? AND active=1",
+                    (GUEST_USER_TYPE_KEY,),
+                ).fetchone():
+                    raise AppError(400, "启用 SSO 自动建号前必须保留访客权限模板")
             write_audit(
                 conn,
                 admin,
@@ -6591,8 +6611,8 @@ def permissions_for(user):
         "canManageMeetingTopics": is_admin,
         "canManageAttendance": is_admin,
         "canManageSystem": is_admin,
-        "canCreateMeeting": bool(user),
-        "canPostThankYou": bool(user),
+        "canCreateMeeting": bool(operations.get("meetings", {}).get("create")),
+        "canPostThankYou": bool(operations.get("thanks", {}).get("create")),
     }
 
 

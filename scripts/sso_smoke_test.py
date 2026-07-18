@@ -183,10 +183,33 @@ def main():
             with provision_opener.open(f"{app_url}/api/sso/login", timeout=15):
                 pass
             with provision_opener.open(f"{app_url}/api/me", timeout=15) as response:
-                provisioned = (json.load(response).get("user") or {})
-            if provisioned.get("username") != "E20002" or provisioned.get("employee_id") != "E20002" or provisioned.get("org_unit_name") != "WS":
+                provisioned_profile = json.load(response)
+            provisioned = provisioned_profile.get("user") or {}
+            provisioned_permissions = provisioned_profile.get("permissions") or {}
+            if (
+                provisioned.get("username") != "E20002"
+                or provisioned.get("employee_id") != "E20002"
+                or provisioned.get("org_unit_name") != "WS"
+                or provisioned.get("user_type") != app.GUEST_USER_TYPE_KEY
+                or not provisioned.get("classification_pending")
+            ):
                 raise RuntimeError(f"Automatic SSO provisioning failed: {provisioned}")
-            print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "pkce": "S256"}, ensure_ascii=False))
+            if any(actions.get("create") or actions.get("edit") or actions.get("delete") for actions in (provisioned_permissions.get("operations") or {}).values()):
+                raise RuntimeError(f"Pending SSO account received write permissions: {provisioned_permissions}")
+
+            classify_request = Request(
+                f"{app_url}/api/users/{provisioned['id']}",
+                data=json.dumps({"user_type": app.DEFAULT_USER_TYPE_KEY}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="PATCH",
+            )
+            with admin_opener.open(classify_request, timeout=15):
+                pass
+            with provision_opener.open(f"{app_url}/api/me", timeout=15) as response:
+                classified = (json.load(response).get("user") or {})
+            if classified.get("user_type") != app.DEFAULT_USER_TYPE_KEY or classified.get("classification_pending"):
+                raise RuntimeError(f"Administrator classification did not activate the SSO account: {classified}")
+            print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "pkce": "S256"}, ensure_ascii=False))
         finally:
             app_server.shutdown()
             oidc_server.shutdown()

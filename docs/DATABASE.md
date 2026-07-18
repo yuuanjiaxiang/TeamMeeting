@@ -35,7 +35,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 | `login_attempts` | 按账号和来源地址统计失败次数及临时锁定时间 |
 | `sso_login_states` | OAuth2/OIDC 登录的一次性 state 摘要、nonce、PKCE verifier、回调地址和有效期 |
 
-`users.user_type` 必须指向一个启用的、非访客用户类型。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 仅代表未登录访问范围，服务端会强制其所有写权限和业务参与开关为关闭。
+`users.user_type` 必须指向一个启用的用户类型。系统账号由管理员直接分配非访客类型；SSO 自动创建的账号暂时使用 `guest`，并将 `users.classification_pending=1`。管理员单个或批量分配正式类型后，该标志自动清零。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 同时代表未登录访问与待分类 SSO 账号，服务端会强制其所有写权限和业务参与开关为关闭。
 
 `users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`sso_login_states` 只保存短期登录事务，成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
 

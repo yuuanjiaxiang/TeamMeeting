@@ -585,7 +585,11 @@ function applyAuthView() {
   const showLogin = guest && state.showLogin;
   $("#loginView").classList.toggle("hidden", !showLogin);
   $("#appView").classList.toggle("hidden", showLogin);
-  const roleText = state.user?.role === "admin" ? "管理员" : (state.user?.user_type_name || "类型用户");
+  const roleText = state.user?.role === "admin"
+    ? "管理员"
+    : state.user?.classification_pending
+      ? "待管理员分类"
+      : (state.user?.user_type_name || "类型用户");
   const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
   const orgText = state.organization?.selected?.name || state.user?.org_unit_name || "";
   $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${orgText ? ` · ${orgText}` : ""}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
@@ -877,6 +881,12 @@ function applyBranding() {
   const ssoReady = String(state.publicSettings?.sso_ready || "0") === "1" || configuredInAdminView;
   if (ssoSection) ssoSection.classList.toggle("hidden", !ssoReady);
   if (ssoButton) ssoButton.textContent = settingValue("sso_button_label", "企业 SSO 登录") || "企业 SSO 登录";
+  const insecureTransport = settingValue("https_required", "0") === "1" && window.location.protocol !== "https:";
+  $("#loginTransportWarning")?.classList.toggle("hidden", !insecureTransport);
+  const localLoginForm = $("#loginForm");
+  if (localLoginForm) {
+    localLoginForm.querySelectorAll("input, button").forEach((element) => { element.disabled = insecureTransport; });
+  }
   document.title = `${teamName}周例会`;
 }
 
@@ -1660,8 +1670,8 @@ async function loadUsers() {
   populateSelects();
 }
 
-function renderUserTypeOptions(selected) {
-  const options = state.userTypes.filter((type) => !type.is_guest && type.key !== "guest");
+function renderUserTypeOptions(selected, includeGuest = false) {
+  const options = state.userTypes.filter((type) => includeGuest || (!type.is_guest && type.key !== "guest"));
   return options.map((type) => `<option value="${escapeHtml(type.key)}" ${type.key === selected ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("");
 }
 
@@ -1744,13 +1754,13 @@ function populateUserManagementFilters() {
   const orgFilter = $("#userOrgFilter");
   const typeFilter = $("#userTypeFilter");
   if (state.userFilters.org && !state.orgUnits.some((unit) => String(unit.id) === state.userFilters.org)) state.userFilters.org = "";
-  if (state.userFilters.type && !state.userTypes.some((type) => type.key === state.userFilters.type && !type.is_guest)) state.userFilters.type = "";
+  if (state.userFilters.type && !state.userTypes.some((type) => type.key === state.userFilters.type)) state.userFilters.type = "";
   if (orgFilter) {
     orgFilter.innerHTML = `<option value="">全部团队</option>${renderOrgOptions(state.userFilters.org)}`;
     orgFilter.value = state.userFilters.org;
   }
   if (typeFilter) {
-    typeFilter.innerHTML = `<option value="">全部类型</option>${renderUserTypeOptions(state.userFilters.type)}`;
+    typeFilter.innerHTML = `<option value="">全部类型</option>${renderUserTypeOptions(state.userFilters.type, true)}`;
     typeFilter.value = state.userFilters.type;
   }
   if ($("#userSearchInput")) $("#userSearchInput").value = state.userFilters.query;
@@ -1760,7 +1770,8 @@ function populateUserManagementFilters() {
 function renderUserManagement() {
   const users = filteredManagementUsers();
   const result = $("#userFilterResult");
-  if (result) result.textContent = users.length === state.users.length ? `共 ${users.length} 个账号` : `找到 ${users.length} / ${state.users.length} 个账号`;
+  const pendingCount = state.users.filter((user) => Boolean(user.classification_pending)).length;
+  if (result) result.textContent = `${users.length === state.users.length ? `共 ${users.length} 个账号` : `找到 ${users.length} / ${state.users.length} 个账号`}${pendingCount ? ` · 待分类 ${pendingCount}` : ""}`;
   if ($("#userList")) $("#userList").innerHTML = renderUserTable(users);
   updateUserBulkToolbar();
 }
@@ -1768,12 +1779,14 @@ function renderUserManagement() {
 function renderUserTable(users) {
   if (!users.length) return '<div class="user-filter-empty"><strong>没有匹配的账号</strong><span>调整搜索词或筛选条件后再试。</span></div>';
   return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号 / 工号</th><th>姓名</th><th>所属团队</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
-    <tr>
+    <tr class="${user.classification_pending ? "user-row-pending" : ""}">
       <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}" ${Number(user.id) === Number(state.user?.id) ? "disabled title=\"当前登录账号不能批量操作\"" : state.selectedUserIds.has(Number(user.id)) ? "checked" : ""}></td>
       <td><strong>${escapeHtml(user.username)}</strong><small>工号 ${escapeHtml(user.employee_id || user.username)}</small></td>
       <td>${escapeHtml(user.display_name)}</td>
       <td><span class="pill org-pill">${escapeHtml(user.org_unit_name || "未分配")}</span></td>
-      <td><span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span></td>
+      <td>${user.classification_pending
+        ? '<span class="pill user-pending-pill">待分类 · 访客权限</span>'
+        : `<span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span>`}</td>
       <td>${user.role === "admin" ? '<span class="pill admin">系统管理员</span>' : user.auth_source === "oidc" || user.auth_source === "oauth2" ? '<span class="pill status-done">企业 SSO</span>' : "系统账号"}</td>
       <td><div class="user-scope-mini">${[
         ["members", "成员"], ["morning", "早会"], ["rules", "榜单"], ["thanks", "感谢"],
@@ -1873,7 +1886,7 @@ function renderUserTypePermissions() {
     return `
       <article class="user-type-summary-card ${isGuestType ? "guest" : ""}">
         <div class="user-type-summary-head">
-          <div><strong>${escapeHtml(type.name)}</strong><span>${isGuestType ? "未登录访问模板" : `${Number(type.user_count || 0)} 个账号`}</span></div>
+          <div><strong>${escapeHtml(type.name)}</strong><span>${isGuestType ? `未登录 + ${Number(type.user_count || 0)} 个待分类账号` : `${Number(type.user_count || 0)} 个账号`}</span></div>
           <button class="user-type-config-btn" type="button" data-type-key="${escapeHtml(type.key)}">配置</button>
         </div>
         <p>${escapeHtml(type.description || "尚未填写类型说明")}</p>
@@ -2108,13 +2121,10 @@ function renderSettingField(setting) {
     </label>`;
   }
   if (setting.key === "sso_default_user_type") {
-    const options = state.userTypes
-      .filter((item) => item.key !== "guest" && (item.active || item.key === setting.value))
-      .map((item) => `<option value="${escapeHtml(item.key)}" ${item.key === setting.value ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
-      .join("");
     return `<label class="setting-field">
       <span>${escapeHtml(setting.label)}</span>
-      <select name="${key}">${options}</select>
+      <input name="${key}" type="hidden" value="guest">
+      <input value="访客 / 待分类（只读）" disabled>
       <small>${escapeHtml(setting.description || "")}</small>
     </label>`;
   }

@@ -103,12 +103,21 @@ function Invoke-Migration([string]$ReleasePath, [string]$DatabasePath, [string]$
     $oldBackup = $env:TEAM_LOOP_BACKUP_DIR
     $oldEnvironment = $env:TEAM_LOOP_ENV
     $oldRelease = $env:TEAM_LOOP_RELEASE
+    $oldTrustProxy = $env:TEAM_LOOP_TRUST_PROXY
+    $oldRequireHttps = $env:TEAM_LOOP_REQUIRE_HTTPS
     try {
         $env:TEAM_LOOP_DB_PATH = $DatabasePath
         $env:TEAM_LOOP_DATA_DIR = Split-Path -Parent $DatabasePath
         $env:TEAM_LOOP_BACKUP_DIR = Join-Path (Split-Path -Parent $DatabasePath) "backups"
         $env:TEAM_LOOP_ENV = $Environment
         $env:TEAM_LOOP_RELEASE = $ReleaseId
+        if ($Environment -eq "production") {
+            $env:TEAM_LOOP_TRUST_PROXY = "1"
+            $env:TEAM_LOOP_REQUIRE_HTTPS = "1"
+        } else {
+            $env:TEAM_LOOP_TRUST_PROXY = "0"
+            $env:TEAM_LOOP_REQUIRE_HTTPS = "0"
+        }
         & $Python (Join-Path $ReleasePath "server.py") --migrate-only
         if ($LASTEXITCODE -ne 0) {
             throw "Database migration failed for $Environment."
@@ -119,6 +128,8 @@ function Invoke-Migration([string]$ReleasePath, [string]$DatabasePath, [string]$
         $env:TEAM_LOOP_BACKUP_DIR = $oldBackup
         $env:TEAM_LOOP_ENV = $oldEnvironment
         $env:TEAM_LOOP_RELEASE = $oldRelease
+        $env:TEAM_LOOP_TRUST_PROXY = $oldTrustProxy
+        $env:TEAM_LOOP_REQUIRE_HTTPS = $oldRequireHttps
     }
 }
 
@@ -205,6 +216,7 @@ function Start-Environment(
         database = $DatabasePath
         host = $HostAddress
         port = $Port
+        https_required = ($Environment -eq "production")
         pid = $process.Id
         started_at = (Get-Date).ToString("o")
     }

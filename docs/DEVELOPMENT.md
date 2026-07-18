@@ -120,7 +120,7 @@ if path == "/api/example":
 
 登录会话持久化在 SQLite 中，只保存令牌摘要。新增认证功能时同时考虑超时、撤销、密码修改后的其他设备退出、失败次数锁定和 401 后前端自动回到登录视图。
 
-企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户，再按配置自动建号；`external_subject` 保存身份平台稳定主体。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、自动建号、敏感配置隔离和 Cookie 会话。
+企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、待分类建号、管理员归类、敏感配置隔离和 Cookie 会话。
 
 组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。成员、论坛、早例会、会议、排班、红黑榜与 Thank You 的读取和写入都必须复用组织过滤。管理员虽可切换全部组织，业务页面仍应按所选路由过滤。
 
@@ -134,7 +134,7 @@ if path == "/api/example":
 
 SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只返回明确匹配且最深的组织。已有账号在没有匹配群组时保留原组织；自动创建的新账号才回落到根组织。登录完成后应跳转到该账号最终组织的 `/org/...` 路由。修改组织范围或 SSO 群组映射后运行 `python scripts\organization_scope_smoke_test.py` 和 `python scripts\sso_smoke_test.py`。
 
-公共域名必须通过本机 Nginx 代理。`TEAM_LOOP_TRUST_PROXY=1` 只允许回环地址代理提供 `X-Forwarded-For` 和 `X-Forwarded-Proto`，不要把开启可信代理的后端监听到公网。HTTPS 代理请求必须签发 `Secure` 会话 Cookie，并用转发后的真实 IP 执行登录限流、会话记录和审计。修改该链路后运行 `python scripts\proxy_smoke_test.py`。
+公共域名必须通过本机 Nginx 代理。`TEAM_LOOP_TRUST_PROXY=1` 只允许回环地址代理提供 `X-Forwarded-For` 和 `X-Forwarded-Proto`，`TEAM_LOOP_REQUIRE_HTTPS=1` 拒绝没有可信 HTTPS 标记的登录及所有写请求。不要把开启可信代理的后端监听到公网。HTTPS 代理请求必须签发 `Secure` 会话 Cookie，并用转发后的真实 IP执行登录限流、会话记录和审计。修改该链路后运行 `python scripts\proxy_smoke_test.py`，确认直连 HTTP 登录返回 426。
 
 团队讨论区的完整 Emoji 选择器和中文数据都放在 `static/vendor/emoji-picker-element/` 与 `static/vendor/emoji-picker-element-data/`。部署环境不得依赖 CDN；修改选择器后应在断网或仅局域网条件下验证表情分类、搜索、发送和再次点击撤销。
 

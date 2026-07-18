@@ -5,6 +5,7 @@ import tempfile
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -34,6 +35,7 @@ def main():
         os.environ["TEAM_LOOP_BACKUP_DIR"] = str(Path(temporary_directory) / "backups")
         os.environ["TEAM_LOOP_ENV"] = "gray"
         os.environ["TEAM_LOOP_TRUST_PROXY"] = "1"
+        os.environ["TEAM_LOOP_REQUIRE_HTTPS"] = "1"
         sys.path.insert(0, str(ROOT))
         import server as app
 
@@ -48,6 +50,17 @@ def main():
             "X-Forwarded-Host": "meeting.example.com",
         }
         try:
+            try:
+                request_json(
+                    f"{base_url}/api/login",
+                    "POST",
+                    {"username": "admin", "password": "admin123"},
+                )
+                raise RuntimeError("Direct HTTP login unexpectedly succeeded")
+            except HTTPError as exc:
+                error = json.load(exc)
+                if exc.code != 426 or "HTTPS" not in error.get("error", ""):
+                    raise RuntimeError(f"Direct HTTP login returned an unexpected error: {exc.code} {error}") from exc
             status, response_headers, result = request_json(
                 f"{base_url}/api/login",
                 "POST",
@@ -65,7 +78,7 @@ def main():
             sessions = sessions_result.get("sessions") or []
             if not sessions or sessions[0].get("ip_address") != "203.0.113.42":
                 raise RuntimeError(f"Forwarded client IP was not recorded: {sessions}")
-            print(json.dumps({"status": "ok", "secure_cookie": True, "client_ip": sessions[0]["ip_address"]}))
+            print(json.dumps({"status": "ok", "http_login_blocked": True, "secure_cookie": True, "client_ip": sessions[0]["ip_address"]}))
         finally:
             server.shutdown()
             thread.join(timeout=5)
