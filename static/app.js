@@ -32,6 +32,9 @@ const state = {
   userFilters: { query: "", org: "", type: "", auth: "" },
   selectedUserIds: new Set(),
   organization: { selected: null, accessible: [] },
+  organizationTreeOpen: false,
+  organizationTreeSelectionPath: "",
+  expandedOrganizationIds: new Set(),
   moduleCatalog: [],
   permissionPreview: null,
   sessions: [],
@@ -178,24 +181,94 @@ function applyOrganizationData(data, updateRoute = true) {
   renderOrganizationSwitcher();
 }
 
+function syncOrganizationTreeExpansion(units, selected) {
+  const selectedPath = selected?.path || "";
+  if (state.organizationTreeSelectionPath === selectedPath) return;
+  const byId = new Map(units.map((unit) => [Number(unit.id), unit]));
+  const expanded = new Set();
+  const visited = new Set();
+  let current = selected;
+  while (current && !visited.has(Number(current.id))) {
+    const currentId = Number(current.id);
+    expanded.add(currentId);
+    visited.add(currentId);
+    current = byId.get(Number(current.parent_id));
+  }
+  state.expandedOrganizationIds = expanded;
+  state.organizationTreeSelectionPath = selectedPath;
+}
+
+function organizationTreeMarkup(units, selected) {
+  const byId = new Map(units.map((unit) => [Number(unit.id), unit]));
+  const children = new Map();
+  units.forEach((unit) => {
+    const parentId = byId.has(Number(unit.parent_id)) ? Number(unit.parent_id) : null;
+    if (!children.has(parentId)) children.set(parentId, []);
+    children.get(parentId).push(unit);
+  });
+
+  const renderNodes = (nodes, depth = 0) => `<ul role="${depth === 0 ? "tree" : "group"}">${nodes.map((unit) => {
+    const unitId = Number(unit.id);
+    const childUnits = children.get(unitId) || [];
+    const hasChildren = childUnits.length > 0;
+    const expanded = hasChildren && state.expandedOrganizationIds.has(unitId);
+    const active = unit.path === selected?.path;
+    const label = unit.label_path || unit.name;
+    return `<li role="treeitem" aria-level="${depth + 1}"${hasChildren ? ` aria-expanded="${expanded}"` : ""}>
+      <div class="org-tree-node ${active ? "active" : ""}" style="--org-tree-depth:${depth}">
+        ${hasChildren
+          ? `<button class="org-tree-branch-toggle" type="button" data-org-tree-expand="${unitId}" aria-label="${expanded ? "收起" : "展开"}${escapeHtml(unit.name)}" title="${expanded ? "收起" : "展开"}${escapeHtml(unit.name)}">${expanded ? "−" : "+"}</button>`
+          : '<span class="org-tree-branch-spacer" aria-hidden="true"></span>'}
+        <button class="org-tree-select" type="button" data-org-path="${escapeHtml(unit.path)}" title="${escapeHtml(label)}" ${active ? 'aria-current="page"' : ""}>
+          <span>${escapeHtml(unit.name)}</span>
+          ${active ? '<small aria-hidden="true">当前</small>' : ""}
+        </button>
+      </div>
+      ${expanded ? renderNodes(childUnits, depth + 1) : ""}
+    </li>`;
+  }).join("")}</ul>`;
+
+  return renderNodes(children.get(null) || []);
+}
+
 function renderOrganizationSwitcher() {
   const wrapper = $("#orgSwitcher");
-  const select = $("#orgRouteSelect");
-  if (!wrapper || !select) return;
+  const trigger = $("#orgTreeToggle");
+  const panel = $("#orgTreePanel");
+  const tree = $("#orgTreeList");
+  if (!wrapper || !trigger || !panel || !tree) return;
   const units = state.organization?.accessible || [];
   const selected = state.organization?.selected;
   wrapper.classList.toggle("hidden", units.length === 0);
+  syncOrganizationTreeExpansion(units, selected);
   const selectedLabel = selected?.label_path || selected?.name || "";
   const currentPath = $("#orgCurrentPath");
   if (currentPath) {
     currentPath.textContent = selectedLabel;
     currentPath.title = selectedLabel;
   }
-  select.title = selectedLabel ? `当前：${selectedLabel}` : "切换团队";
-  select.innerHTML = units.map((unit) => {
-    const label = unit.label_path || unit.name;
-    return `<option value="${escapeHtml(unit.path)}" ${unit.path === selected?.path ? "selected" : ""}>${escapeHtml(label)}</option>`;
-  }).join("");
+  trigger.title = selectedLabel ? `当前：${selectedLabel}` : "切换团队";
+  trigger.disabled = units.length < 2;
+  trigger.setAttribute("aria-expanded", String(state.organizationTreeOpen));
+  wrapper.classList.toggle("tree-open", state.organizationTreeOpen);
+  panel.classList.toggle("hidden", !state.organizationTreeOpen);
+  $("#orgTreeChevron").textContent = state.organizationTreeOpen ? "⌃" : "⌄";
+  tree.innerHTML = organizationTreeMarkup(units, selected);
+}
+
+async function selectOrganizationPath(path) {
+  const unit = state.organization?.accessible?.find((item) => item.path === path);
+  if (!unit) return;
+  state.organizationTreeOpen = false;
+  if (unit.path === state.organization?.selected?.path) {
+    renderOrganizationSwitcher();
+    return;
+  }
+  window.history.pushState({}, "", unit.route);
+  state.organization.selected = unit;
+  renderOrganizationSwitcher();
+  state.thankUsers = [];
+  await refreshAll();
 }
 
 function applyUiTheme() {
@@ -4892,15 +4965,48 @@ function bindEvents() {
     switchPage(firstAccessiblePage());
     await refreshAll();
   });
-  $("#orgRouteSelect")?.addEventListener("change", async (event) => {
-    const path = event.target.value;
-    const unit = state.organization?.accessible?.find((item) => item.path === path);
-    if (!unit) return;
-    window.history.pushState({}, "", unit.route);
-    state.organization.selected = unit;
+  $("#orgTreeToggle")?.addEventListener("click", () => {
+    state.organizationTreeOpen = !state.organizationTreeOpen;
     renderOrganizationSwitcher();
-    state.thankUsers = [];
-    await refreshAll();
+  });
+  $("#orgTreePanel")?.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const branch = event.target.closest("[data-org-tree-expand]");
+    if (branch) {
+      const unitId = Number(branch.dataset.orgTreeExpand);
+      if (state.expandedOrganizationIds.has(unitId)) state.expandedOrganizationIds.delete(unitId);
+      else state.expandedOrganizationIds.add(unitId);
+      renderOrganizationSwitcher();
+      return;
+    }
+    const unitButton = event.target.closest("[data-org-path]");
+    if (!unitButton) return;
+    try {
+      await selectOrganizationPath(unitButton.dataset.orgPath);
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+  $("#orgTreeCollapseAll")?.addEventListener("click", () => {
+    state.expandedOrganizationIds = new Set();
+    renderOrganizationSwitcher();
+  });
+  $("#orgTreeExpandAll")?.addEventListener("click", () => {
+    const units = state.organization?.accessible || [];
+    const parentIds = new Set(units.map((unit) => Number(unit.parent_id)).filter(Boolean));
+    state.expandedOrganizationIds = new Set(units.filter((unit) => parentIds.has(Number(unit.id))).map((unit) => Number(unit.id)));
+    renderOrganizationSwitcher();
+  });
+  document.addEventListener("click", (event) => {
+    if (!state.organizationTreeOpen || event.target.closest("#orgSwitcher")) return;
+    state.organizationTreeOpen = false;
+    renderOrganizationSwitcher();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.organizationTreeOpen) return;
+    state.organizationTreeOpen = false;
+    renderOrganizationSwitcher();
+    $("#orgTreeToggle")?.focus();
   });
   $("#orgUnitForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();

@@ -33,6 +33,7 @@ Use these references conditionally:
 - Use event delegation for dynamically rendered controls.
 - Escape every user-controlled value before injecting HTML.
 - Preserve independent scrolling for long lists and stable calendar/table dimensions.
+- Keep the sidebar organization switcher hierarchical and collapsible; expand only the selected path by default, keep deep trees internally scrollable, and verify desktop, medium, and mobile layouts.
 - Verify Miro theme first, then check theme overrides and responsive breakpoints.
 - Make each page reload its latest data when opened.
 

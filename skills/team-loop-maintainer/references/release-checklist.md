@@ -20,6 +20,7 @@
 - Run `scripts/safety_feature_test.py` when sessions, permissions, participation scopes, optimistic writes, or shifts changed.
 - Verify bulk account-type changes and confirm excluded users disappear only from current business lists while history remains.
 - Verify organization `all/subtree/unit` scopes, bulk organization assignment, nested `/org/...` routes, scoped business writes, and blocked deletion of organizations with children or active users.
+- Verify the sidebar organization tree expands and collapses by branch, defaults to the selected path, closes after selection/outside click, and does not overflow at desktop, medium, or mobile widths.
 - Verify upper meetings and announcements appear read-only in descendants, ordinary discussions do not inherit, descendants can reply/react to inherited announcements, cross-team Thank You appears for both parties and common ancestors, and unrelated sibling teams cannot see it.
 - If SSO organization mapping changed, verify deepest-group matching, existing-user organization preservation when no group matches, new-user root fallback, and redirect to the final organization route.
 - If authentication changed, run `python scripts\sso_smoke_test.py`; confirm existing employee IDs link without duplicate users, auto provisioning still works, local password fallback remains available, auto login cannot loop, and no SSO secret or endpoint appears in `/api/me`.

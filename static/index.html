@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260718-org-propagation-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260718-org-tree-v2" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,9 +17,23 @@
           </div>
         </div>
         <div id="orgSwitcher" class="org-switcher hidden">
-          <span>当前团队</span>
-          <strong id="orgCurrentPath"></strong>
-          <select id="orgRouteSelect" aria-label="切换团队"></select>
+          <button id="orgTreeToggle" class="org-tree-trigger" type="button" aria-expanded="false" aria-controls="orgTreePanel">
+            <span class="org-tree-trigger-copy">
+              <small>当前团队</small>
+              <strong id="orgCurrentPath"></strong>
+            </span>
+            <span id="orgTreeChevron" class="org-tree-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div id="orgTreePanel" class="org-tree-panel hidden">
+            <div class="org-tree-panel-head">
+              <strong>切换团队</strong>
+              <div>
+                <button id="orgTreeCollapseAll" class="org-tree-icon-btn" type="button" aria-label="收起全部层级" title="收起全部层级">−</button>
+                <button id="orgTreeExpandAll" class="org-tree-icon-btn" type="button" aria-label="展开全部层级" title="展开全部层级">＋</button>
+              </div>
+            </div>
+            <div id="orgTreeList" class="org-tree-list"></div>
+          </div>
         </div>
         <nav id="nav"></nav>
         <div class="user-box">
@@ -1097,6 +1111,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260718-org-propagation-v1"></script>
+    <script type="module" src="/app.js?v=20260718-org-tree-v1"></script>
   </body>
 </html>
