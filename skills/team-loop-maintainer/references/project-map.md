@@ -7,6 +7,7 @@
 | Tables and migrations | `server.py:init_db` | seed functions, backup verification |
 | Authentication and API routing | `server.py:Handler` | `route_module`, current-user helpers |
 | Permissions | `MODULE_CATALOG`, type defaults | `static/app.js` access helpers and navigation |
+| Organization tree and route scope | `org_units`, `organization_context()` | SSO group mapping, people-centered module queries, sidebar organization switcher |
 | Page markup and dialogs | `static/index.html` | render functions in `static/app.js` |
 | State, rendering, interactions | `static/app.js` | related backend endpoint |
 | Visual design and responsiveness | `static/style.css` | theme overrides near the bottom |
@@ -18,9 +19,12 @@
 ## Domain invariants
 
 - A user owns one member profile; inactive users disappear from current member views while history remains.
+- User management supports client-side account/name/employee-ID search, organization/type/auth filters, and transaction-safe bulk type, organization, or soft-delete operations. Bulk deletion must protect the current account, revoke sessions, and create one recycle record per user.
 - Guest modules are selected through the reserved `guest` permission template; the frontend consumes `/api/me` and must not maintain a separate allowlist.
 - User-type permissions include view/create/edit/delete; UI hiding never replaces server checks.
 - User-type participation scopes independently control current team-member, morning, red/black, and Thank You candidate lists without deleting history.
+- Organization visibility controls which users and organization-owned records are in scope; it is independent from module permissions and participation scopes. Client organization paths must always be intersected with the authenticated user's accessible organization IDs.
+- Organization propagation uses three distinct sets: direct `visible_ids` for normal reads/writes, ancestor IDs for read-only meetings and announcement topics, and same-root collaboration IDs for cross-team Thank You candidates. Thank You activity follows sender/receiver visibility; ranking follows receiver ownership only.
 - User types are dynamic. Only `guest` is reserved; it is read-only and cannot be assigned to an account.
 - Past morning-meeting dates are read-only; unfinished items inherit through a root chain.
 - Completed or archived meetings lock agenda and minutes until an admin reopens them.
@@ -28,11 +32,12 @@
 - Meeting presets are batch-added through `/api/meetings/{id}/agenda-options`, with an optional owner per selected item; `meetings.start_time` is `HH:MM` or empty.
 - Team discussion is a forum-style topic list with categories, search, sorting, pagination, detail replies, soft deletion, and recycle restore. Authors manage their own topics; only administrators publish announcements or pin topics.
 - Discussion Emoji picker code, locale, and Emoji data are local static assets and must work without public internet access.
+- Public domains terminate TLS in local Nginx and proxy to a loopback Team Loop port. Forwarded IP/protocol are trusted only from loopback when explicitly enabled.
 - Red and black scores remain separate; do not silently convert to a net score.
 - Black-score summary and detail visibility are separate system settings; non-admin API responses must be filtered server-side while administrators retain full management access.
 - A user may edit/delete only allowed Thank You records; weekly recipient limits come from settings.
 - Link edits and deletes are available to users whose type grants the matching operation, with soft deletion and audit history.
-- OAuth2 Client Secret is write-only in the UI and may be supplied with `TEAM_LOOP_SSO_CLIENT_SECRET`; public settings expose only readiness, auto-login state and button text. Employee ID is the user-management link, while external subject is the stable provider identity.
+- OAuth2 Client Secret is write-only in the UI and may be supplied with `TEAM_LOOP_SSO_CLIENT_SECRET`; public settings expose only readiness, auto-login state and button text. Employee ID is the user-management link, external subject is the stable provider identity, and the deepest matching SSO group selects the organization route.
 - Gray uses a production snapshot and never writes its test data back to production.
 
 ## High-risk areas

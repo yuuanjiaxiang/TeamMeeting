@@ -28,6 +28,10 @@ const state = {
   morningReadOnly: false,
   morningCarriedCount: 0,
   userTypes: [],
+  orgUnits: [],
+  userFilters: { query: "", org: "", type: "", auth: "" },
+  selectedUserIds: new Set(),
+  organization: { selected: null, accessible: [] },
   moduleCatalog: [],
   permissionPreview: null,
   sessions: [],
@@ -154,6 +158,44 @@ function safeSessionRemove(key) {
   } catch {
     // Ignore storage failures.
   }
+}
+
+function organizationPathFromLocation() {
+  const match = window.location.pathname.match(/^\/org\/(.+?)\/?$/i);
+  return match ? decodeURIComponent(match[1]).replace(/^\/+|\/+$/g, "").toLowerCase() : "";
+}
+
+function selectedOrganizationPath() {
+  return state.organization?.selected?.path || organizationPathFromLocation();
+}
+
+function applyOrganizationData(data, updateRoute = true) {
+  state.organization = data || { selected: null, accessible: [] };
+  const selected = state.organization.selected;
+  if (updateRoute && selected?.route && window.location.pathname !== `${selected.route}/` && window.location.pathname !== selected.route) {
+    window.history.replaceState({}, "", `${selected.route}${window.location.search}${window.location.hash}`);
+  }
+  renderOrganizationSwitcher();
+}
+
+function renderOrganizationSwitcher() {
+  const wrapper = $("#orgSwitcher");
+  const select = $("#orgRouteSelect");
+  if (!wrapper || !select) return;
+  const units = state.organization?.accessible || [];
+  const selected = state.organization?.selected;
+  wrapper.classList.toggle("hidden", units.length === 0);
+  const selectedLabel = selected?.label_path || selected?.name || "";
+  const currentPath = $("#orgCurrentPath");
+  if (currentPath) {
+    currentPath.textContent = selectedLabel;
+    currentPath.title = selectedLabel;
+  }
+  select.title = selectedLabel ? `当前：${selectedLabel}` : "切换团队";
+  select.innerHTML = units.map((unit) => {
+    const label = unit.label_path || unit.name;
+    return `<option value="${escapeHtml(unit.path)}" ${unit.path === selected?.path ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
 }
 
 function applyUiTheme() {
@@ -352,9 +394,10 @@ function setDefaultDates() {
 }
 
 async function api(path, options = {}) {
+  const orgPath = selectedOrganizationPath();
   const response = await fetch(path, {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...(orgPath ? { "X-Team-Org-Path": orgPath } : {}), ...(options.headers || {}) },
     ...options,
   });
   const data = await response.json().catch(() => ({}));
@@ -471,7 +514,9 @@ function applyAuthView() {
   $("#appView").classList.toggle("hidden", showLogin);
   const roleText = state.user?.role === "admin" ? "管理员" : (state.user?.user_type_name || "类型用户");
   const modeText = isAdminAccount() ? (isAdminView() ? "管理视图" : "用户视图") : "";
-  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
+  const orgText = state.organization?.selected?.name || state.user?.org_unit_name || "";
+  $("#currentUser").textContent = state.user ? `${state.user.display_name} · ${roleText}${orgText ? ` · ${orgText}` : ""}${modeText ? ` · ${modeText}` : ""}` : "访客 · 只读";
+  renderOrganizationSwitcher();
   $("#logoutBtn")?.classList.toggle("hidden", guest);
   $("#passwordBtn")?.classList.toggle("hidden", guest);
   $("#loginEntryBtn")?.classList.toggle("hidden", !guest || showLogin);
@@ -542,6 +587,7 @@ async function syncAuthState(force = false) {
       state.user = data.user;
       state.permissions = data.permissions || {};
       state.publicSettings = data.settings || state.publicSettings;
+      applyOrganizationData(data.organization || state.organization);
       applyAuthView();
       if (changedUser) await refreshAll();
     }
@@ -576,6 +622,7 @@ function switchPage(id) {
 
 async function loadReferenceData() {
   const tasks = [];
+  tasks.push(api("/api/org-context").then((data) => applyOrganizationData(data)));
   if (canLoadModule("members")) {
     tasks.push(api("/api/members").then((data) => { state.members = data.members; }));
   } else {
@@ -603,12 +650,14 @@ async function loadReferenceData() {
   }
   if (isAdminView()) {
     tasks.push(api("/api/users").then((data) => { state.users = data.users; }));
+    tasks.push(api("/api/org-units").then((data) => { state.orgUnits = data.units || []; renderOrgUnits(); }));
     tasks.push(api("/api/user-types").then((data) => {
       state.userTypes = data.types;
       state.moduleCatalog = data.modules;
     }));
   } else {
     state.users = [];
+    state.orgUnits = state.organization?.accessible || [];
   }
   if (!isGuest()) {
     tasks.push(loadReminders());
@@ -637,20 +686,23 @@ function populateSelects() {
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
   const thankUsers = (state.thankUsers.length ? state.thankUsers : eligibleUsers("thanks")).filter((user) => user.id !== state.user?.id);
-  const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const thankUserLabel = (user) => user.org_unit_name ? `${user.display_name} · ${user.org_unit_name}` : user.display_name;
+  const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(thankUserLabel(user))}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
   const linkCategoryOptions = state.linkCategories.map((category) => `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`).join("");
   const accountTypes = state.userTypes.filter((type) => !type.is_guest && type.key !== "guest");
   const userTypeOptions = accountTypes.map((type) => `<option value="${escapeHtml(type.key)}">${escapeHtml(type.name)}</option>`).join("");
+  const orgOptions = (state.orgUnits.length ? state.orgUnits : (state.organization?.accessible || []))
+    .map((unit) => `<option value="${unit.id}">${"　".repeat(Number(unit.depth || 0))}${escapeHtml(unit.name)}</option>`).join("");
   const userTypeCopyOptions = `<option value="">不复制权限</option>${accountTypes.map((type) => `<option value="${escapeHtml(type.key)}">复制 ${escapeHtml(type.name)} 权限</option>`).join("")}`;
 
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
   $$("[data-morning-users]").forEach((select) => { select.innerHTML = morningOptions; });
   $$("[data-rule-users]").forEach((select) => { select.innerHTML = ruleOptionsUsers; });
   $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
+  $$("[data-org-units]").forEach((select) => { select.innerHTML = orgOptions; });
   $$("[data-user-type-copy]").forEach((select) => { select.innerHTML = userTypeCopyOptions; });
-  const bulkType = $("#userBulkType");
-  if (bulkType) bulkType.innerHTML = `<option value="">选择目标类型</option>${userTypeOptions}`;
+  updateUserBulkActionOptions();
   $$("[data-users-optional]").forEach((select) => { select.innerHTML = userOptional; });
   $$("[data-rules]").forEach((select) => { select.innerHTML = ruleOptions; });
   $$("[data-machines]").forEach((select) => { select.innerHTML = machineOptions; });
@@ -660,7 +712,7 @@ function populateSelects() {
     const selected = form ? new Set(new FormData(form).getAll("receiver_ids").map(String)) : new Set();
     const selectedNames = thankUsers
       .filter((user) => selected.has(String(user.id)))
-      .map((user) => user.display_name);
+      .map((user) => thankUserLabel(user));
     box.innerHTML = `
       <summary class="thank-recipient-summary">
         <span data-thank-selected-label>${escapeHtml(selectedNames.length ? selectedNames.join("、") : "选择感谢对象（可多选）")}</span>
@@ -671,7 +723,7 @@ function populateSelects() {
           ? thankUsers.map((user) => `
             <label class="check-chip">
               <input type="checkbox" name="receiver_ids" value="${user.id}" data-name="${escapeHtml(user.display_name)}" ${selected.has(String(user.id)) ? "checked" : ""}>
-              <span>${escapeHtml(user.display_name)}</span>
+              <span>${escapeHtml(thankUserLabel(user))}</span>
             </label>`).join("")
           : '<p class="empty-note">暂无可感谢成员</p>'}
       </div>`;
@@ -1516,18 +1568,22 @@ async function loadMorning() {
 
 async function loadUsers() {
   if (!isAdminView()) return;
-  const [data, typeData] = await Promise.all([
+  const [data, typeData, orgData] = await Promise.all([
     api("/api/users"),
     api("/api/user-types"),
+    api("/api/org-units"),
   ]);
   state.users = data.users;
   const currentAccount = state.users.find((item) => Number(item.id) === Number(state.user?.id));
   if (state.user && currentAccount) state.user = { ...state.user, ...currentAccount };
   state.userTypes = typeData.types;
   state.moduleCatalog = typeData.modules;
-  $("#userList").innerHTML = renderUserTable(data.users);
-  clearUserBulkSelection();
+  state.orgUnits = orgData.units || [];
+  state.selectedUserIds.clear();
+  populateUserManagementFilters();
+  renderUserManagement();
   renderUserTypePermissions();
+  renderOrgUnits();
   populateSelects();
 }
 
@@ -1536,13 +1592,114 @@ function renderUserTypeOptions(selected) {
   return options.map((type) => `<option value="${escapeHtml(type.key)}" ${type.key === selected ? "selected" : ""}>${escapeHtml(type.name)}</option>`).join("");
 }
 
+function renderOrgOptions(selected, excludeId = null, includeRoot = false) {
+  const rootOption = includeRoot ? '<option value="">无上级（根团队）</option>' : "";
+  return `${rootOption}${state.orgUnits
+    .filter((unit) => Number(unit.id) !== Number(excludeId))
+    .map((unit) => `<option value="${unit.id}" ${Number(unit.id) === Number(selected) ? "selected" : ""}>${"　".repeat(Number(unit.depth || 0))}${escapeHtml(unit.name)}</option>`)
+    .join("")}`;
+}
+
+function renderOrgUnits() {
+  const target = $("#orgUnitList");
+  if (!target) return;
+  const visibilityLabels = { all: "全部组织", subtree: "当前及下级", unit: "仅当前团队" };
+  target.innerHTML = state.orgUnits.length ? state.orgUnits.map((unit) => `
+    <article class="org-unit-row" style="--org-depth:${Number(unit.depth || 0)}">
+      <div class="org-unit-main">
+        <span class="org-tree-mark"></span>
+        <div><strong>${escapeHtml(unit.name)}</strong><small>${escapeHtml(unit.route)}</small></div>
+      </div>
+      <div class="org-unit-meta">
+        <span class="pill">${escapeHtml(visibilityLabels[unit.visibility_mode] || unit.visibility_mode)}</span>
+        <span>${Number(unit.user_count || 0)} 人</span>
+        <span>${unit.sso_groups?.length ? `SSO：${escapeHtml(unit.sso_groups.join("、"))}` : "未映射 SSO 群组"}</span>
+      </div>
+      <div class="org-unit-actions"><button class="secondary org-unit-edit-btn" type="button" data-org-unit-id="${unit.id}">编辑</button><button class="danger org-unit-delete-btn" type="button" data-org-unit-id="${unit.id}" data-org-unit-name="${escapeHtml(unit.name)}">删除</button></div>
+    </article>`).join("") : '<p class="empty-note">暂无团队层级。</p>';
+}
+
+function openOrgUnitModal(orgUnitId = null) {
+  const form = $("#orgUnitForm");
+  const modal = $("#orgUnitModal");
+  if (!form || !modal) return;
+  const unit = state.orgUnits.find((item) => Number(item.id) === Number(orgUnitId));
+  form.reset();
+  form.elements.id.value = unit?.id || "";
+  form.elements.name.value = unit?.name || "";
+  form.elements.slug.value = unit?.slug || "";
+  form.elements.parent_id.innerHTML = renderOrgOptions(unit?.parent_id, unit?.id, true);
+  form.elements.parent_id.value = unit?.parent_id || "";
+  form.elements.visibility_mode.value = unit?.visibility_mode || "unit";
+  form.elements.default_user_type.innerHTML = renderUserTypeOptions(unit?.default_user_type || "default");
+  form.elements.default_user_type.value = unit?.default_user_type || state.userTypes.find((type) => !type.is_guest)?.key || "default";
+  form.elements.sort_order.value = Number(unit?.sort_order || 0);
+  form.elements.sso_groups.value = (unit?.sso_groups || []).join("\n");
+  $("#orgUnitModalTitle").textContent = unit ? `编辑团队：${unit.name}` : "新增团队";
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.name.focus();
+}
+
+function closeOrgUnitModal() {
+  const modal = $("#orgUnitModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function userAuthGroup(user) {
+  if (user.role === "admin") return "admin";
+  return user.auth_source === "oidc" || user.auth_source === "oauth2" ? "sso" : "local";
+}
+
+function filteredManagementUsers() {
+  const filters = state.userFilters;
+  const query = filters.query.trim().toLocaleLowerCase("zh-CN");
+  return state.users.filter((user) => {
+    const searchable = [user.username, user.employee_id, user.display_name].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
+    return (!query || searchable.includes(query))
+      && (!filters.org || String(user.org_unit_id || "") === filters.org)
+      && (!filters.type || user.user_type === filters.type)
+      && (!filters.auth || userAuthGroup(user) === filters.auth);
+  });
+}
+
+function populateUserManagementFilters() {
+  const orgFilter = $("#userOrgFilter");
+  const typeFilter = $("#userTypeFilter");
+  if (state.userFilters.org && !state.orgUnits.some((unit) => String(unit.id) === state.userFilters.org)) state.userFilters.org = "";
+  if (state.userFilters.type && !state.userTypes.some((type) => type.key === state.userFilters.type && !type.is_guest)) state.userFilters.type = "";
+  if (orgFilter) {
+    orgFilter.innerHTML = `<option value="">全部团队</option>${renderOrgOptions(state.userFilters.org)}`;
+    orgFilter.value = state.userFilters.org;
+  }
+  if (typeFilter) {
+    typeFilter.innerHTML = `<option value="">全部类型</option>${renderUserTypeOptions(state.userFilters.type)}`;
+    typeFilter.value = state.userFilters.type;
+  }
+  if ($("#userSearchInput")) $("#userSearchInput").value = state.userFilters.query;
+  if ($("#userAuthFilter")) $("#userAuthFilter").value = state.userFilters.auth;
+}
+
+function renderUserManagement() {
+  const users = filteredManagementUsers();
+  const result = $("#userFilterResult");
+  if (result) result.textContent = users.length === state.users.length ? `共 ${users.length} 个账号` : `找到 ${users.length} / ${state.users.length} 个账号`;
+  if ($("#userList")) $("#userList").innerHTML = renderUserTable(users);
+  updateUserBulkToolbar();
+}
+
 function renderUserTable(users) {
-  if (!users.length) return "<p>暂无数据</p>";
-  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号 / 工号</th><th>姓名</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
+  if (!users.length) return '<div class="user-filter-empty"><strong>没有匹配的账号</strong><span>调整搜索词或筛选条件后再试。</span></div>';
+  return `<div class="user-table-wrap"><table class="user-management-table"><thead><tr><th class="user-select-col"><input id="userBulkSelectAll" type="checkbox" aria-label="全选账号"></th><th>账号 / 工号</th><th>姓名</th><th>所属团队</th><th>用户类型</th><th>授权方式</th><th>业务参与</th><th>操作</th></tr></thead><tbody>${users.map((user) => `
     <tr>
-      <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}"></td>
+      <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}" ${Number(user.id) === Number(state.user?.id) ? "disabled title=\"当前登录账号不能批量操作\"" : state.selectedUserIds.has(Number(user.id)) ? "checked" : ""}></td>
       <td><strong>${escapeHtml(user.username)}</strong><small>工号 ${escapeHtml(user.employee_id || user.username)}</small></td>
       <td>${escapeHtml(user.display_name)}</td>
+      <td><span class="pill org-pill">${escapeHtml(user.org_unit_name || "未分配")}</span></td>
       <td><span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span></td>
       <td>${user.role === "admin" ? '<span class="pill admin">系统管理员</span>' : user.auth_source === "oidc" || user.auth_source === "oauth2" ? '<span class="pill status-done">企业 SSO</span>' : "系统账号"}</td>
       <td><div class="user-scope-mini">${[
@@ -1556,24 +1713,45 @@ function renderUserTable(users) {
 }
 
 function selectedBulkUserIds() {
-  return $$(".user-bulk-checkbox:checked").map((input) => Number(input.value)).filter(Boolean);
+  return [...state.selectedUserIds].filter((userId) => state.users.some((user) => Number(user.id) === Number(userId)));
 }
 
 function updateUserBulkToolbar() {
   const selected = selectedBulkUserIds();
   $("#userBulkToolbar")?.classList.toggle("hidden", selected.length === 0);
   if ($("#userBulkCount")) $("#userBulkCount").textContent = String(selected.length);
-  const checkboxes = $$(".user-bulk-checkbox");
+  const checkboxes = $$(".user-bulk-checkbox:not(:disabled)");
   const selectAll = $("#userBulkSelectAll");
   if (selectAll) {
-    selectAll.checked = checkboxes.length > 0 && selected.length === checkboxes.length;
-    selectAll.indeterminate = selected.length > 0 && selected.length < checkboxes.length;
+    const visibleSelected = checkboxes.filter((input) => state.selectedUserIds.has(Number(input.value))).length;
+    selectAll.checked = checkboxes.length > 0 && visibleSelected === checkboxes.length;
+    selectAll.indeterminate = visibleSelected > 0 && visibleSelected < checkboxes.length;
   }
 }
 
 function clearUserBulkSelection() {
-  $$(".user-bulk-checkbox, #userBulkSelectAll").forEach((input) => { input.checked = false; input.indeterminate = false; });
-  updateUserBulkToolbar();
+  state.selectedUserIds.clear();
+  renderUserManagement();
+}
+
+function updateUserBulkActionOptions() {
+  const action = $("#userBulkAction")?.value || "";
+  const target = $("#userBulkTarget");
+  const execute = $("#userBulkExecuteBtn");
+  if (!target || !execute) return;
+  target.classList.toggle("hidden", !["type", "org"].includes(action));
+  execute.classList.toggle("danger", action === "delete");
+  execute.textContent = action === "delete" ? "删除所选" : "应用";
+  if (action === "type") {
+    target.innerHTML = `<option value="">选择目标类型</option>${renderUserTypeOptions("")}`;
+    target.setAttribute("aria-label", "选择目标用户类型");
+  } else if (action === "org") {
+    target.innerHTML = `<option value="">选择目标团队</option>${renderOrgOptions("")}`;
+    target.setAttribute("aria-label", "选择目标团队");
+  } else {
+    target.innerHTML = "";
+  }
+  execute.disabled = !action || (["type", "org"].includes(action) && !target.value);
 }
 
 function openUserAccountModal(userId) {
@@ -1584,6 +1762,8 @@ function openUserAccountModal(userId) {
   form.elements.username.value = user.username || "";
   form.elements.employee_id.value = user.employee_id || user.username || "";
   form.elements.display_name.value = user.display_name || "";
+  form.elements.org_unit_id.innerHTML = renderOrgOptions(user.org_unit_id);
+  form.elements.org_unit_id.value = user.org_unit_id || "";
   form.elements.user_type.innerHTML = renderUserTypeOptions(user.user_type);
   form.elements.user_type.value = user.user_type;
   form.elements.role.value = user.role || "user";
@@ -1877,7 +2057,7 @@ function renderSettingField(setting) {
 function renderSettings() {
   const form = $("#settingsForm");
   if (!form) return;
-  const ssoOrder = ["sso_enabled", "sso_auto_login", "sso_mode", "sso_issuer_url", "sso_authorization_url", "sso_token_url", "sso_userinfo_url", "sso_client_id", "sso_client_secret", "sso_redirect_uri", "sso_scopes", "sso_username_claim", "sso_display_name_claim", "sso_default_user_type", "sso_auto_provision", "sso_button_label"];
+  const ssoOrder = ["sso_enabled", "sso_auto_login", "sso_mode", "sso_issuer_url", "sso_authorization_url", "sso_token_url", "sso_userinfo_url", "sso_client_id", "sso_client_secret", "sso_redirect_uri", "sso_scopes", "sso_username_claim", "sso_display_name_claim", "sso_group_claim", "sso_default_user_type", "sso_auto_provision", "sso_button_label"];
   const ssoSettings = state.settings.filter((setting) => setting.key.startsWith("sso_"))
     .sort((left, right) => ssoOrder.indexOf(left.key) - ssoOrder.indexOf(right.key));
   const generalSettings = state.settings.filter((setting) => !setting.key.startsWith("sso_"));
@@ -2376,7 +2556,8 @@ function renderMeetingItem(item, meeting) {
     item.due_date ? `截止：${item.due_date}` : "",
   ].filter(Boolean).join(" · ");
   const thankYouTopic = isThankYouTopic(item);
-  const locked = meetingIsLocked(meeting);
+  const inherited = Boolean(meeting.inherited);
+  const locked = meetingIsLocked(meeting) || inherited;
   const prepared = Boolean(item.materials);
   return `<article class="topic-item meeting-agenda-item ${locked ? "is-locked" : ""}" style="--agenda-color:${escapeHtml(item.type_color || "#64748b")}" data-meeting-item-id="${item.id}" draggable="${!locked && canOperate("meetings", "edit") ? "true" : "false"}">
     <div class="agenda-item-head">
@@ -2397,7 +2578,7 @@ function renderMeetingItem(item, meeting) {
       <div class="topic-auto-summary">
         Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
       </div>` : renderMeetingMinuteSummary(item)}
-    ${locked ? `<div class="agenda-locked-note">会议已结束，内容只读</div>` : (canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
+    ${locked ? `<div class="agenda-locked-note">${inherited ? `上级团队 ${escapeHtml(meeting.org_unit_name || "")} 安排，当前团队只读` : "会议已结束，内容只读"}</div>` : (canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
       <div class="topic-item-actions agenda-actions">
         ${!thankYouTopic && canOperate("meetings", "edit") ? `
           <button class="meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="decision">记结论</button>
@@ -2633,9 +2814,10 @@ function openMeetingAttendanceModal(meetingId) {
   const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
   const modal = $("#meetingAttendanceModal");
   if (!meeting || !modal) return;
-  $("#meetingAttendanceSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}${isAdminView() ? " · 点击即保存" : " · 只读"}`;
+  const editable = isAdminView() && !meeting.inherited;
+  $("#meetingAttendanceSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}${editable ? " · 点击即保存" : " · 只读"}`;
   $("#meetingAttendanceSummary").innerHTML = renderMeetingAttendanceSummary(meeting);
-  $("#meetingAttendanceList").innerHTML = isAdminView() ? renderAttendance(meeting) : renderAttendanceReadonly(meeting);
+  $("#meetingAttendanceList").innerHTML = editable ? renderAttendance(meeting) : renderAttendanceReadonly(meeting);
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
@@ -3254,7 +3436,7 @@ function renderMeetingList(meetings) {
   list.innerHTML = visibleMeetings.length ? visibleMeetings.map((meeting) => `
     <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
       <span class="meeting-list-meta"><span>${escapeHtml(meetingScheduleLabel(meeting, true))}</span><em class="meeting-status-dot ${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][2]}">${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][0]}</em></span>
-      <strong>${escapeHtml(meeting.title)}</strong>
+      <strong>${escapeHtml(meeting.title)}${meeting.inherited ? `<em class="meeting-source-badge">上级 · ${escapeHtml(meeting.org_unit_name || "")}</em>` : ""}</strong>
       <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
     </button>`).join("") : `<p>${range.label}暂无后续会议。</p>`;
 }
@@ -3282,7 +3464,7 @@ function renderMeetingFlow(meeting) {
   const currentIndex = entries.findIndex(([status]) => status === current);
   return `<div class="meeting-flow" aria-label="会议阶段">
     ${entries.map(([status, meta], index) => `
-      <button type="button" class="meeting-flow-step ${index < currentIndex ? "is-past" : ""} ${status === current ? "is-current" : ""}" data-meeting-status="${status}" data-meeting-id="${meeting.id}" ${!isAdminView() ? "disabled" : ""}>
+      <button type="button" class="meeting-flow-step ${index < currentIndex ? "is-past" : ""} ${status === current ? "is-current" : ""}" data-meeting-status="${status}" data-meeting-id="${meeting.id}" ${!isAdminView() || meeting.inherited ? "disabled" : ""}>
         <span>${index + 1}</span>
         <strong>${meta[0]}</strong>
         <small>${meta[1]}</small>
@@ -3327,11 +3509,12 @@ function renderMeetingDetail(meeting) {
     return;
   }
   const status = meetingStatusMeta[normalizedMeetingStatus(meeting.status)];
-  const locked = meetingIsLocked(meeting);
+  const inherited = Boolean(meeting.inherited);
+  const locked = meetingIsLocked(meeting) || inherited;
   detail.innerHTML = `
     <div class="meeting-detail-head">
       <div>
-        <div class="meeting-title-line"><h2>${escapeHtml(meeting.title)}</h2><span class="meeting-status-badge ${status[2]}">${status[0]}</span></div>
+        <div class="meeting-title-line"><h2>${escapeHtml(meeting.title)}</h2><span class="meeting-status-badge ${status[2]}">${status[0]}</span>${inherited ? `<span class="meeting-source-badge">上级安排 · ${escapeHtml(meeting.org_unit_name || "")}</span>` : ""}</div>
         <p>${escapeHtml(meetingScheduleLabel(meeting))} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
       </div>
       <div class="meeting-meta-actions">
@@ -3360,10 +3543,10 @@ function renderMeetingDetail(meeting) {
     <div class="meeting-detail-grid meeting-detail-actions ${locked ? "is-locked" : ""}">
       <section class="detail-card">
         <h3>成员自定义议题</h3>
-        ${locked ? `<p class="agenda-locked-note">会议已结束，不能继续添加议题。</p>` : renderCustomTopicForm(meeting)}
+        ${locked ? `<p class="agenda-locked-note">${inherited ? "上级团队会议在当前团队中只读。" : "会议已结束，不能继续添加议题。"}</p>` : renderCustomTopicForm(meeting)}
       </section>
       <section class="detail-card attendance-summary-card">
-        <div class="section-headline"><div><h3>参会签到</h3><p>详情收进弹窗，主页面只看签到概况。</p></div><button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${isAdminView() ? "打开签到" : "查看签到"}</button></div>
+        <div class="section-headline"><div><h3>参会签到</h3><p>详情收进弹窗，主页面只看签到概况。</p></div><button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${isAdminView() && !inherited ? "打开签到" : "查看签到"}</button></div>
         ${renderMeetingAttendanceSummary(meeting)}
       </section>
     </div>
@@ -3809,7 +3992,7 @@ async function loadThanks() {
   $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
     <div class="item thank-item">
       <div class="thank-item-head">
-        <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}</h3>
+        <h3>${escapeHtml(vote.voter_name)} → ${escapeHtml(vote.receiver_name)}${vote.cross_team ? `<span class="thank-cross-team-badge">跨团队 · ${escapeHtml(vote.voter_org_name || "")} → ${escapeHtml(vote.receiver_org_name || "")}</span>` : ""}</h3>
         ${canManageThankVote(vote) && (canOperate("thanks", "edit") || canOperate("thanks", "delete")) ? `
           <div class="thank-item-actions">
             ${canOperate("thanks", "edit") ? `<button class="secondary thank-edit-btn" type="button" data-vote-id="${vote.id}" data-evidence="${escapeHtml(vote.evidence || "")}">编辑</button>` : ""}
@@ -4175,6 +4358,7 @@ function renderForumTopics() {
       <div class="forum-topic-main">
         <div class="forum-topic-title-line">
           ${post.pinned ? '<span class="forum-status-badge pinned">置顶</span>' : ""}
+          ${post.inherited ? `<span class="forum-status-badge inherited">上级 · ${escapeHtml(post.org_unit_name || "")}</span>` : ""}
           ${post.status === "resolved" ? '<span class="forum-status-badge resolved">已解决</span>' : `<span class="forum-status-badge ${category.tone}">${category.label}</span>`}
           <h3>${escapeHtml(post.title || post.content)}</h3>
         </div>
@@ -4234,8 +4418,8 @@ function renderForumDetail(post) {
   const categoryBadge = $("#forumDetailCategory");
   categoryBadge.className = `forum-status-badge ${post.status === "resolved" ? "resolved" : category.tone}`;
   categoryBadge.textContent = post.status === "resolved" ? "已解决" : category.label;
-  const canEditPost = canOperate("members", "edit") && (post.mine || isAdminView());
-  const canDeletePost = canOperate("members", "delete") && (post.mine || isAdminView());
+  const canEditPost = !post.inherited && canOperate("members", "edit") && (post.mine || isAdminView());
+  const canDeletePost = !post.inherited && canOperate("members", "delete") && (post.mine || isAdminView());
   body.innerHTML = `
     <article class="forum-original-post">
       <div class="forum-original-meta"><span class="forum-author-avatar">${escapeHtml(String(post.display_name || "?").slice(0, 1))}</span><strong>${escapeHtml(post.display_name || "")}</strong><time>${escapeHtml(shortDateTime(post.created_at || ""))}</time><span>${Number(post.view_count || 0)} 次浏览</span></div>
@@ -4244,7 +4428,7 @@ function renderForumDetail(post) {
         ${renderReactionControls("post", post.id, post.reactions || [])}
         ${canEditPost ? `<button type="button" class="secondary forum-edit-post" data-post-id="${post.id}">编辑主题</button>` : ""}
         ${canEditPost ? `<button type="button" class="secondary forum-status-toggle" data-post-id="${post.id}" data-next-status="${post.status === "resolved" ? "open" : "resolved"}">${post.status === "resolved" ? "重新讨论" : "标记已解决"}</button>` : ""}
-        ${isAdminView() ? `<button type="button" class="secondary forum-pin-toggle" data-post-id="${post.id}" data-next-pinned="${post.pinned ? "0" : "1"}">${post.pinned ? "取消置顶" : "置顶主题"}</button>` : ""}
+        ${isAdminView() && !post.inherited ? `<button type="button" class="secondary forum-pin-toggle" data-post-id="${post.id}" data-next-pinned="${post.pinned ? "0" : "1"}">${post.pinned ? "取消置顶" : "置顶主题"}</button>` : ""}
         ${canDeletePost ? `<button type="button" class="danger forum-delete-post" data-post-id="${post.id}" data-post-title="${escapeHtml(post.title || "该讨论")}">删除主题</button>` : ""}
       </div>
     </article>
@@ -4549,7 +4733,7 @@ function renderMemberCard(member, memberIndex = 0, memberCount = 1) {
           ${renderAvatar(member)}
           <div>
             <h3>${escapeHtml(member.name)}${account ? `<span class="member-account">账号 ${escapeHtml(account)}</span>` : ""}</h3>
-            <p>${escapeHtml(member.title || "")}</p>
+            ${member.title ? `<p class="member-title">${escapeHtml(member.title)}</p>` : ""}
           </div>
         </div>
         ${tags.length ? `<div class="tags">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
@@ -4654,12 +4838,16 @@ function bindEvents() {
   window.addEventListener("pageshow", (event) => {
     if (state.user && event.persisted) syncAuthState(true).catch(() => {});
   });
+  window.addEventListener("popstate", () => {
+    refreshAll().catch((error) => toast(error.message));
+  });
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const data = await api("/api/login", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
       state.user = data.user;
       state.permissions = data.permissions;
+      applyOrganizationData(data.organization || state.organization);
       state.permissionPreview = null;
       state.showLogin = false;
       safeSessionRemove("teamLoopSsoAttempted");
@@ -4703,6 +4891,33 @@ function bindEvents() {
     applyAuthView();
     switchPage(firstAccessiblePage());
     await refreshAll();
+  });
+  $("#orgRouteSelect")?.addEventListener("change", async (event) => {
+    const path = event.target.value;
+    const unit = state.organization?.accessible?.find((item) => item.path === path);
+    if (!unit) return;
+    window.history.pushState({}, "", unit.route);
+    state.organization.selected = unit;
+    renderOrganizationSwitcher();
+    state.thankUsers = [];
+    await refreshAll();
+  });
+  $("#orgUnitForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = fullFormData(form);
+    const id = data.id;
+    delete data.id;
+    data.sso_groups = String(data.sso_groups || "").split(/[,;\n]/).map((item) => item.trim()).filter(Boolean);
+    if (!data.parent_id) data.parent_id = null;
+    try {
+      await api(id ? `/api/org-units/${id}` : "/api/org-units", { method: id ? "PATCH" : "POST", body: JSON.stringify(data) });
+      closeOrgUnitModal();
+      await loadUsers();
+      toast(id ? "团队层级已更新" : "团队层级已创建");
+    } catch (error) {
+      toast(error.message);
+    }
   });
 
   $("#nav").addEventListener("click", (event) => {
@@ -5037,6 +5252,28 @@ function bindEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
+    if (event.target.closest("#orgUnitCreateBtn")) {
+      openOrgUnitModal();
+      return;
+    }
+    const orgEdit = event.target.closest(".org-unit-edit-btn");
+    if (orgEdit) {
+      openOrgUnitModal(orgEdit.dataset.orgUnitId);
+      return;
+    }
+    const orgDelete = event.target.closest(".org-unit-delete-btn");
+    if (orgDelete) {
+      if (!window.confirm(`确定删除团队“${orgDelete.dataset.orgUnitName}”吗？仅无下级且无成员时可以删除。`)) return;
+      api(`/api/org-units/${orgDelete.dataset.orgUnitId}`, { method: "DELETE" })
+        .then(() => loadUsers())
+        .then(() => toast("团队层级已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    if (event.target.closest("[data-org-unit-modal-close]") || event.target === $("#orgUnitModal")) {
+      closeOrgUnitModal();
+      return;
+    }
     if (event.target.closest("#forumCreateButton, [data-forum-create-open]")) {
       openForumCreateModal();
       return;
@@ -5138,20 +5375,47 @@ function bindEvents() {
       clearUserBulkSelection();
       return;
     }
-    if (event.target.closest("#userBulkApplyBtn")) {
+    if (event.target.closest("#userBulkExecuteBtn")) {
       const userIds = selectedBulkUserIds();
-      const userType = $("#userBulkType")?.value || "";
       if (!userIds.length) return toast("请先选择账号");
-      if (!userType) return toast("请选择目标用户类型");
-      const targetName = state.userTypes.find((type) => type.key === userType)?.name || "目标类型";
-      if (!window.confirm(`确定将 ${userIds.length} 个账号批量调整为“${targetName}”吗？`)) return;
-      api("/api/users/bulk-type", { method: "PATCH", body: JSON.stringify({ user_ids: userIds, user_type: userType }) })
+      const action = $("#userBulkAction")?.value || "";
+      const targetValue = $("#userBulkTarget")?.value || "";
+      let request;
+      let confirmMessage;
+      let successMessage;
+      if (action === "type") {
+        if (!targetValue) return toast("请选择目标用户类型");
+        const targetName = state.userTypes.find((type) => type.key === targetValue)?.name || "目标类型";
+        confirmMessage = `确定将 ${userIds.length} 个账号批量调整为“${targetName}”吗？`;
+        successMessage = `已批量调整 ${userIds.length} 个账号的用户类型`;
+        request = () => api("/api/users/bulk-type", { method: "PATCH", body: JSON.stringify({ user_ids: userIds, user_type: targetValue }) });
+      } else if (action === "org") {
+        const orgUnitId = Number(targetValue || 0);
+        if (!orgUnitId) return toast("请选择目标团队");
+        const target = state.orgUnits.find((unit) => Number(unit.id) === orgUnitId);
+        confirmMessage = `确定将 ${userIds.length} 个账号批量调整到“${target?.name || "目标团队"}”吗？`;
+        successMessage = `已批量调整 ${userIds.length} 个账号的所属团队`;
+        request = () => api("/api/users/bulk-org", { method: "PATCH", body: JSON.stringify({ user_ids: userIds, org_unit_id: orgUnitId }) });
+      } else if (action === "delete") {
+        const names = userIds.map((id) => state.users.find((user) => Number(user.id) === id)?.display_name).filter(Boolean);
+        const preview = names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 人` : "");
+        confirmMessage = `确定删除 ${preview || `${userIds.length} 个账号`}吗？账号将无法登录，历史记录保留，并可由管理员从回收站恢复。`;
+        successMessage = `已删除 ${userIds.length} 个账号`;
+        request = () => api("/api/users/bulk-delete", { method: "DELETE", body: JSON.stringify({ user_ids: userIds }) });
+      } else {
+        return toast("请选择批量操作");
+      }
+      if (!window.confirm(confirmMessage)) return;
+      const button = $("#userBulkExecuteBtn");
+      if (button) button.disabled = true;
+      request()
         .then(() => {
           state.thankUsers = [];
           return loadUsers();
         })
-        .then(() => toast(`已批量调整 ${userIds.length} 个账号`))
-        .catch((error) => toast(error.message));
+        .then(() => toast(successMessage))
+        .catch((error) => toast(error.message))
+        .finally(() => { if (button) button.disabled = false; });
       return;
     }
     const permissionPreview = event.target.closest(".permission-preview-btn");
@@ -5701,12 +5965,39 @@ function bindEvents() {
       return;
     }
     if (event.target.matches("#userBulkSelectAll")) {
-      $$(".user-bulk-checkbox").forEach((input) => { input.checked = event.target.checked; });
+      $$(".user-bulk-checkbox:not(:disabled)").forEach((input) => {
+        const userId = Number(input.value);
+        input.checked = event.target.checked;
+        if (event.target.checked) state.selectedUserIds.add(userId);
+        else state.selectedUserIds.delete(userId);
+      });
       updateUserBulkToolbar();
       return;
     }
     if (event.target.matches(".user-bulk-checkbox")) {
+      const userId = Number(event.target.value);
+      if (event.target.checked) state.selectedUserIds.add(userId);
+      else state.selectedUserIds.delete(userId);
       updateUserBulkToolbar();
+      return;
+    }
+    if (event.target.matches("#userOrgFilter, #userTypeFilter, #userAuthFilter")) {
+      state.userFilters = {
+        ...state.userFilters,
+        org: $("#userOrgFilter")?.value || "",
+        type: $("#userTypeFilter")?.value || "",
+        auth: $("#userAuthFilter")?.value || "",
+      };
+      renderUserManagement();
+      return;
+    }
+    if (event.target.matches("#userBulkAction")) {
+      updateUserBulkActionOptions();
+      return;
+    }
+    if (event.target.matches("#userBulkTarget")) {
+      const execute = $("#userBulkExecuteBtn");
+      if (execute) execute.disabled = !event.target.value;
       return;
     }
     if (event.target.matches('#memberEditForm input[name="avatar_file"]')) {
@@ -5734,6 +6025,11 @@ function bindEvents() {
   });
 
   document.body.addEventListener("input", (event) => {
+    if (event.target.matches("#userSearchInput")) {
+      state.userFilters.query = event.target.value || "";
+      renderUserManagement();
+      return;
+    }
     if (!event.target.matches('.attendance-donation input[name="donation_amount"]')) return;
     const form = event.target.closest(".attendance-row");
     const stateEl = form?.querySelector(".attendance-save-state");
@@ -5896,6 +6192,7 @@ async function boot() {
     state.user = data.user;
     state.permissions = data.permissions;
     state.publicSettings = data.settings || {};
+    applyOrganizationData(data.organization);
     applyBranding();
     applyAuthView();
     const callbackState = handleSsoCallbackNotice();

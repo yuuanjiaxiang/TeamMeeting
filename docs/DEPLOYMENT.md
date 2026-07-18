@@ -6,6 +6,7 @@
 - Python 3.10+；
 - 一个普通文件夹写入权限；
 - 局域网访问时允许对应 TCP 端口入站。
+- 公共域名访问时需要可达的公网入口、域名 DNS、Nginx Windows 版和 PEM 格式 TLS 证书。
 
 项目运行不需要 pip、Node.js、数据库服务器或 IIS。
 
@@ -21,7 +22,13 @@
 
 ## 3. 局域网访问
 
-正式服务默认监听 `0.0.0.0:8000`。在服务器电脑执行：
+直接局域网访问时，将正式服务显式监听到 `0.0.0.0:8000`：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action StartProduction -HostAddress 0.0.0.0
+```
+
+然后在服务器电脑执行：
 
 ```powershell
 ipconfig
@@ -40,7 +47,7 @@ http://服务器IPv4:8000/
 3. 在 Windows 防火墙中允许 Python 或 TCP 8000 入站；
 4. 确认没有其他程序占用端口。
 
-不要把本系统直接暴露到公网。公网使用需要额外配置 HTTPS、反向代理、登录防护和安全审计。
+不要把 8000/8001 端口直接暴露到公网。公共访问统一使用本文“公共域名与 Nginx”方案。
 
 ## 4. 环境与端口
 
@@ -109,6 +116,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Sto
 | `TEAM_LOOP_ENV` | `development`、`gray` 或 `production` |
 | `TEAM_LOOP_RELEASE` | 健康接口显示的发布版本 |
 | `TEAM_LOOP_SSO_CLIENT_SECRET` | OAuth2 Client Secret，推荐使用环境变量而非写入数据库 |
+| `TEAM_LOOP_TRUST_PROXY` | 设为 `1` 后，仅信任来自本机代理的 `X-Forwarded-For/Proto`；Nginx 部署必须启用 |
 
 自定义数据盘示例：
 
@@ -133,7 +141,86 @@ python server.py --host 0.0.0.0 --port 8000
 
 生产 SSO 必须通过 HTTPS 域名访问，反向代理需原样转发 Cookie 和 `/api/sso/*`。身份平台和 Team Loop 服务器时间应保持同步。项目优先使用系统安装的 Python 3.10+；若运行时缺少可用的 TLS/OpenSSL，OAuth2 HTTPS 请求将无法工作。
 
-## 10. 运维建议
+## 10. 公共域名与 Nginx
+
+### 10.1 网络和证书前置条件
+
+1. 域名 A/AAAA 记录指向服务器公网地址或网关公网地址；
+2. 如果服务器在路由器后面，将公网 TCP 80/443 映射到服务器，并在 Windows 防火墙放行 80/443；
+3. 不对公网开放 8000/8001；生产与灰度后端只监听 `127.0.0.1`；
+4. 下载并解压完整的 Nginx Windows 包，例如到 `C:\nginx`；
+5. 准备 PEM 格式完整证书链和私钥。可以使用企业证书或 win-acme 申请 Let's Encrypt 证书；证书续期后执行 Nginx Reload。
+
+仅有域名并不能让外网访问；服务器必须具备公网入口或由云负载均衡/网关把 80/443 转发到本机。
+
+### 10.2 启动只监听本机的正式服务
+
+在启动 Team Loop 的同一个 PowerShell 会话中启用可信代理，然后部署正式服务：
+
+```powershell
+$env:TEAM_LOOP_TRUST_PROXY = '1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 `
+  -Action StartProduction `
+  -HostAddress 127.0.0.1
+```
+
+如果使用计划任务或服务账号，应把 `TEAM_LOOP_TRUST_PROXY=1` 配置到该运行账号的环境中，不能只在临时命令行设置。
+
+### 10.3 生成并启动 Nginx 配置
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\nginx_proxy.ps1 `
+  -Action Configure `
+  -Domain meeting.example.com `
+  -NginxRoot C:\nginx `
+  -CertificatePath C:\certs\meeting.example.com-fullchain.pem `
+  -CertificateKeyPath C:\certs\meeting.example.com-key.pem `
+  -UpstreamPort 8000
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\nginx_proxy.ps1 `
+  -Action Start `
+  -NginxRoot C:\nginx
+```
+
+脚本会生成 `C:\nginx\conf\team-loop.conf`，先执行 `nginx -t` 校验，再启动隐藏窗口进程。配置默认执行：
+
+- HTTP 80 自动跳转 HTTPS 443；
+- HTTPS 代理到 `127.0.0.1:8000`；
+- 转发 Host、真实 IP 和原始协议；
+- 增加 HSTS、`nosniff` 和 Referrer-Policy；
+- 上传体积上限 10 MB，代理读取超时 120 秒。
+
+证书续期或修改配置后执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\nginx_proxy.ps1 -Action Reload -NginxRoot C:\nginx
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\nginx_proxy.ps1 -Action Status -NginxRoot C:\nginx
+```
+
+首次申请证书前可以追加 `-HttpOnly` 生成临时 HTTP 配置，但只用于 DNS/ACME 联调，不应用于正式登录。
+
+### 10.4 SSO 与验证
+
+在企业身份平台和 Team Loop 系统管理中，把回调地址同时设为：
+
+```text
+https://meeting.example.com/api/sso/callback
+```
+
+验证以下地址和行为：
+
+```text
+https://meeting.example.com/api/health
+https://meeting.example.com/
+```
+
+- HTTP 会跳转到 HTTPS；
+- `/api/health` 返回 `status: ok`；
+- 本地账号和 SSO 登录返回的 `weekly_session` Cookie 带 `Secure`；
+- 用户会话和审计日志记录客户端真实 IP，而不是统一显示 `127.0.0.1`；
+- SSO 登录后仍停留在公共域名，不跳回 8000 端口。
+
+## 11. 运维建议
 
 - 每日确认自动备份状态，至少每月执行一次恢复校验；
 - 发布前通知用户避免同时写入；

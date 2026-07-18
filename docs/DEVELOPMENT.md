@@ -27,6 +27,8 @@ TeamMeeting/
 │  ├─ smoke_test.py             # 部署后的只读冒烟测试
 │  ├─ sso_smoke_test.py         # OAuth2/OIDC 工号关联集成测试
 │  ├─ forum_smoke_test.py       # 讨论区权限、回复、表情和回收测试
+│  ├─ proxy_smoke_test.py       # 可信代理、真实 IP 和 Secure Cookie 测试
+│  ├─ nginx_proxy.ps1           # Nginx 配置生成与生命周期管理
 │  └─ db_snapshot.py            # SQLite 一致性快照
 ├─ deploy.ps1                   # 灰度、正式、回滚和状态管理
 ├─ start_*.bat / deploy_*.bat   # Windows 双击入口
@@ -120,6 +122,20 @@ if path == "/api/example":
 
 企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户，再按配置自动建号；`external_subject` 保存身份平台稳定主体。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、自动建号、敏感配置隔离和 Cookie 会话。
 
+组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。成员、论坛、早例会、会议、排班、红黑榜与 Thank You 的读取和写入都必须复用组织过滤。管理员虽可切换全部组织，业务页面仍应按所选路由过滤。
+
+组织数据必须先声明归属和传播方式，不能用一个“可见组织集合”同时决定读写：
+
+- `visible_ids`：当前路由直接业务范围，人员型数据和写操作使用；
+- `ancestor_ids/inherited_ids`：只用于明确允许向下透传的上级记录；当前仅会议和 `announcement` 团队公告；
+- `collaboration_ids`：同一根组织内可选的跨团队协作对象；当前用于 Thank You 收件人候选；
+- 上级会议和公告在下级只读，原记录的编辑、删除、置顶、签到和议题修改仍必须通过直接组织访问校验；公告回复和表情可在下级参与；
+- Thank You 动态按“发送方或接收方属于当前范围”过滤，排名仅按接收方归属过滤。无关兄弟团队不能看到跨团队动态。
+
+SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只返回明确匹配且最深的组织。已有账号在没有匹配群组时保留原组织；自动创建的新账号才回落到根组织。登录完成后应跳转到该账号最终组织的 `/org/...` 路由。修改组织范围或 SSO 群组映射后运行 `python scripts\organization_scope_smoke_test.py` 和 `python scripts\sso_smoke_test.py`。
+
+公共域名必须通过本机 Nginx 代理。`TEAM_LOOP_TRUST_PROXY=1` 只允许回环地址代理提供 `X-Forwarded-For` 和 `X-Forwarded-Proto`，不要把开启可信代理的后端监听到公网。HTTPS 代理请求必须签发 `Secure` 会话 Cookie，并用转发后的真实 IP 执行登录限流、会话记录和审计。修改该链路后运行 `python scripts\proxy_smoke_test.py`。
+
 团队讨论区的完整 Emoji 选择器和中文数据都放在 `static/vendor/emoji-picker-element/` 与 `static/vendor/emoji-picker-element-data/`。部署环境不得依赖 CDN；修改选择器后应在断网或仅局域网条件下验证表情分类、搜索、发送和再次点击撤销。
 
 讨论主题采用软删除。主题作者可编辑、删除自己的内容，管理员可置顶、发布公告、标记已解决及从回收站恢复。公告分类和置顶能力必须在服务端校验；列表、详情、回复写入都必须排除已删除主题。修改论坛链路后运行 `python scripts\forum_smoke_test.py`，验证越权拦截、嵌套回复、任意 Emoji、删除隐藏与恢复后回复保留。
@@ -153,6 +169,7 @@ ensure_column(conn, "table_name", "column_name", "TEXT")
 ```powershell
 python server.py --migrate-only
 python -m py_compile server.py
+python scripts\organization_scope_smoke_test.py
 ```
 
 数据库详细说明见 [DATABASE.md](DATABASE.md)。
@@ -174,11 +191,12 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
 node --check static\app.js
 git diff --check
 python scripts\sso_smoke_test.py
 python scripts\forum_smoke_test.py
+python scripts\proxy_smoke_test.py
 ```
 
 功能验证至少覆盖：

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -26,6 +27,7 @@ DB_PATH = Path(os.environ.get("TEAM_LOOP_DB_PATH") or (DATA_DIR / "weekly_team.d
 BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups")).resolve()
 DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
 RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
+TRUST_PROXY = (os.environ.get("TEAM_LOOP_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 DEFAULT_SETTINGS = [
     ("app_brand_name", "系统名称", "Team Loop", "text", "左侧顶部显示的系统名称"),
@@ -59,6 +61,7 @@ DEFAULT_SETTINGS = [
     ("sso_scopes", "OAuth2 Scopes", "openid profile email", "text", "OIDC 通常使用 openid profile email；普通 OAuth2 按企业平台要求填写"),
     ("sso_username_claim", "SSO 工号字段", "preferred_username", "text", "用于关联用户管理工号的 UserInfo 字段，如 employee_id、employeeNumber 或 preferred_username"),
     ("sso_display_name_claim", "SSO 姓名字段", "name", "text", "用于显示姓名的 UserInfo 字段"),
+    ("sso_group_claim", "SSO 群组字段", "groups", "text", "用于匹配团队层级的群组字段，支持 groups、roles 等点分路径"),
     ("sso_default_user_type", "SSO 默认用户类型", "default", "text", "自动创建 SSO 用户时分配的用户类型"),
     ("sso_auto_provision", "自动创建 SSO 用户", "1", "boolean", "关闭后，仅已存在且账号字段匹配的用户可通过 SSO 登录"),
 ]
@@ -112,6 +115,7 @@ INITIAL_TYPE_OPERATIONS = {
 }
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}
 MORNING_PRIORITIES = {"low", "normal", "high"}
+ORG_VISIBILITY_MODES = {"all", "subtree", "unit"}
 
 
 def now_iso():
@@ -350,6 +354,150 @@ def seed_user_types(conn):
                 """,
                 (type_key, module_key, *actions, now_iso()),
             )
+
+
+def normalize_org_slug(value):
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(value or "").strip().lower()).strip("-")
+    if not slug or len(slug) > 48:
+        raise AppError(400, "团队路由只能使用 1-48 位小写字母、数字和短横线")
+    return slug
+
+
+def organization_rows(conn, active_only=True):
+    where = "WHERE o.active=1" if active_only else ""
+    rows = rows_to_list(conn.execute(
+        f"""
+        SELECT o.*, p.name AS parent_name, t.name AS default_user_type_name,
+               (SELECT COUNT(*) FROM users u WHERE u.org_unit_id=o.id AND u.active=1) AS user_count
+        FROM org_units o
+        LEFT JOIN org_units p ON p.id=o.parent_id
+        LEFT JOIN user_types t ON t.key=o.default_user_type
+        {where}
+        ORDER BY o.sort_order, o.name, o.id
+        """
+    ).fetchall())
+    lookup = {row["id"]: row for row in rows}
+    path_cache = {}
+    label_path_cache = {}
+
+    def resolve_path(row_id, seen=None):
+        if row_id in path_cache:
+            return path_cache[row_id]
+        row = lookup.get(row_id)
+        if not row:
+            return ""
+        seen = set(seen or ())
+        if row_id in seen:
+            return row["slug"]
+        seen.add(row_id)
+        parent_path = resolve_path(row.get("parent_id"), seen) if row.get("parent_id") else ""
+        path_cache[row_id] = "/".join(part for part in (parent_path, row["slug"]) if part)
+        return path_cache[row_id]
+
+    def resolve_label_path(row_id, seen=None):
+        if row_id in label_path_cache:
+            return label_path_cache[row_id]
+        row = lookup.get(row_id)
+        if not row:
+            return ""
+        seen = set(seen or ())
+        if row_id in seen:
+            return row["name"]
+        seen.add(row_id)
+        parent_path = resolve_label_path(row.get("parent_id"), seen) if row.get("parent_id") else ""
+        label_path_cache[row_id] = " / ".join(part for part in (parent_path, row["name"]) if part)
+        return label_path_cache[row_id]
+
+    for row in rows:
+        row["path"] = resolve_path(row["id"])
+        row["label_path"] = resolve_label_path(row["id"])
+        row["route"] = f"/org/{row['path']}"
+        row["depth"] = max(0, row["path"].count("/"))
+        try:
+            groups = json.loads(row.get("sso_groups") or "[]")
+        except json.JSONDecodeError:
+            groups = []
+        row["sso_groups"] = [str(group).strip() for group in groups if str(group).strip()]
+
+    children = {}
+    for row in rows:
+        parent_id = row.get("parent_id") if row.get("parent_id") in lookup else None
+        children.setdefault(parent_id, []).append(row)
+    for siblings in children.values():
+        siblings.sort(key=lambda item: (item.get("sort_order") or 0, item.get("name") or "", item["id"]))
+
+    ordered = []
+
+    def append_branch(parent_id):
+        for child in children.get(parent_id, []):
+            ordered.append(child)
+            append_branch(child["id"])
+
+    append_branch(None)
+    if len(ordered) != len(rows):
+        known = {row["id"] for row in ordered}
+        ordered.extend(row for row in rows if row["id"] not in known)
+    return ordered
+
+
+def seed_organization_units(conn):
+    if conn.execute("SELECT COUNT(*) FROM org_units").fetchone()[0]:
+        return
+    created = now_iso()
+    cursor = conn.execute(
+        """
+        INSERT INTO org_units(name, slug, parent_id, visibility_mode, default_user_type, sso_groups, sort_order, active, created_at, updated_at)
+        VALUES('ESS','ess',NULL,'all',?, '[]',10,1,?,?)
+        """,
+        (DEFAULT_USER_TYPE_KEY, created, created),
+    )
+    root_id = cursor.lastrowid
+    second_level = {}
+    for order, name in enumerate(("MO", "ES", "SN"), start=1):
+        cursor = conn.execute(
+            """
+            INSERT INTO org_units(name, slug, parent_id, visibility_mode, default_user_type, sso_groups, sort_order, active, created_at, updated_at)
+            VALUES(?,?,?,'subtree',?, '[]',?,1,?,?)
+            """,
+            (name, name.lower(), root_id, DEFAULT_USER_TYPE_KEY, order * 10, created, created),
+        )
+        second_level[name] = cursor.lastrowid
+    for order, name in enumerate(("WS", "RS", "WH", "RH"), start=1):
+        conn.execute(
+            """
+            INSERT INTO org_units(name, slug, parent_id, visibility_mode, default_user_type, sso_groups, sort_order, active, created_at, updated_at)
+            VALUES(?,?,?,'unit',?, '[]',?,1,?,?)
+            """,
+            (name, name.lower(), second_level["MO"], DEFAULT_USER_TYPE_KEY, order * 10, created, created),
+        )
+    conn.execute("UPDATE users SET org_unit_id=? WHERE org_unit_id IS NULL", (root_id,))
+
+
+def claim_values(claims, path):
+    value = claims
+    for part in str(path or "").split("."):
+        if not part or not isinstance(value, dict):
+            return []
+        value = value.get(part)
+    if isinstance(value, (str, int)):
+        raw_values = re.split(r"[,;]", str(value))
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        return []
+    return [str(item).strip() for item in raw_values if str(item).strip()]
+
+
+def match_sso_org_unit(conn, group_values):
+    normalized = {str(value).strip().casefold() for value in group_values if str(value).strip()}
+    units = organization_rows(conn)
+    matches = [
+        unit for unit in units
+        if normalized.intersection(str(group).casefold() for group in unit.get("sso_groups", []))
+    ]
+    if matches:
+        return sorted(matches, key=lambda unit: (-unit["depth"], unit["sort_order"], unit["id"]))[0]
+    return None
 
 
 def migrate_dynamic_user_types(conn):
@@ -672,6 +820,7 @@ def sso_configuration(conn):
         "scopes": sso_setting(conn, "sso_scopes", "openid profile email") or "openid profile email",
         "username_claim": sso_setting(conn, "sso_username_claim", "preferred_username") or "preferred_username",
         "display_name_claim": sso_setting(conn, "sso_display_name_claim", "name") or "name",
+        "group_claim": sso_setting(conn, "sso_group_claim", "groups") or "groups",
         "default_user_type": sso_setting(conn, "sso_default_user_type", DEFAULT_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY,
         "auto_provision": sso_setting(conn, "sso_auto_provision", "1").lower() in ("1", "true", "yes", "on", "启用"),
     }
@@ -934,6 +1083,20 @@ def init_db():
                 include_in_rules INTEGER NOT NULL DEFAULT 1,
                 include_in_thanks INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS org_units (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                parent_id INTEGER REFERENCES org_units(id),
+                visibility_mode TEXT NOT NULL DEFAULT 'unit' CHECK(visibility_mode IN ('all', 'subtree', 'unit')),
+                default_user_type TEXT REFERENCES user_types(key),
+                sso_groups TEXT NOT NULL DEFAULT '[]',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS module_permissions (
@@ -1277,6 +1440,7 @@ def init_db():
         ensure_column(conn, "users", "auth_source", "TEXT NOT NULL DEFAULT 'local'")
         ensure_column(conn, "users", "external_subject", "TEXT")
         ensure_column(conn, "users", "employee_id", "TEXT")
+        ensure_column(conn, "users", "org_unit_id", "INTEGER")
         ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
@@ -1303,6 +1467,7 @@ def init_db():
         ensure_column(conn, "team_posts", "updated_at", "TEXT")
         ensure_column(conn, "team_posts", "deleted_at", "TEXT")
         ensure_column(conn, "team_posts", "deleted_by", "INTEGER")
+        ensure_column(conn, "team_posts", "org_unit_id", "INTEGER")
         ensure_column(conn, "links", "pinned", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "invalid", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "links", "click_count", "INTEGER NOT NULL DEFAULT 0")
@@ -1331,6 +1496,7 @@ def init_db():
         ensure_column(conn, "meeting_items", "materials", "TEXT")
         ensure_column(conn, "meeting_items", "carried_from_id", "INTEGER")
         ensure_column(conn, "meetings", "start_time", "TEXT")
+        ensure_column(conn, "meetings", "org_unit_id", "INTEGER")
         ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
         ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")
         ensure_column(conn, "meeting_topic_options", "recurrence_weeks", "INTEGER NOT NULL DEFAULT 1")
@@ -1354,9 +1520,13 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity ON users(auth_source, external_subject) WHERE external_subject IS NOT NULL AND external_subject<>''")
         conn.execute("UPDATE users SET employee_id=username WHERE employee_id IS NULL OR trim(employee_id)=''")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee_id ON users(employee_id COLLATE NOCASE) WHERE employee_id IS NOT NULL AND trim(employee_id)<>''")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_org_units_parent_slug ON org_units(COALESCE(parent_id, 0), slug) WHERE active=1")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_org_unit ON users(org_unit_id, active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sso_states_expiry ON sso_login_states(expires_at, used_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_org_date ON meetings(org_unit_id, meeting_date)")
         conn.execute("UPDATE team_posts SET title=substr(content, 1, 40) WHERE title IS NULL OR trim(title)=''")
         conn.execute("UPDATE team_posts SET category=CASE WHEN kind='roast' THEN 'roast' ELSE 'general' END WHERE category IS NULL OR trim(category)=''")
         conn.execute("UPDATE team_posts SET status='open' WHERE status IS NULL OR trim(status)=''")
@@ -1368,6 +1538,11 @@ def init_db():
         conn.execute("UPDATE meetings SET status='completed' WHERE status='closed'")
         conn.execute("UPDATE meeting_items SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE users SET user_type=? WHERE user_type IS NULL OR user_type=''", (DEFAULT_USER_TYPE_KEY,))
+        root_org = conn.execute("SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1").fetchone()
+        if root_org:
+            conn.execute("UPDATE users SET org_unit_id=? WHERE org_unit_id IS NULL", (root_org["id"],))
+            conn.execute("UPDATE team_posts SET org_unit_id=(SELECT org_unit_id FROM users WHERE users.id=team_posts.user_id) WHERE org_unit_id IS NULL")
+            conn.execute("UPDATE meetings SET org_unit_id=(SELECT org_unit_id FROM users WHERE users.id=meetings.created_by) WHERE org_unit_id IS NULL")
         conn.execute("UPDATE members SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
         conn.execute("UPDATE morning_items SET root_id=id WHERE root_id IS NULL")
@@ -1375,6 +1550,7 @@ def init_db():
         seed_link_categories(conn)
         seed_system_settings(conn)
         seed_user_types(conn)
+        seed_organization_units(conn)
         conn.execute(
             """
             UPDATE user_types
@@ -1413,6 +1589,9 @@ def init_db():
                 "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (2, "示例成员", "", "技术成员", "问题跟进、现场支持、经验沉淀", json.dumps(["执行", "现场"], ensure_ascii=False), "一线问题的主要贡献者。", now_iso()),
             )
+        root_org = conn.execute("SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1").fetchone()
+        if root_org:
+            conn.execute("UPDATE users SET org_unit_id=? WHERE org_unit_id IS NULL", (root_org["id"],))
         seed_morning_items(conn)
         seed_morning_history_samples(conn)
         sync_members_with_users(conn)
@@ -1442,7 +1621,27 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args))
 
+    def apply_forwarded_request_context(self):
+        self.forwarded_https = False
+        peer_ip = getattr(self, "_direct_peer_ip", self.client_address[0])
+        self._direct_peer_ip = peer_ip
+        self.client_address = (peer_ip, self.client_address[1])
+        if not TRUST_PROXY or peer_ip not in {"127.0.0.1", "::1"}:
+            return
+        forwarded_proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        self.forwarded_https = forwarded_proto == "https"
+        forwarded_for = (self.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+        try:
+            normalized_ip = str(ipaddress.ip_address(forwarded_for))
+        except ValueError:
+            return
+        self.client_address = (normalized_ip, self.client_address[1])
+
+    def request_is_https(self):
+        return bool(getattr(self, "forwarded_https", False))
+
     def handle_request(self, method):
+        self.apply_forwarded_request_context()
         parsed = urlparse(self.path)
         try:
             if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
@@ -1490,7 +1689,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def serve_static(self, path):
-        if path in ("", "/"):
+        if path in ("", "/") or path.startswith("/org/"):
             file_path = STATIC_DIR / "index.html"
         else:
             safe = Path(path.lstrip("/"))
@@ -1512,6 +1711,156 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
         self.wfile.flush()
+
+    def organization_context(self, conn, user=None):
+        units = organization_rows(conn)
+        if not units:
+            return {
+                "selected": None,
+                "accessible": [],
+                "visible_ids": [],
+                "ancestor_ids": [],
+                "inherited_ids": [],
+                "collaboration_ids": [],
+            }
+        by_id = {unit["id"]: unit for unit in units}
+        by_path = {unit["path"].lower(): unit for unit in units}
+        root = next((unit for unit in units if not unit.get("parent_id")), units[0])
+
+        def descendants(unit_id):
+            result = {unit_id}
+            changed = True
+            while changed:
+                changed = False
+                for unit in units:
+                    if unit.get("parent_id") in result and unit["id"] not in result:
+                        result.add(unit["id"])
+                        changed = True
+            return result
+
+        def ancestors(unit_id):
+            result = []
+            seen = set()
+            current = by_id.get(unit_id)
+            while current and current["id"] not in seen:
+                result.append(current["id"])
+                seen.add(current["id"])
+                current = by_id.get(current.get("parent_id"))
+            return result
+
+        user_unit = by_id.get((user or {}).get("org_unit_id")) or root
+        if user and user.get("role") == "admin":
+            accessible_ids = {unit["id"] for unit in units}
+        elif user_unit["visibility_mode"] == "all":
+            accessible_ids = {unit["id"] for unit in units}
+        elif user_unit["visibility_mode"] == "subtree":
+            accessible_ids = descendants(user_unit["id"])
+        else:
+            accessible_ids = {user_unit["id"]}
+
+        requested = (self.headers.get("X-Team-Org-Path") or "").strip().strip("/").lower()
+        if requested.startswith("org/"):
+            requested = requested[4:]
+        selected = by_path.get(requested) if requested else user_unit
+        if not selected or selected["id"] not in accessible_ids:
+            selected = user_unit
+
+        if selected["visibility_mode"] == "all":
+            visible_ids = {unit["id"] for unit in units}
+        elif selected["visibility_mode"] == "subtree":
+            visible_ids = descendants(selected["id"])
+        else:
+            visible_ids = {selected["id"]}
+        visible_ids &= accessible_ids
+        ancestor_ids = ancestors(selected["id"])
+        collaboration_root_id = ancestor_ids[-1] if ancestor_ids else selected["id"]
+        collaboration_ids = descendants(collaboration_root_id)
+        accessible = [unit for unit in units if unit["id"] in accessible_ids]
+        return {
+            "selected": selected,
+            "accessible": accessible,
+            "visible_ids": sorted(visible_ids),
+            "ancestor_ids": ancestor_ids,
+            "inherited_ids": [unit_id for unit_id in ancestor_ids if unit_id not in visible_ids],
+            "collaboration_ids": sorted(collaboration_ids),
+        }
+
+    def organization_user_filter(self, conn, user_alias="u", user=None):
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        visible_ids = context["visible_ids"]
+        if not visible_ids:
+            return "1=0", []
+        placeholders = ",".join("?" for _ in visible_ids)
+        return f"{user_alias}.org_unit_id IN ({placeholders})", visible_ids
+
+    def organization_entity_filter(self, conn, column, user=None, inherit_ancestors=False):
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        visible_ids = set(context["visible_ids"])
+        if inherit_ancestors:
+            visible_ids.update(context["ancestor_ids"])
+        visible_ids = sorted(visible_ids)
+        if not visible_ids:
+            return "1=0", []
+        placeholders = ",".join("?" for _ in visible_ids)
+        return f"{column} IN ({placeholders})", visible_ids
+
+    def organization_collaboration_user_filter(self, conn, user_alias="u", user=None):
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        collaboration_ids = context["collaboration_ids"]
+        if not collaboration_ids:
+            return "1=0", []
+        placeholders = ",".join("?" for _ in collaboration_ids)
+        return f"{user_alias}.org_unit_id IN ({placeholders})", collaboration_ids
+
+    def require_org_unit_access(self, conn, org_unit_id, user=None):
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        if org_unit_id not in context["visible_ids"]:
+            raise AppError(404, "记录不存在或无权访问")
+        return context
+
+    def require_team_post_read_access(self, conn, post_id, user=None):
+        post = conn.execute(
+            "SELECT id, org_unit_id, category FROM team_posts WHERE id=? AND deleted_at IS NULL",
+            (post_id,),
+        ).fetchone()
+        if not post:
+            raise AppError(404, "讨论主题不存在")
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        direct = post["org_unit_id"] in context["visible_ids"]
+        inherited_announcement = post["category"] == "announcement" and post["org_unit_id"] in context["ancestor_ids"]
+        if not direct and not inherited_announcement:
+            raise AppError(404, "讨论主题不存在或无权访问")
+        return post
+
+    def require_meeting_access(self, conn, meeting_id, user=None):
+        meeting = conn.execute("SELECT id, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+        if not meeting:
+            raise AppError(404, "Meeting not found")
+        self.require_org_unit_access(conn, meeting["org_unit_id"], user)
+        return meeting
+
+    def require_meeting_item_access(self, conn, item_id, user=None):
+        item = conn.execute(
+            """
+            SELECT i.id, i.meeting_id, m.org_unit_id
+            FROM meeting_items i
+            JOIN meetings m ON m.id=i.meeting_id
+            WHERE i.id=?
+            """,
+            (item_id,),
+        ).fetchone()
+        if not item:
+            raise AppError(404, "Agenda item not found")
+        self.require_org_unit_access(conn, item["org_unit_id"], user)
+        return item
+
+    def organization_context_payload(self, user):
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+        return {
+            "selected": context["selected"],
+            "accessible": context["accessible"],
+        }
 
     def send_redirect(self, location, headers=None):
         self.send_response(302)
@@ -1586,6 +1935,7 @@ class Handler(BaseHTTPRequestHandler):
                     """
                     SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
                            t.name AS user_type_name,
+                           u.org_unit_id, o.name AS org_unit_name, o.slug AS org_unit_slug,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
                            COALESCE(t.include_in_rules, 1) AS eligible_rules,
@@ -1593,6 +1943,7 @@ class Handler(BaseHTTPRequestHandler):
                            u.active, u.created_at
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
+                    LEFT JOIN org_units o ON o.id = u.org_unit_id
                     WHERE u.id=? AND u.active=1
                     """,
                     (session["user_id"],),
@@ -1627,7 +1978,7 @@ class Handler(BaseHTTPRequestHandler):
         return method == "GET" and self.module_for_path(path) in MODULE_KEYS
 
     def module_for_path(self, path):
-        if path.startswith("/api/user-types") or path.startswith("/api/users"):
+        if path.startswith("/api/user-types") or path.startswith("/api/users") or path.startswith("/api/org-units"):
             return "users"
         if path.startswith("/api/members") or path.startswith("/api/team-posts"):
             return "members"
@@ -1708,13 +2059,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.logout()
         if path == "/api/me" and method == "GET":
             user = self.current_user(required=False)
-            return {"user": user, "permissions": permissions_for(user), "settings": self.public_settings()}
+            return {"user": user, "permissions": permissions_for(user), "settings": self.public_settings(), "organization": self.organization_context_payload(user)}
+        if path == "/api/org-context" and method == "GET":
+            user = self.current_user(required=False)
+            return self.organization_context_payload(user)
         if path == "/api/sessions" and method == "GET":
             return self.list_sessions(self.current_user())
         if len(path.strip("/").split("/")) == 3 and path.startswith("/api/sessions/") and method == "DELETE":
             return self.revoke_session(int(path.rsplit("/", 1)[1]), self.current_user())
 
         user = self.current_user(required=not self.is_public_read_api(method, path))
+        self.api_user = user
         parts = path.strip("/").split("/")
         action = {"GET": "view", "POST": "create", "PATCH": "edit", "DELETE": "delete"}.get(method, "view")
         self.require_module(user, self.module_for_path(path), action)
@@ -1744,6 +2099,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.list_user_types()
             if method == "POST":
                 return self.create_user_type()
+        if path == "/api/org-units":
+            if method == "GET":
+                return {"units": self.list_org_units()}
+            if method == "POST":
+                return self.create_org_unit()
+        if len(parts) == 3 and parts[:2] == ["api", "org-units"]:
+            if method == "PATCH":
+                return self.update_org_unit(int(parts[2]))
+            if method == "DELETE":
+                return self.delete_org_unit(int(parts[2]))
         if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "permissions" and method == "PATCH":
             return self.update_user_type_permissions(parts[2])
         if len(parts) == 4 and parts[:2] == ["api", "user-types"] and parts[3] == "impact" and method == "POST":
@@ -1758,6 +2123,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.create_user()
         if path == "/api/users/bulk-type" and method == "PATCH":
             return self.bulk_update_user_type(user)
+        if path == "/api/users/bulk-org" and method == "PATCH":
+            return self.bulk_update_user_org(user)
+        if path == "/api/users/bulk-delete" and method == "DELETE":
+            return self.bulk_delete_users(user)
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "PATCH":
             return self.update_user(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "DELETE":
@@ -1765,7 +2134,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/members":
             if method == "GET":
-                return {"members": self.list_members()}
+                return {"members": self.list_members(user)}
             if method == "POST":
                 return self.create_member()
         if path == "/api/members/order" and method == "PATCH":
@@ -1901,7 +2270,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/thank-you":
             if method == "GET":
-                return {"votes": self.list_thank_you(query), "users": self.list_participating_users("thanks")}
+                return {"votes": self.list_thank_you(query, user), "users": self.list_participating_users("thanks", user, collaboration=True)}
             if method == "POST":
                 return self.create_thank_you(user)
         if len(parts) == 3 and parts[:2] == ["api", "thank-you"]:
@@ -1910,7 +2279,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "DELETE":
                 return self.delete_thank_you(int(parts[2]), user)
         if path == "/api/dashboards/thank-you" and method == "GET":
-            return self.thank_you_dashboard(query)
+            return self.thank_you_dashboard(query, user)
 
         if path == "/api/reminders" and method == "GET":
             return self.list_reminders(user)
@@ -1974,6 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
         conn.execute("DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL AND revoked_at<?", ((now - dt.timedelta(days=30)).isoformat(),))
         safe_keys = (
             "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
+            "org_unit_id", "org_unit_name", "org_unit_slug",
             "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
             "active", "created_at", "auth_source",
         )
@@ -2060,6 +2430,7 @@ class Handler(BaseHTTPRequestHandler):
         if not access_token:
             raise AppError(502, "企业身份平台未返回访问令牌")
         claims = fetch_json(discovery["userinfo_endpoint"], headers={"Authorization": f"Bearer {access_token}"})
+        sso_groups = claim_values(claims, config.get("group_claim") or "groups")
         employee_id = claim_value(claims, config["username_claim"])
         if not employee_id:
             for fallback in ("employee_id", "employeeNumber", "employee_no", "job_number", "preferred_username", "upn", "email"):
@@ -2077,14 +2448,24 @@ class Handler(BaseHTTPRequestHandler):
         identity = f"{provider_key}|{subject}"
         auth_source = "oauth2" if config.get("mode") == "manual" else "oidc"
         with connect() as conn:
+            matched_org = match_sso_org_unit(conn, sso_groups)
+            matched_org_id = matched_org["id"] if matched_org else None
+            root_org = next(
+                (unit for unit in organization_rows(conn) if not unit.get("parent_id")),
+                None,
+            )
+            provision_org = matched_org or root_org
+            provision_org_id = provision_org["id"] if provision_org else None
             user = conn.execute(
                 """
                 SELECT u.*, t.name AS user_type_name,
+                       o.name AS org_unit_name, o.slug AS org_unit_slug,
                        COALESCE(t.include_in_members, 1) AS eligible_members,
                        COALESCE(t.include_in_morning, 1) AS eligible_morning,
                        COALESCE(t.include_in_rules, 1) AS eligible_rules,
                        COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                 FROM users u LEFT JOIN user_types t ON t.key=u.user_type
+                LEFT JOIN org_units o ON o.id=u.org_unit_id
                 WHERE u.auth_source IN ('oidc', 'oauth2') AND u.external_subject=?
                 """,
                 (identity,),
@@ -2102,27 +2483,28 @@ class Handler(BaseHTTPRequestHandler):
                     if existing["external_subject"] and existing["external_subject"] != identity:
                         raise AppError(409, "该系统账号已绑定其他企业身份")
                     conn.execute(
-                        "UPDATE users SET auth_source=?, external_subject=?, employee_id=? WHERE id=?",
-                        (auth_source, identity, employee_id, existing["id"]),
+                        "UPDATE users SET auth_source=?, external_subject=?, employee_id=?, org_unit_id=COALESCE(?, org_unit_id) WHERE id=?",
+                        (auth_source, identity, employee_id, matched_org_id, existing["id"]),
                     )
                     linked_existing = True
                     user_id = existing["id"]
                 else:
                     if not config["auto_provision"]:
                         raise AppError(403, "该企业账号尚未在系统中创建，请联系管理员")
+                    preferred_type = (provision_org or {}).get("default_user_type") or config["default_user_type"]
                     user_type = conn.execute(
                         "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
-                        (config["default_user_type"], GUEST_USER_TYPE_KEY),
+                        (preferred_type, GUEST_USER_TYPE_KEY),
                     ).fetchone()
                     if not user_type:
                         raise AppError(400, "SSO 默认用户类型无效，请联系管理员")
                     salt, password_hash = make_hash(secrets.token_urlsafe(48))
                     cursor = conn.execute(
                         """
-                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, active, created_at, auth_source, external_subject)
-                        VALUES(?,?,?,?,?,?,?,1,?,?,?)
+                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, active, created_at, auth_source, external_subject)
+                        VALUES(?,?,?,?,?,?,?,?,1,?,?,?)
                         """,
-                        (username, employee_id, salt, password_hash, display_name, "user", user_type["key"], now_iso(), auth_source, identity),
+                        (username, employee_id, salt, password_hash, display_name, "user", user_type["key"], provision_org_id, now_iso(), auth_source, identity),
                     )
                     user_id = cursor.lastrowid
                     sync_member_for_user(conn, user_id)
@@ -2130,11 +2512,13 @@ class Handler(BaseHTTPRequestHandler):
                 user = conn.execute(
                     """
                     SELECT u.*, t.name AS user_type_name,
+                           o.name AS org_unit_name, o.slug AS org_unit_slug,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
                            COALESCE(t.include_in_rules, 1) AS eligible_rules,
                            COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                     FROM users u LEFT JOIN user_types t ON t.key=u.user_type
+                    LEFT JOIN org_units o ON o.id=u.org_unit_id
                     WHERE u.id=? AND u.active=1
                     """,
                     (user_id,),
@@ -2146,10 +2530,20 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if duplicate:
                     raise AppError(409, "该工号已关联其他系统用户，请联系管理员处理")
-                conn.execute("UPDATE users SET employee_id=?, auth_source=? WHERE id=?", (employee_id, auth_source, user["id"]))
+                conn.execute("UPDATE users SET employee_id=?, auth_source=?, org_unit_id=COALESCE(?, org_unit_id) WHERE id=?", (employee_id, auth_source, matched_org_id, user["id"]))
                 user = dict(user)
                 user["employee_id"] = employee_id
                 user["auth_source"] = auth_source
+                if matched_org:
+                    user["org_unit_id"] = matched_org["id"]
+                    user["org_unit_name"] = matched_org["name"]
+                    user["org_unit_slug"] = matched_org["slug"]
+            if matched_org and user and user["org_unit_id"] != matched_org["id"]:
+                conn.execute("UPDATE users SET org_unit_id=? WHERE id=?", (matched_org["id"], user["id"]))
+                user = dict(user)
+                user["org_unit_id"] = matched_org["id"]
+                user["org_unit_name"] = matched_org["name"]
+                user["org_unit_slug"] = matched_org["slug"]
             if not user or not user["active"]:
                 raise AppError(403, "企业账号对应的系统用户不可用")
             safe_user, cookie = self.issue_session(
@@ -2157,10 +2551,15 @@ class Handler(BaseHTTPRequestHandler):
                 user,
                 "auth.sso_login",
                 "用户通过企业 SSO 登录",
-                {"created": created, "linked_existing": linked_existing, "provider": provider_key, "employee_id": employee_id},
-                secure_cookie=redirect_uri.startswith("https://"),
+                {"created": created, "linked_existing": linked_existing, "provider": provider_key, "employee_id": employee_id, "sso_groups": sso_groups, "org_unit_id": user["org_unit_id"]},
+                secure_cookie=redirect_uri.startswith("https://") or self.request_is_https(),
             )
-        self.send_redirect("/?sso=success", {"Set-Cookie": cookie})
+            redirect_org = next(
+                (unit for unit in organization_rows(conn) if unit["id"] == user["org_unit_id"]),
+                provision_org,
+            )
+        route = redirect_org["route"] if redirect_org else "/"
+        self.send_redirect(f"{route}?sso=success", {"Set-Cookie": cookie})
 
     def login(self):
         data = read_json(self)
@@ -2182,12 +2581,14 @@ class Handler(BaseHTTPRequestHandler):
             user = conn.execute(
                 """
                 SELECT u.*, t.name AS user_type_name,
+                       o.name AS org_unit_name, o.slug AS org_unit_slug,
                        COALESCE(t.include_in_members, 1) AS eligible_members,
                        COALESCE(t.include_in_morning, 1) AS eligible_morning,
                        COALESCE(t.include_in_rules, 1) AS eligible_rules,
                        COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                 FROM users u
                 LEFT JOIN user_types t ON t.key = u.user_type
+                LEFT JOIN org_units o ON o.id=u.org_unit_id
                 WHERE LOWER(u.username)=LOWER(?) AND u.active=1
                 """,
                 (username,),
@@ -2234,16 +2635,19 @@ class Handler(BaseHTTPRequestHandler):
                 key: user[key]
                 for key in (
                     "id", "username", "employee_id", "display_name", "role", "user_type", "user_type_name",
+                    "org_unit_id", "org_unit_name", "org_unit_slug",
                     "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
                     "active", "created_at", "auth_source",
                 )
             }
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
+        secure_cookie = "; Secure" if self.request_is_https() else ""
         return {
             "user": safe_user,
             "permissions": permissions_for(safe_user),
+            "organization": self.organization_context_payload(safe_user),
             "message": "登录成功",
-            "_headers": {"Set-Cookie": f"weekly_session={token}; Path=/; Max-Age={timeout * 60}; HttpOnly; SameSite=Strict"},
+            "_headers": {"Set-Cookie": f"weekly_session={token}; Path=/; Max-Age={timeout * 60}; HttpOnly; SameSite=Strict{secure_cookie}"},
         }
 
     def logout(self):
@@ -2254,7 +2658,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL", (now_iso(), token_digest(token)))
         return {
             "message": "已退出",
-            "_headers": {"Set-Cookie": "weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"},
+            "_headers": {"Set-Cookie": f"weekly_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{'; Secure' if self.request_is_https() else ''}"},
         }
 
     def list_sessions(self, user):
@@ -2670,6 +3074,137 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, admin, "user_type.delete", "user_type", None, "用户类型已删除", {"user_type": type_key, "name": user_type["name"]}, self.client_address[0])
         return {"message": "用户类型已删除", **self.list_user_types()}
 
+    def list_org_units(self):
+        self.require_admin()
+        with connect() as conn:
+            return organization_rows(conn)
+
+    def normalize_org_payload(self, conn, data, current_id=None):
+        name = str(data.get("name") or "").strip()
+        if not name or len(name) > 60:
+            raise AppError(400, "团队名称不能为空且最多 60 个字符")
+        slug = normalize_org_slug(data.get("slug") or name)
+        visibility_mode = str(data.get("visibility_mode") or "unit").strip().lower()
+        if visibility_mode not in ORG_VISIBILITY_MODES:
+            raise AppError(400, "团队可见范围不正确")
+        parent_id = data.get("parent_id")
+        try:
+            parent_id = int(parent_id) if parent_id not in (None, "") else None
+        except (TypeError, ValueError):
+            raise AppError(400, "上级团队参数不正确")
+        if parent_id == current_id:
+            raise AppError(400, "团队不能将自己设为上级")
+        if parent_id and not conn.execute("SELECT id FROM org_units WHERE id=? AND active=1", (parent_id,)).fetchone():
+            raise AppError(400, "上级团队不存在")
+        if current_id and parent_id:
+            rows = organization_rows(conn)
+            by_parent = {}
+            for row in rows:
+                by_parent.setdefault(row.get("parent_id"), []).append(row["id"])
+            descendants = {current_id}
+            pending = [current_id]
+            while pending:
+                parent = pending.pop()
+                for child in by_parent.get(parent, []):
+                    if child not in descendants:
+                        descendants.add(child)
+                        pending.append(child)
+            if parent_id in descendants:
+                raise AppError(400, "不能把团队移动到自己的下级")
+        duplicate = conn.execute(
+            "SELECT id FROM org_units WHERE COALESCE(parent_id,0)=COALESCE(?,0) AND slug=? AND active=1 AND id<>COALESCE(?,0)",
+            (parent_id, slug, current_id),
+        ).fetchone()
+        if duplicate:
+            raise AppError(400, "同一上级下已存在相同团队路由")
+        default_user_type = str(data.get("default_user_type") or DEFAULT_USER_TYPE_KEY).strip()
+        if not conn.execute(
+            "SELECT key FROM user_types WHERE key=? AND key<>? AND active=1",
+            (default_user_type, GUEST_USER_TYPE_KEY),
+        ).fetchone():
+            raise AppError(400, "默认用户类型不存在")
+        raw_groups = data.get("sso_groups") or []
+        if isinstance(raw_groups, str):
+            try:
+                decoded_groups = json.loads(raw_groups)
+                raw_groups = decoded_groups if isinstance(decoded_groups, list) else re.split(r"[,;\n]", raw_groups)
+            except json.JSONDecodeError:
+                raw_groups = re.split(r"[,;\n]", raw_groups)
+        if not isinstance(raw_groups, list):
+            raise AppError(400, "SSO 群组格式不正确")
+        groups = []
+        for value in raw_groups:
+            group = str(value).strip()
+            if group and group.lower() not in {item.lower() for item in groups}:
+                groups.append(group[:160])
+        try:
+            sort_order = int(data.get("sort_order") or 0)
+        except (TypeError, ValueError):
+            sort_order = 0
+        return {
+            "name": name,
+            "slug": slug,
+            "parent_id": parent_id,
+            "visibility_mode": visibility_mode,
+            "default_user_type": default_user_type,
+            "sso_groups": json.dumps(groups, ensure_ascii=False),
+            "sort_order": sort_order,
+        }
+
+    def create_org_unit(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            payload = self.normalize_org_payload(conn, data)
+            cursor = conn.execute(
+                """
+                INSERT INTO org_units(name, slug, parent_id, visibility_mode, default_user_type, sso_groups, sort_order, active, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,1,?,?)
+                """,
+                (*payload.values(), now_iso(), now_iso()),
+            )
+            write_audit(conn, admin, "org_unit.create", "org_unit", cursor.lastrowid, "团队层级已创建", {"name": payload["name"]}, self.client_address[0])
+        return {"message": "团队层级已创建", "units": self.list_org_units()}
+
+    def update_org_unit(self, org_unit_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            current = conn.execute("SELECT * FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone()
+            if not current:
+                raise AppError(404, "团队层级不存在")
+            merged = {**dict(current), **data}
+            payload = self.normalize_org_payload(conn, merged, org_unit_id)
+            conn.execute(
+                """
+                UPDATE org_units
+                SET name=?, slug=?, parent_id=?, visibility_mode=?, default_user_type=?, sso_groups=?, sort_order=?, updated_at=?
+                WHERE id=?
+                """,
+                (*payload.values(), now_iso(), org_unit_id),
+            )
+            write_audit(conn, admin, "org_unit.update", "org_unit", org_unit_id, "团队层级已更新", {"name": payload["name"]}, self.client_address[0])
+        return {"message": "团队层级已更新", "units": self.list_org_units()}
+
+    def delete_org_unit(self, org_unit_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            unit = conn.execute("SELECT * FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone()
+            if not unit:
+                raise AppError(404, "团队层级不存在")
+            children = conn.execute("SELECT COUNT(*) FROM org_units WHERE parent_id=? AND active=1", (org_unit_id,)).fetchone()[0]
+            users = conn.execute("SELECT COUNT(*) FROM users WHERE org_unit_id=? AND active=1", (org_unit_id,)).fetchone()[0]
+            if children:
+                raise AppError(400, "该团队仍有下级，请先迁移或删除下级团队")
+            if users:
+                raise AppError(400, f"该团队仍有 {users} 个用户，请先批量迁移用户")
+            root_count = conn.execute("SELECT COUNT(*) FROM org_units WHERE parent_id IS NULL AND active=1").fetchone()[0]
+            if unit["parent_id"] is None and root_count <= 1:
+                raise AppError(400, "至少需要保留一个根团队")
+            conn.execute("UPDATE org_units SET active=0, updated_at=? WHERE id=?", (now_iso(), org_unit_id))
+            write_audit(conn, admin, "org_unit.delete", "org_unit", org_unit_id, "团队层级已删除", {"name": unit["name"]}, self.client_address[0])
+        return {"message": "团队层级已删除", "units": self.list_org_units()}
+
     def list_users(self):
         self.require_admin()
         with connect() as conn:
@@ -2682,30 +3217,39 @@ class Handler(BaseHTTPRequestHandler):
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
                            COALESCE(t.include_in_rules, 1) AS eligible_rules,
                            COALESCE(t.include_in_thanks, 1) AS eligible_thanks,
+                           u.org_unit_id, o.name AS org_unit_name,
                            u.active, u.created_at
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
+                    LEFT JOIN org_units o ON o.id=u.org_unit_id
                     WHERE u.active=1
                     ORDER BY u.id
                     """
                 ).fetchall()
             )
 
-    def list_participating_users(self, scope):
+    def list_participating_users(self, scope, viewer=None, collaboration=False):
         if scope not in PARTICIPATION_SCOPES:
             raise AppError(400, "参与范围不正确")
         column = PARTICIPATION_SCOPES[scope][0]
         with connect() as conn:
+            if collaboration:
+                org_where, org_params = self.organization_collaboration_user_filter(conn, "u", viewer)
+            else:
+                org_where, org_params = self.organization_user_filter(conn, "u", viewer)
             return rows_to_list(
                 conn.execute(
                     f"""
                     SELECT u.id, u.username, u.display_name, u.user_type,
-                           COALESCE(t.name, u.user_type) AS user_type_name
+                           COALESCE(t.name, u.user_type) AS user_type_name,
+                           u.org_unit_id, o.name AS org_unit_name
                     FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
-                    WHERE u.active=1 AND COALESCE(t.{column}, 1)=1
-                    ORDER BY t.sort_order, u.display_name
-                    """
+                    LEFT JOIN org_units o ON o.id=u.org_unit_id
+                    WHERE u.active=1 AND COALESCE(t.{column}, 1)=1 AND {org_where}
+                    ORDER BY o.sort_order, o.name, t.sort_order, u.display_name
+                    """,
+                    org_params,
                 ).fetchall()
             )
 
@@ -2769,6 +3313,83 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"message": f"已调整 {len(user_ids)} 个账号", "users": self.list_users()}
 
+    def bulk_update_user_org(self, admin):
+        self.require_admin()
+        data = read_json(self)
+        raw_ids = data.get("user_ids") or []
+        try:
+            user_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+            org_unit_id = int(data.get("org_unit_id"))
+        except (TypeError, ValueError):
+            raise AppError(400, "用户或团队参数不正确")
+        if not user_ids:
+            raise AppError(400, "请至少选择一个账号")
+        placeholders = ",".join("?" for _ in user_ids)
+        with connect() as conn:
+            unit = conn.execute("SELECT id, name FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone()
+            if not unit:
+                raise AppError(404, "目标团队不存在")
+            count = conn.execute(f"SELECT COUNT(*) FROM users WHERE id IN ({placeholders}) AND active=1", user_ids).fetchone()[0]
+            if count != len(user_ids):
+                raise AppError(400, "部分账号不存在或已停用")
+            conn.execute(f"UPDATE users SET org_unit_id=? WHERE id IN ({placeholders})", [org_unit_id, *user_ids])
+            write_audit(conn, admin, "user.bulk_org", "user", None, "批量调整所属团队", {"user_ids": user_ids, "org_unit_id": org_unit_id, "org_unit_name": unit["name"]}, self.client_address[0])
+        return {"message": f"已调整 {len(user_ids)} 个账号所属团队", "users": self.list_users()}
+
+    def bulk_delete_users(self, admin):
+        self.require_admin()
+        data = read_json(self)
+        raw_ids = data.get("user_ids") or []
+        if not isinstance(raw_ids, list):
+            raise AppError(400, "批量用户列表格式不正确")
+        try:
+            user_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+        except (TypeError, ValueError):
+            raise AppError(400, "用户参数不正确")
+        if not user_ids:
+            raise AppError(400, "请至少选择一个账号")
+        if len(user_ids) > 200:
+            raise AppError(400, "单次最多删除 200 个账号")
+        if int(admin["id"]) in user_ids:
+            raise AppError(400, "不能删除当前登录账号")
+        placeholders = ",".join("?" for _ in user_ids)
+        deleted_at = now_iso()
+        with connect() as conn:
+            users = rows_to_list(
+                conn.execute(
+                    f"SELECT id, username, display_name FROM users WHERE active=1 AND id IN ({placeholders})",
+                    user_ids,
+                ).fetchall()
+            )
+            if len(users) != len(user_ids):
+                raise AppError(400, "部分账号不存在或已删除，请刷新后重试")
+            for target in users:
+                add_recycle_record(
+                    conn,
+                    "user",
+                    target["id"],
+                    target["display_name"] or target["username"],
+                    admin,
+                    {"username": target["username"]},
+                )
+            conn.execute(f"UPDATE users SET active=0 WHERE id IN ({placeholders})", user_ids)
+            conn.execute(f"UPDATE members SET active=0 WHERE user_id IN ({placeholders})", user_ids)
+            conn.execute(
+                f"UPDATE auth_sessions SET revoked_at=? WHERE user_id IN ({placeholders}) AND revoked_at IS NULL",
+                [deleted_at, *user_ids],
+            )
+            write_audit(
+                conn,
+                admin,
+                "user.bulk_delete",
+                "user",
+                None,
+                "批量删除用户",
+                {"user_ids": user_ids, "user_names": [target["display_name"] for target in users]},
+                self.client_address[0],
+            )
+        return {"message": f"已删除 {len(user_ids)} 个账号", "users": self.list_users()}
+
     def create_user(self):
         admin = self.require_admin()
         data = read_json(self)
@@ -2777,6 +3398,10 @@ class Handler(BaseHTTPRequestHandler):
         display_name = str(data.get("display_name") or username).strip()
         role = data.get("role") or "user"
         user_type = str(data.get("user_type") or "").strip()
+        try:
+            org_unit_id = int(data.get("org_unit_id"))
+        except (TypeError, ValueError):
+            raise AppError(400, "新增用户时必须指定所属团队")
         if not username or not employee_id or not display_name:
             raise AppError(400, "账号、工号和姓名不能为空")
         if role not in ("admin", "user"):
@@ -2787,11 +3412,13 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             if not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (user_type,)).fetchone():
                 raise AppError(400, "用户类型不存在，请先创建用户类型")
+            if not conn.execute("SELECT id FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone():
+                raise AppError(400, "所属团队不存在")
             if conn.execute("SELECT id FROM users WHERE LOWER(employee_id)=LOWER(?)", (employee_id,)).fetchone():
                 raise AppError(400, "工号已关联其他用户")
             cursor = conn.execute(
-                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, active, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (username, employee_id, salt, password_hash, display_name, role, user_type, 1, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, active, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, 1, now_iso()),
             )
             sync_member_for_user(conn, cursor.lastrowid)
             write_audit(conn, admin, "user.create", "user", cursor.lastrowid, "用户已创建", {"username": username, "role": role, "user_type": user_type}, self.client_address[0])
@@ -2814,7 +3441,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError(400, "工号不能为空")
             fields.append("employee_id=?")
             values.append(employee_id)
-        for key in ("display_name", "role", "active", "user_type"):
+        for key in ("display_name", "role", "active", "user_type", "org_unit_id"):
             if key in data:
                 fields.append(f"{key}=?")
                 values.append(data[key])
@@ -2845,6 +3472,13 @@ class Handler(BaseHTTPRequestHandler):
             if "user_type" in data:
                 if data.get("user_type") == GUEST_USER_TYPE_KEY or not conn.execute("SELECT key FROM user_types WHERE key=? AND active=1", (data.get("user_type"),)).fetchone():
                     raise AppError(400, "用户类型不存在")
+            if "org_unit_id" in data:
+                try:
+                    org_unit_id = int(data.get("org_unit_id"))
+                except (TypeError, ValueError):
+                    raise AppError(400, "所属团队参数不正确")
+                if not conn.execute("SELECT id FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone():
+                    raise AppError(400, "所属团队不存在")
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
             sync_member_for_user(conn, user_id)
             write_audit(conn, admin, "user.update", "user", user_id, "用户已更新", {"fields": list(data.keys())}, self.client_address[0])
@@ -2874,18 +3508,20 @@ class Handler(BaseHTTPRequestHandler):
             write_audit(conn, current_user, "user.delete", "user", user_id, "用户已删除", {}, self.client_address[0])
         return {"message": "用户已删除", "users": self.list_users()}
 
-    def list_members(self):
+    def list_members(self, viewer=None):
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", viewer)
             members = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT m.*, u.display_name AS linked_user, u.username AS account
                     FROM members m
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN user_types t ON t.key=u.user_type
-                    WHERE m.active=1 AND u.active=1 AND COALESCE(t.include_in_members, 1)=1
+                    WHERE m.active=1 AND u.active=1 AND COALESCE(t.include_in_members, 1)=1 AND {org_where}
                     ORDER BY CASE WHEN m.sort_order=0 THEN m.id ELSE m.sort_order END, m.id
-                    """
+                    """,
+                    org_params,
                 ).fetchall()
             )
             posts = rows_to_list(
@@ -3001,15 +3637,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_team_posts(self, user=None):
         with connect() as conn:
+            context = self.organization_context(conn, user)
+            org_where, org_params = self.organization_entity_filter(conn, "p.org_unit_id", user)
+            inherited_ids = context["inherited_ids"]
+            if inherited_ids:
+                inherited_placeholders = ",".join("?" for _ in inherited_ids)
+                inherited_where = f"p.category='announcement' AND p.org_unit_id IN ({inherited_placeholders})"
+            else:
+                inherited_where = "1=0"
             posts = rows_to_list(
                 conn.execute(
-                    """
-                    SELECT p.*, u.display_name, u.username
+                    f"""
+                    SELECT p.*, u.display_name, u.username, o.name AS org_unit_name
                     FROM team_posts p
                     JOIN users u ON u.id = p.user_id
-                    WHERE p.deleted_at IS NULL
+                    LEFT JOIN org_units o ON o.id=p.org_unit_id
+                    WHERE p.deleted_at IS NULL AND ({org_where} OR ({inherited_where}))
                     ORDER BY p.pinned DESC, COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
-                    """
+                    """,
+                    [*org_params, *inherited_ids],
                 ).fetchall()
             )
             if not posts:
@@ -3093,6 +3739,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 root_replies.setdefault(reply["post_id"], []).append(reply)
         for post in posts:
+            post["inherited"] = post["org_unit_id"] not in context["visible_ids"]
             post["replies"] = root_replies.get(post["id"], [])
             post["mine"] = bool(user and post["user_id"] == user["id"])
             post["reply_count"] = reply_count_map.get(post["id"], 0)
@@ -3107,9 +3754,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_team_post(self, post_id, user=None):
         with connect() as conn:
-            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
-            if not post:
-                raise AppError(404, "讨论主题不存在")
+            self.require_team_post_read_access(conn, post_id, user)
             conn.execute("UPDATE team_posts SET view_count=view_count+1 WHERE id=?", (post_id,))
         result = next((item for item in self.list_team_posts(user) if item["id"] == post_id), None)
         if not result:
@@ -3138,12 +3783,14 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "讨论内容最多 2000 字")
         created_at = now_iso()
         with connect() as conn:
+            org_context = self.organization_context(conn, user)
+            org_unit_id = org_context["selected"]["id"] if org_context["selected"] else user.get("org_unit_id")
             cursor = conn.execute(
                 """
-                INSERT INTO team_posts(user_id, kind, title, category, status, pinned, view_count, content, updated_at, created_at)
-                VALUES(?,?,?,?, 'open', 0, 0, ?, ?, ?)
+                INSERT INTO team_posts(user_id, kind, title, category, status, pinned, view_count, content, org_unit_id, updated_at, created_at)
+                VALUES(?,?,?,?, 'open', 0, 0, ?, ?, ?, ?)
                 """,
-                (user["id"], kind, title, category, content, created_at, created_at),
+                (user["id"], kind, title, category, content, org_unit_id, created_at, created_at),
             )
             write_audit(conn, user, "team_post.create", "team_post", cursor.lastrowid, "团队讨论主题已发布", {"title": title, "category": category}, self.client_address[0])
         return {"message": "已发布", "posts": self.list_team_posts(user)}
@@ -3154,6 +3801,7 @@ class Handler(BaseHTTPRequestHandler):
             post = conn.execute("SELECT * FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
             if not post:
                 raise AppError(404, "讨论主题不存在")
+            self.require_org_unit_access(conn, post["org_unit_id"], user)
             is_admin = user.get("role") == "admin"
             is_owner = post["user_id"] == user["id"]
             if not is_admin and not is_owner:
@@ -3203,11 +3851,12 @@ class Handler(BaseHTTPRequestHandler):
     def delete_team_post(self, post_id, user):
         with connect() as conn:
             post = conn.execute(
-                "SELECT id, user_id, title, deleted_at FROM team_posts WHERE id=?",
+                "SELECT id, user_id, title, deleted_at, org_unit_id FROM team_posts WHERE id=?",
                 (post_id,),
             ).fetchone()
             if not post:
                 raise AppError(404, "讨论主题不存在")
+            self.require_org_unit_access(conn, post["org_unit_id"], user)
             if post["user_id"] != user["id"] and user.get("role") != "admin":
                 raise AppError(403, "只能删除自己发布的主题")
             if post["deleted_at"]:
@@ -3250,9 +3899,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 raise AppError(400, "回复层级不正确")
         with connect() as conn:
-            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
-            if not post:
-                raise AppError(404, "对话不存在")
+            self.require_team_post_read_access(conn, post_id, user)
             if parent_reply_id is not None:
                 parent = conn.execute(
                     "SELECT id FROM team_post_replies WHERE id=? AND post_id=? AND deleted_at IS NULL",
@@ -3274,9 +3921,7 @@ class Handler(BaseHTTPRequestHandler):
         if not reaction or len(reaction) > 24 or any(ord(char) < 32 for char in reaction):
             raise AppError(400, "回应内容不支持")
         with connect() as conn:
-            post = conn.execute("SELECT id FROM team_posts WHERE id=? AND deleted_at IS NULL", (post_id,)).fetchone()
-            if not post:
-                raise AppError(404, "对话不存在")
+            self.require_team_post_read_access(conn, post_id, user)
             existing = conn.execute(
                 "SELECT id FROM team_post_reactions WHERE post_id=? AND user_id=? AND reaction=?",
                 (post_id, user["id"], reaction),
@@ -3298,7 +3943,7 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as conn:
             reply = conn.execute(
                 """
-                SELECT r.id
+                SELECT r.id, r.post_id
                 FROM team_post_replies r
                 JOIN team_posts p ON p.id = r.post_id
                 WHERE r.id=? AND r.deleted_at IS NULL AND p.deleted_at IS NULL
@@ -3307,6 +3952,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             if not reply:
                 raise AppError(404, "回复不存在")
+            self.require_team_post_read_access(conn, reply["post_id"], user)
             existing = conn.execute(
                 "SELECT id FROM team_reply_reactions WHERE reply_id=? AND user_id=? AND reaction=?",
                 (reply_id, user["id"], reaction),
@@ -3323,11 +3969,17 @@ class Handler(BaseHTTPRequestHandler):
     def delete_team_post_reply(self, reply_id, user):
         with connect() as conn:
             reply = conn.execute(
-                "SELECT id, user_id, content, deleted_at FROM team_post_replies WHERE id=?",
+                """
+                SELECT r.id, r.user_id, r.content, r.deleted_at, r.post_id
+                FROM team_post_replies r
+                JOIN team_posts p ON p.id=r.post_id
+                WHERE r.id=?
+                """,
                 (reply_id,),
             ).fetchone()
             if not reply:
                 raise AppError(404, "回复不存在")
+            self.require_team_post_read_access(conn, reply["post_id"], user)
             if reply["user_id"] != user["id"] and user.get("role") != "admin":
                 raise AppError(403, "只能删除自己的回复")
             if reply["deleted_at"]:
@@ -3382,9 +4034,10 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "日期格式不正确")
         with connect() as conn:
             carried_count = ensure_morning_carryover(conn, item_date)
+            org_where, org_params = self.organization_user_filter(conn, "owner")
             items = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
                            updater.display_name AS updated_by_name,
                            COALESCE(root.item_date, i.item_date) AS start_date
@@ -3393,10 +4046,10 @@ class Handler(BaseHTTPRequestHandler):
                     LEFT JOIN user_types owner_type ON owner_type.key=owner.user_type
                     LEFT JOIN users updater ON updater.id = i.updated_by
                     LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
-                    WHERE i.active=1 AND i.item_date=? AND COALESCE(owner_type.include_in_morning, 1)=1
+                    WHERE i.active=1 AND i.item_date=? AND COALESCE(owner_type.include_in_morning, 1)=1 AND {org_where}
                     ORDER BY owner.display_name, CASE i.status WHEN 'risk' THEN 0 WHEN 'doing' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, i.updated_at DESC
                     """,
-                    (item_date,),
+                    [item_date, *org_params],
                 ).fetchall()
             )
             for item in items:
@@ -3407,13 +4060,14 @@ class Handler(BaseHTTPRequestHandler):
                     item["duration_days"] = 1
             users = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT u.id, u.username, u.display_name, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
-                    WHERE u.active=1 AND COALESCE(t.include_in_morning, 1)=1
+                    WHERE u.active=1 AND COALESCE(t.include_in_morning, 1)=1 AND {org_where.replace('owner.', 'u.')}
                     ORDER BY t.sort_order, u.id
-                    """
+                    """,
+                    org_params,
                 ).fetchall()
             )
         return {
@@ -3430,7 +4084,7 @@ class Handler(BaseHTTPRequestHandler):
             current = conn.execute(
                 """
                 SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
-                       updater.display_name AS updated_by_name,
+                       updater.display_name AS updated_by_name, owner.org_unit_id AS owner_org_unit_id,
                        COALESCE(root.item_date, i.item_date) AS start_date
                 FROM morning_items i
                 JOIN users owner ON owner.id = i.owner_id
@@ -3442,6 +4096,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             if not current:
                 raise AppError(404, "早例会事项不存在")
+            self.require_org_unit_access(conn, current["owner_org_unit_id"])
             current_item = dict(current)
             chain_id = current_item.get("root_id") or current_item["id"]
             history = rows_to_list(
@@ -3562,6 +4217,8 @@ class Handler(BaseHTTPRequestHandler):
             item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "早例会事项不存在")
+            owner = conn.execute("SELECT org_unit_id FROM users WHERE id=?", (item["owner_id"],)).fetchone()
+            self.require_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
             if is_past_date(item["item_date"]):
                 raise AppError(400, "已结束日期不能修改")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
@@ -3596,6 +4253,8 @@ class Handler(BaseHTTPRequestHandler):
             item = conn.execute("SELECT * FROM morning_items WHERE id=? AND active=1", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "早例会事项不存在")
+            owner = conn.execute("SELECT org_unit_id FROM users WHERE id=?", (item["owner_id"],)).fetchone()
+            self.require_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
             if is_past_date(item["item_date"]):
                 raise AppError(400, "已结束日期不能删除")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
@@ -3655,10 +4314,12 @@ class Handler(BaseHTTPRequestHandler):
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", user)
             show_black_details = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_details", "1"
             ) == "1"
-            clauses = [where]
+            clauses = [where, org_where]
+            params.extend(org_params)
             if query.get("user_id") and query["user_id"][0]:
                 try:
                     user_id = int(query["user_id"][0])
@@ -3689,14 +4350,15 @@ class Handler(BaseHTTPRequestHandler):
         if data.get("kind") == "black":
             points = -points
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", admin)
             eligible = conn.execute(
-                """
+                f"""
                 SELECT u.id
                 FROM users u
                 LEFT JOIN user_types t ON t.key=u.user_type
-                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1 AND {org_where}
                 """,
-                (data.get("user_id"),),
+                [data.get("user_id"), *org_params],
             ).fetchone()
             if not eligible:
                 raise AppError(400, "该账号未纳入红黑榜名单")
@@ -3758,17 +4420,19 @@ class Handler(BaseHTTPRequestHandler):
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", user)
             show_black_points = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_points", "1"
             ) == "1"
             users = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT u.id, u.display_name FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
-                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1 AND {org_where}
                     ORDER BY u.display_name
-                    """
+                    """,
+                    org_params,
                 ).fetchall()
             )
             totals = rows_to_list(
@@ -3780,11 +4444,11 @@ class Handler(BaseHTTPRequestHandler):
                     FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
                     LEFT JOIN red_black_scores s ON s.user_id = u.id AND {where}
-                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                    WHERE u.active=1 AND COALESCE(t.include_in_rules, 1)=1 AND {org_where}
                     GROUP BY u.id
                     ORDER BY red_points DESC, black_points ASC, u.display_name
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
             timeline = rows_to_list(
@@ -3794,11 +4458,12 @@ class Handler(BaseHTTPRequestHandler):
                            SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
                            SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM red_black_scores s
-                    WHERE {where}
+                    JOIN users u ON u.id=s.user_id
+                    WHERE {where} AND {org_where}
                     GROUP BY s.score_date
                     ORDER BY s.score_date
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
             monthly_rows = rows_to_list(
@@ -3809,10 +4474,11 @@ class Handler(BaseHTTPRequestHandler):
                            SUM(CASE WHEN s.kind='red' THEN ABS(s.points) ELSE 0 END) AS red_points,
                            SUM(CASE WHEN s.kind='black' THEN ABS(s.points) ELSE 0 END) AS black_points
                     FROM red_black_scores s
-                    WHERE {where}
+                    JOIN users u ON u.id=s.user_id
+                    WHERE {where} AND {org_where}
                     GROUP BY s.user_id, strftime('%m', s.score_date)
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
         annual_map = {
@@ -3861,16 +4527,19 @@ class Handler(BaseHTTPRequestHandler):
     def list_meetings(self, query):
         where, params = date_filter(query, "m.meeting_date")
         with connect() as conn:
+            context = self.organization_context(conn)
+            org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", inherit_ancestors=True)
             meetings = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT m.*, u.display_name AS creator
+                    SELECT m.*, u.display_name AS creator, o.name AS org_unit_name
                     FROM meetings m
                     JOIN users u ON u.id = m.created_by
-                    WHERE {where}
+                    LEFT JOIN org_units o ON o.id=m.org_unit_id
+                    WHERE {where} AND {org_where}
                     ORDER BY m.meeting_date DESC
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
             items = rows_to_list(
@@ -3926,6 +4595,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sort_order": topic["sort_order"],
             })
         for meeting in meetings:
+            meeting["inherited"] = meeting["org_unit_id"] not in context["visible_ids"]
             meeting_items = item_map.get(meeting["id"], [])
             meeting_topics = topic_map.get(meeting["id"], [])
             seen_topics = {topic["id"] for topic in meeting_topics}
@@ -3951,9 +4621,11 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "会议开始时间格式不正确")
         with connect() as conn:
             default_title = get_setting_value(conn, "meeting_default_title", "周例会")
+            org_context = self.organization_context(conn, user)
+            org_unit_id = org_context["selected"]["id"] if org_context["selected"] else user.get("org_unit_id")
             cursor = conn.execute(
-                "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?,?)",
-                (data.get("meeting_date") or today_iso(), start_time or None, data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], now_iso()),
+                "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, org_unit_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (data.get("meeting_date") or today_iso(), start_time or None, data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], org_unit_id, now_iso()),
             )
             meeting_id = cursor.lastrowid
             for topic_id in data.get("topic_type_ids") or []:
@@ -3986,6 +4658,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(meeting_id)
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, admin)
             meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
@@ -3996,19 +4669,20 @@ class Handler(BaseHTTPRequestHandler):
     def copy_previous_meeting_agenda(self, meeting_id):
         admin = self.require_admin()
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, admin)
             meeting = conn.execute("SELECT * FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
             if meeting["status"] in ("completed", "archived"):
                 raise AppError(400, "已结束会议不能调整议题")
             previous = conn.execute(
-                "SELECT id FROM meetings WHERE meeting_date<? AND title=? ORDER BY meeting_date DESC, id DESC LIMIT 1",
-                (meeting["meeting_date"], meeting["title"]),
+                "SELECT id FROM meetings WHERE meeting_date<? AND title=? AND org_unit_id=? ORDER BY meeting_date DESC, id DESC LIMIT 1",
+                (meeting["meeting_date"], meeting["title"], meeting["org_unit_id"]),
             ).fetchone()
             if not previous:
                 previous = conn.execute(
-                    "SELECT id FROM meetings WHERE meeting_date<? ORDER BY meeting_date DESC, id DESC LIMIT 1",
-                    (meeting["meeting_date"],),
+                    "SELECT id FROM meetings WHERE meeting_date<? AND org_unit_id=? ORDER BY meeting_date DESC, id DESC LIMIT 1",
+                    (meeting["meeting_date"], meeting["org_unit_id"]),
                 ).fetchone()
             if not previous:
                 raise AppError(400, "没有可沿用的历史会议")
@@ -4060,6 +4734,7 @@ class Handler(BaseHTTPRequestHandler):
             if value not in normalized:
                 normalized.append(value)
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, admin)
             meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
@@ -4096,6 +4771,8 @@ class Handler(BaseHTTPRequestHandler):
         created_meetings = 0
         created_items = 0
         with connect() as conn:
+            org_context = self.organization_context(conn, admin)
+            org_unit_id = org_context["selected"]["id"] if org_context["selected"] else admin.get("org_unit_id")
             default_weeks = get_int_setting(conn, "meeting_bulk_default_weeks", 4, minimum=1, maximum=52)
             weeks = max(1, min(52, int(data.get("weeks") or default_weeks)))
             title = (data.get("title") or get_setting_value(conn, "meeting_default_title", "周例会")).strip()
@@ -4118,15 +4795,15 @@ class Handler(BaseHTTPRequestHandler):
             for offset in range(weeks):
                 meeting_date = (start_date + dt.timedelta(weeks=offset)).isoformat()
                 meeting = conn.execute(
-                    "SELECT id FROM meetings WHERE meeting_date=? ORDER BY id LIMIT 1",
-                    (meeting_date,),
+                    "SELECT id FROM meetings WHERE meeting_date=? AND org_unit_id=? ORDER BY id LIMIT 1",
+                    (meeting_date, org_unit_id),
                 ).fetchone()
                 if meeting:
                     meeting_id = meeting["id"]
                 else:
                     cursor = conn.execute(
-                        "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, created_at) VALUES(?,?,?,?,?,?,?)",
-                        (meeting_date, start_time or None, title, summary, "scheduled", admin["id"], now_iso()),
+                        "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, org_unit_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (meeting_date, start_time or None, title, summary, "scheduled", admin["id"], org_unit_id, now_iso()),
                     )
                     meeting_id = cursor.lastrowid
                     created_meetings += 1
@@ -4274,6 +4951,7 @@ class Handler(BaseHTTPRequestHandler):
         if option_id and user["role"] != "admin":
             raise AppError(403, "普通成员只能添加自定义议题")
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, user)
             if option_id:
                 option = conn.execute(
                     """
@@ -4349,6 +5027,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可添加的预设议题")
 
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, actor)
             meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
@@ -4437,6 +5116,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "没有可更新字段")
         values.append(item_id)
         with connect() as conn:
+            self.require_meeting_item_access(conn, item_id, user)
             item = conn.execute("SELECT i.id, m.status AS meeting_status FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
@@ -4457,6 +5137,7 @@ class Handler(BaseHTTPRequestHandler):
         if not item_ids:
             raise AppError(400, "没有可排序的议题")
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, user)
             meeting = conn.execute("SELECT status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
@@ -4477,15 +5158,16 @@ class Handler(BaseHTTPRequestHandler):
     def carry_forward_meeting_item(self, item_id):
         user = self.current_user()
         with connect() as conn:
+            self.require_meeting_item_access(conn, item_id, user)
             item = conn.execute(
-                "SELECT i.*, m.meeting_date, m.title AS meeting_title FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL",
+                "SELECT i.*, m.meeting_date, m.title AS meeting_title, m.org_unit_id FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL",
                 (item_id,),
             ).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
             next_meeting = conn.execute(
-                "SELECT id FROM meetings WHERE meeting_date>? AND status NOT IN ('completed','archived') ORDER BY meeting_date, id LIMIT 1",
-                (item["meeting_date"],),
+                "SELECT id FROM meetings WHERE meeting_date>? AND org_unit_id=? AND status NOT IN ('completed','archived') ORDER BY meeting_date, id LIMIT 1",
+                (item["meeting_date"], item["org_unit_id"]),
             ).fetchone()
             if not next_meeting:
                 raise AppError(400, "暂无下一场可承接的会议，请先创建会议")
@@ -4517,6 +5199,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_meeting_item(self, item_id, user):
         with connect() as conn:
+            self.require_meeting_item_access(conn, item_id, user)
             item = conn.execute(
                 "SELECT i.id, i.title, i.deleted_at, m.status AS meeting_status FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=?",
                 (item_id,),
@@ -4557,6 +5240,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "乐捐金额不正确")
         donation_done = 1 if donation_required and data.get("donation_done") else 0
         with connect() as conn:
+            self.require_meeting_access(conn, meeting_id, admin)
             conn.execute(
                 """
                 INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_amount, donation_done, note, updated_by, updated_at)
@@ -4780,6 +5464,7 @@ class Handler(BaseHTTPRequestHandler):
     def list_shifts(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u")
             return rows_to_list(
                 conn.execute(
                     f"""
@@ -4787,10 +5472,10 @@ class Handler(BaseHTTPRequestHandler):
                     FROM shifts s
                     JOIN users u ON u.id = s.user_id
                     JOIN machines m ON m.id = s.machine_id
-                    WHERE {where}
+                    WHERE {where} AND {org_where}
                     ORDER BY s.shift_date DESC, m.name, s.shift_type
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
 
@@ -4811,13 +5496,14 @@ class Handler(BaseHTTPRequestHandler):
         if shift_type not in ("day", "night"):
             raise AppError(400, "班次类型不正确")
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", admin)
             default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
             max_daily_hours = get_float_setting(conn, "shift_max_daily_hours", 24, minimum=1, maximum=48)
             hours = float(data.get("hours") or default_hours)
             if hours <= 0 or hours > 24:
                 raise AppError(400, "单条排班工时需要在 0 到 24 小时之间")
             machine = conn.execute("SELECT id, name FROM machines WHERE id=?", (machine_id,)).fetchone()
-            member = conn.execute("SELECT id, display_name FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+            member = conn.execute(f"SELECT id, display_name FROM users u WHERE id=? AND active=1 AND {org_where}", [user_id, *org_params]).fetchone()
             if not machine or not member:
                 raise AppError(404, "机台或排班成员不存在")
             conflicts = []
@@ -4869,17 +5555,18 @@ class Handler(BaseHTTPRequestHandler):
     def shift_dashboard(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u")
             by_user = rows_to_list(
                 conn.execute(
                     f"""
                     SELECT u.id, u.display_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
                     FROM shifts s
                     JOIN users u ON u.id = s.user_id
-                    WHERE {where}
+                    WHERE {where} AND {org_where}
                     GROUP BY u.id
                     ORDER BY hours DESC
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
             by_machine = rows_to_list(
@@ -4888,31 +5575,48 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT m.name AS machine_name, SUM(s.hours) AS hours, COUNT(*) AS shift_count
                     FROM shifts s
                     JOIN machines m ON m.id = s.machine_id
-                    WHERE {where}
+                    JOIN users u ON u.id=s.user_id
+                    WHERE {where} AND {org_where}
                     GROUP BY m.id
                     ORDER BY m.name
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
         return {"by_user": by_user, "by_machine": by_machine}
 
-    def list_thank_you(self, query):
+    def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
-            return rows_to_list(
+            context = self.organization_context(conn, viewer if viewer is not None else getattr(self, "api_user", None))
+            visible_ids = context["visible_ids"]
+            if visible_ids:
+                placeholders = ",".join("?" for _ in visible_ids)
+                relation_where = f"(giver.org_unit_id IN ({placeholders}) OR receiver.org_unit_id IN ({placeholders}))"
+                relation_params = [*visible_ids, *visible_ids]
+            else:
+                relation_where = "1=0"
+                relation_params = []
+            votes = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name
+                    SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name,
+                           giver.org_unit_id AS voter_org_unit_id, giver_org.name AS voter_org_name,
+                           receiver.org_unit_id AS receiver_org_unit_id, receiver_org.name AS receiver_org_name
                     FROM thank_you_votes v
                     JOIN users giver ON giver.id = v.voter_id
                     JOIN users receiver ON receiver.id = v.receiver_id
-                    WHERE {where}
+                    LEFT JOIN org_units giver_org ON giver_org.id=giver.org_unit_id
+                    LEFT JOIN org_units receiver_org ON receiver_org.id=receiver.org_unit_id
+                    WHERE {where} AND {relation_where}
                     ORDER BY v.week_start DESC, v.created_at DESC
                     """,
-                    params,
+                    [*params, *relation_params],
                 ).fetchall()
             )
+        for vote in votes:
+            vote["cross_team"] = vote["voter_org_unit_id"] != vote["receiver_org_unit_id"]
+        return votes
 
     def create_thank_you(self, user):
         data = read_json(self)
@@ -4938,6 +5642,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
+            org_where, org_params = self.organization_collaboration_user_filter(conn, "u", user)
             weekly_limit = get_int_setting(conn, "thank_you_weekly_limit", 3, minimum=1, maximum=20)
             count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
             remaining = weekly_limit - count
@@ -4950,14 +5655,14 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT u.id, u.display_name FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
                     WHERE u.active=1 AND COALESCE(t.include_in_thanks, 1)=1
-                      AND u.id IN ({placeholders})
+                      AND u.id IN ({placeholders}) AND {org_where}
                     """,
-                    receiver_ids,
+                    [*receiver_ids, *org_params],
                 ).fetchall()
             )
             active_receiver_ids = {row["id"] for row in active_receivers}
             if len(active_receiver_ids) != len(receiver_ids):
-                raise AppError(400, "感谢对象不存在或已停用")
+                raise AppError(400, "感谢对象不存在、已停用或不在当前协作组织")
             existing = rows_to_list(
                 conn.execute(
                     f"""
@@ -5036,9 +5741,10 @@ class Handler(BaseHTTPRequestHandler):
             )
         return {"message": "感谢记录已删除"}
 
-    def thank_you_dashboard(self, query):
+    def thank_you_dashboard(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "receiver", viewer)
             stars = rows_to_list(
                 conn.execute(
                     f"""
@@ -5046,11 +5752,11 @@ class Handler(BaseHTTPRequestHandler):
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id = v.receiver_id
                     LEFT JOIN user_types t ON t.key=receiver.user_type
-                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1 AND {org_where}
                     GROUP BY receiver.id
                     ORDER BY thanks DESC, receiver.display_name
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
             weekly = rows_to_list(
@@ -5060,11 +5766,11 @@ class Handler(BaseHTTPRequestHandler):
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id=v.receiver_id
                     LEFT JOIN user_types t ON t.key=receiver.user_type
-                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1 AND {org_where}
                     GROUP BY v.week_start
                     ORDER BY v.week_start
                     """,
-                    params,
+                    [*params, *org_params],
                 ).fetchall()
             )
         return {"stars": stars, "weekly": weekly}

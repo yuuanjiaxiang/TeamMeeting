@@ -22,6 +22,7 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
     employee_id = "E10086"
     subject = "smoke-subject"
     display_name = "SSO 冒烟用户"
+    groups = ["SMOKE-MO"]
 
     def log_message(self, _format, *_args):
         return
@@ -60,7 +61,7 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
             if self.headers.get("Authorization") != "Bearer smoke-access-token":
                 self.send_json({"error": "invalid_token"}, 401)
                 return
-            self.send_json({"sub": self.subject, "employee_id": self.employee_id, "name": self.display_name})
+            self.send_json({"sub": self.subject, "employee_id": self.employee_id, "name": self.display_name, "groups": self.groups})
             return
         self.send_error(404)
 
@@ -114,12 +115,15 @@ def main():
                     "sso_client_secret": "smoke-secret",
                     "sso_redirect_uri": f"{app_url}/api/sso/callback",
                     "sso_username_claim": "employee_id",
+                    "sso_group_claim": "groups",
                     "sso_auto_provision": "1",
                     "sso_default_user_type": app.DEFAULT_USER_TYPE_KEY,
                 }
                 for key, value in values.items():
                     conn.execute("UPDATE system_settings SET value=? WHERE key=?", (value, key))
                 conn.execute("UPDATE users SET employee_id='E10086' WHERE username='user'")
+                conn.execute("UPDATE org_units SET sso_groups=? WHERE name='MO'", (json.dumps(["SMOKE-MO"]),))
+                conn.execute("UPDATE org_units SET sso_groups=? WHERE name='WS'", (json.dumps(["SMOKE-WS"]),))
 
             opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             with opener.open(f"{app_url}/api/me", timeout=15) as response:
@@ -150,7 +154,7 @@ def main():
             with opener.open(f"{app_url}/api/me", timeout=15) as response:
                 profile = json.load(response)
             user = profile.get("user") or {}
-            if user.get("username") != "user" or user.get("employee_id") != "E10086" or user.get("display_name") != "示例成员":
+            if user.get("username") != "user" or user.get("employee_id") != "E10086" or user.get("display_name") != "示例成员" or user.get("org_unit_name") != "MO":
                 raise RuntimeError(f"Existing employee was not linked: {user}")
             with app.connect() as conn:
                 identity = conn.execute(
@@ -162,15 +166,25 @@ def main():
             if employee_count != 1:
                 raise RuntimeError("SSO employee matching created a duplicate user")
 
+            FakeOAuth2Handler.groups = ["UNMAPPED-GROUP"]
+            preserve_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            with preserve_opener.open(f"{app_url}/api/sso/login", timeout=15):
+                pass
+            with preserve_opener.open(f"{app_url}/api/me", timeout=15) as response:
+                preserved = (json.load(response).get("user") or {})
+            if preserved.get("org_unit_name") != "MO":
+                raise RuntimeError(f"Unmapped SSO group changed the existing organization: {preserved}")
+
             FakeOAuth2Handler.employee_id = "E20002"
             FakeOAuth2Handler.subject = "smoke-subject-new"
             FakeOAuth2Handler.display_name = "自动建号用户"
+            FakeOAuth2Handler.groups = ["SMOKE-WS"]
             provision_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             with provision_opener.open(f"{app_url}/api/sso/login", timeout=15):
                 pass
             with provision_opener.open(f"{app_url}/api/me", timeout=15) as response:
                 provisioned = (json.load(response).get("user") or {})
-            if provisioned.get("username") != "E20002" or provisioned.get("employee_id") != "E20002":
+            if provisioned.get("username") != "E20002" or provisioned.get("employee_id") != "E20002" or provisioned.get("org_unit_name") != "WS":
                 raise RuntimeError(f"Automatic SSO provisioning failed: {provisioned}")
             print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "pkce": "S256"}, ensure_ascii=False))
         finally:

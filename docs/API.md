@@ -7,8 +7,11 @@
 - 日期格式：`YYYY-MM-DD`；
 - 时间格式：本地时间 ISO 8601；
 - 登录后由浏览器 Cookie 维持会话；
+- 组织路由格式为 `/org/<根>/<子团队>/...`；前端 API 请求通过 `X-Team-Org-Path` 传递当前组织路径，服务端仍会按登录人的可访问范围二次校验；
 - 错误响应：`{"error": "可读错误原因"}`；
 - 未登录通常返回 401，无权限返回 403，资源不存在返回 404；并发编辑冲突返回 409。
+
+公共域名由本机 Nginx 提供 HTTPS，后端基础地址保持 `http://127.0.0.1:8000`。启用 `TEAM_LOOP_TRUST_PROXY=1` 后，后端仅接受回环代理传入的 `X-Forwarded-For` 与 `X-Forwarded-Proto`；HTTPS 请求的会话 Cookie 会增加 `Secure`。
 
 示例：
 
@@ -45,7 +48,7 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 }
 ```
 
-SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。`/api/me` 只公开 SSO 是否可用、是否自动登录及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
+SSO 回调成功后按群组匹配到的组织跳转，例如 `/org/ess/mo/ws?sso=success`；失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。`/api/me` 只公开 SSO 是否可用、是否自动登录及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
 
 ## 3. 用户、成员与权限
 
@@ -54,6 +57,11 @@ SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<
 | GET/POST | `/api/users` | 查询或创建用户 |
 | PATCH/DELETE | `/api/users/{id}` | 修改或软删除用户 |
 | PATCH | `/api/users/bulk-type` | 将 `user_ids` 中的账号批量调整到指定 `user_type` |
+| PATCH | `/api/users/bulk-org` | 将 `user_ids` 中的账号批量调整到指定 `org_unit_id` |
+| DELETE | `/api/users/bulk-delete` | 软删除 `user_ids` 中的账号，撤销登录会话并逐条写入回收站；禁止包含当前登录账号 |
+| GET | `/api/org-context` | 获取当前路由选择、可访问组织和可见组织范围 |
+| GET/POST | `/api/org-units` | 管理员查询或创建组织层级 |
+| PATCH/DELETE | `/api/org-units/{id}` | 修改或删除组织；存在子组织或有效用户时禁止删除 |
 | GET/POST | `/api/user-types` | 查询或创建用户类型；创建时可指定 `copy_from` 复制权限 |
 | POST | `/api/user-types/{code}/impact` | 预评估权限或参与名单变化及受影响账号 |
 | PATCH | `/api/user-types/{code}/permissions` | 更新名称、说明、模块操作权限与独立业务参与名单；支持 `expected_version` |
@@ -62,7 +70,9 @@ SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<
 | PATCH | `/api/members/{id}` | 更新成员资料 |
 | PATCH | `/api/members/order` | 管理员调整成员卡片顺序 |
 
-用户与成员是一一关联的业务实体。新增用户必须指定有效用户类型，不能指定 `guest`。删除用户后历史记录保留，成员列表不再展示该用户。
+用户与成员是一一关联的业务实体。新增用户必须指定有效用户类型，不能指定 `guest`。单次批量操作最多处理 200 个有效账号；删除用户后历史记录保留，成员列表不再展示该用户。
+
+用户同时归属一个组织层级。组织的 `visibility_mode` 支持：`all`（可看全组织）、`subtree`（可看本层及全部下级）、`unit`（仅看本层）。成员、早例会、排班和红黑榜按当前组织上下文过滤；上级会议和公告额外向下级只读透传。管理员可以访问全部组织并在侧栏切换组织路由。
 
 用户类型的 `participation` 与模块权限互相独立，包含 `members`、`morning`、`rules`、`thanks` 四个布尔值。例如拥有红黑榜查看权限，并不代表账号必须进入积分名单。类型更新和早例会编辑使用版本号防止覆盖其他管理员或成员刚提交的修改。
 
@@ -79,7 +89,7 @@ SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<
 | DELETE | `/api/team-replies/{id}` | 回复作者或管理员软删除回复 |
 | POST | `/api/team-replies/{id}/reactions` | 对回复添加或取消 Emoji 回应 |
 
-主题列表只返回未删除数据。主题删除后，其回复和回应随主题隐藏；管理员从回收站恢复主题时，原回复与回应一并恢复。所有分类、置顶和删除权限必须由服务端校验，不能依赖前端按钮是否可见。
+主题列表只返回未删除数据。上级组织的 `announcement` 主题向下级只读透传，下级成员可回复和回应，但不能编辑、删除或置顶原公告；普通主题不跨组织透传。主题删除后，其回复和回应随主题隐藏；管理员从回收站恢复主题时，原回复与回应一并恢复。所有分类、置顶和删除权限必须由服务端校验，不能依赖前端按钮是否可见。
 | POST | `/api/team-replies/{id}/reactions` | 对楼中回复添加/取消回应 |
 | DELETE | `/api/team-replies/{id}` | 删除自己的回复及子回复 |
 
@@ -117,7 +127,7 @@ SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<
 | POST | `/api/meeting-items/{id}/carry-forward` | 顺延到下一场可用会议 |
 | POST | `/api/meetings/{id}/attendance` | 更新单人成员签到 |
 
-会议阶段值：`draft`、`scheduled`、`in_progress`、`completed`、`archived`。后两种状态锁定议题和纪要。
+会议阶段值：`draft`、`scheduled`、`in_progress`、`completed`、`archived`。后两种状态锁定议题和纪要。查询会议时会包含祖先组织会议并返回 `inherited=true` 与 `org_unit_name`；所有会议写接口仍要求当前路由直接拥有该会议组织访问权。
 
 创建和更新会议可传 `start_time`，格式为 24 小时制 `HH:MM`。会议纪要邮件是否附带 Thank You 由前端生成时选择，不改变会议数据。
 
@@ -153,6 +163,8 @@ SSO 回调成功后跳转到 `/?sso=success`，失败时跳转到 `/?sso_error=<
 | GET | `/api/dashboards/thank-you` | 月度/年度 Thank You 排名 |
 
 批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。红黑榜和 Thank You 新增接口会校验目标账号是否处于对应业务参与名单。
+
+`GET /api/thank-you` 的候选人可覆盖同一根组织下的协作团队，并返回双方组织、`cross_team` 标识。动态记录在发送方范围、接收方范围和共同上级范围可见；`GET /api/dashboards/thank-you` 仍仅按接收方组织统计排名。
 
 `GET /api/scores` 支持 `from`、`to` 和 `user_id`。`red_black_show_black_points` 与 `red_black_show_black_details` 为管理员维护的布尔系统配置；普通用户的年度汇总和明细会在服务端按配置裁剪，管理员始终获得完整数据。
 

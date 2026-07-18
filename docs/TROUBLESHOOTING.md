@@ -63,6 +63,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 4. 管理员切换到用户视图进行复现；
 5. 确认前端和后端都已注册新模块权限。
 
+## 下级团队看不到上级安排或看到了无关数据
+
+- 只有会议和“团队公告”会从上级向下级透传，普通讨论、早例会、排班和积分不会透传；
+- 确认当前侧栏团队路径正确，上级记录确实创建在祖先组织；
+- 透传记录应显示“上级安排/上级团队”，并且下级只能查看；
+- 跨团队 Thank You 只在发送方、接收方和共同上级显示，无关兄弟团队看不到；排名只归接收方；
+- 修改组织范围后运行 `python scripts\organization_scope_smoke_test.py`，检查是否有自定义查询绕过统一组织过滤。
+
 ## Outlook 邮件没有套用模板
 
 系统通过 `mailto:` 唤起默认邮件客户端，并将 HTML 纪要复制到剪贴板。新版 Outlook 对 `mailto:` 正文和 HTML 支持有限，因此推荐：
@@ -89,3 +97,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 ## 数据误删
 
 先到系统管理的回收站恢复。用户、链接、会议议题和团队回复等主要对象采用软删除。只有管理员执行“永久删除”后才不能从回收站恢复，此时需要从数据库备份恢复。
+
+## 公共域名与 Nginx
+
+- 域名无法访问：确认 DNS 已生效、公网入口存在、网关端口映射正确，并且 Windows 防火墙只放行 80/443；
+- Nginx 返回 `502 Bad Gateway`：先在服务器本机打开 `http://127.0.0.1:8000/api/health`，再确认 Nginx `UpstreamPort` 与正式端口一致；
+- Nginx 启动后立即退出：执行 `scripts\nginx_proxy.ps1 -Action Reload` 或直接运行 `nginx.exe -t`，查看 `logs/team-loop-error.log`；
+- 浏览器提示证书不可信：必须使用与公共域名匹配的完整证书链，不能把自签名证书用于普通用户访问；
+- SSO 回调后跳转失败：身份平台和系统配置中的回调必须完全等于 `https://域名/api/sso/callback`；
+- 会话 IP 全是 `127.0.0.1`：确认 Team Loop 进程启动前设置了 `TEAM_LOOP_TRUST_PROXY=1`，并确认后端仅监听 `127.0.0.1`；
+- 登录 Cookie 没有 `Secure`：检查 Nginx 是否发送 `X-Forwarded-Proto https`，以及 Team Loop 是否启用了可信代理；
+- HTTPS 出现重定向循环：不要在其他上游代理中把 HTTPS 请求错误标记为 HTTP，检查每一层 `X-Forwarded-Proto`。

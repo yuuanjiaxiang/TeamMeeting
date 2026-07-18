@@ -82,9 +82,14 @@ def main():
         ).fetchone()
         if not user_type:
             raise RuntimeError("No assignable user type exists in gray database")
+        root_org = conn.execute(
+            "SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1"
+        ).fetchone()
+        if not root_org:
+            raise RuntimeError("No active root organization exists in gray database")
         cursor = conn.execute(
-            "INSERT INTO users(username,salt,password_hash,display_name,role,user_type,active,created_at) VALUES(?,?,?,?,?,?,1,datetime('now'))",
-            (username, salt, password_hash(password, salt), "安全测试管理员", "admin", user_type["key"]),
+            "INSERT INTO users(username,salt,password_hash,display_name,role,user_type,org_unit_id,active,created_at) VALUES(?,?,?,?,?,?,?,1,datetime('now'))",
+            (username, salt, password_hash(password, salt), "安全测试管理员", "admin", user_type["key"], root_org["id"]),
         )
         user_id = cursor.lastrowid
         conn.commit()
@@ -116,6 +121,7 @@ def main():
             "password": password,
             "role": "user",
             "user_type": user_type["key"],
+            "org_unit_id": root_org["id"],
         })
         member_user = next(item for item in created_user_data["users"] if item["username"] == member_username)
         member_user_id = member_user["id"]

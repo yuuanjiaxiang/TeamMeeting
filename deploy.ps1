@@ -2,7 +2,7 @@
 param(
     [ValidateSet("Gray", "Promote", "StartProduction", "Rollback", "StopGray", "StopProduction", "Status")]
     [string]$Action = "Status",
-    [string]$HostAddress = "0.0.0.0",
+    [string]$HostAddress = "127.0.0.1",
     [int]$ProductionPort = 8000,
     [int]$GrayPort = 8001,
     [string]$PythonPath = "python"

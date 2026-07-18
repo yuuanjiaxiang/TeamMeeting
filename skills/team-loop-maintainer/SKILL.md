@@ -43,6 +43,8 @@ Use these references conditionally:
 - Register new modules in `MODULE_CATALOG`, initial permissions, `module_for_path()`, frontend `pages`, and loaders.
 - Treat user types as administrator-defined data. Never branch business behavior on a display name or assume fixed internal/partner type keys.
 - Keep module permissions separate from business participation scopes (`members`, `morning`, `rules`, `thanks`); enforce both in backend queries and writes.
+- Keep organization visibility separate from user-type permissions. Resolve `/org/...` through `organization_context()`, treat `X-Team-Org-Path` as an untrusted selection, and scope every people-centered read and write on the server.
+- Separate direct visibility, inherited ancestors, and same-root collaboration. Only meetings and announcement topics inherit downward, inherited records stay read-only, and cross-team Thank You activity is visible to sender, receiver, and common ancestors while rankings belong to the receiver scope.
 - Test admin view, admin user view, at least two custom user types, and the dynamic guest template when the change affects access.
 
 ### Backend and data
@@ -57,7 +59,8 @@ Use these references conditionally:
 ### Cross-module behavior
 
 - Keep users and member profiles consistent.
-- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, prevent auto-login redirect loops, and validate SSO with the isolated PKCE smoke test.
+- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, map the deepest configured SSO group to an organization route, preserve an existing organization when no group matches, prevent auto-login redirect loops, and validate SSO with the isolated PKCE smoke test.
+- Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; HTTPS proxy requests must issue Secure cookies.
 - Keep workbench and morning-meeting data synchronized.
 - Keep shared date filters initialized to the current month without page-specific overrides.
 - Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.
@@ -75,9 +78,11 @@ Use these references conditionally:
 Run at minimum:
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\organization_scope_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python scripts\organization_scope_smoke_test.py
 python scripts\sso_smoke_test.py
 python scripts\forum_smoke_test.py
+python scripts\proxy_smoke_test.py
 node --check static\app.js
 git diff --check
 ```

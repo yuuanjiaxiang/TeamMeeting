@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260716-agenda-list-v10" />
+    <link rel="stylesheet" href="/style.css?v=20260718-org-propagation-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -15,6 +15,11 @@
             <strong id="brandName">Team Loop</strong>
             <span id="brandTeam">技术项目团队</span>
           </div>
+        </div>
+        <div id="orgSwitcher" class="org-switcher hidden">
+          <span>当前团队</span>
+          <strong id="orgCurrentPath"></strong>
+          <select id="orgRouteSelect" aria-label="切换团队"></select>
         </div>
         <nav id="nav"></nav>
         <div class="user-box">
@@ -130,12 +135,45 @@
                 <label>登录账号<input name="username" required /></label>
                 <label>工号（SSO 关联）<input name="employee_id" required /></label>
                 <label>姓名<input name="display_name" required /></label>
+                <label>所属团队<select name="org_unit_id" required></select></label>
                 <label>用户类型<select name="user_type" required></select></label>
                 <label>授权方式<select name="role"><option value="user">按类型授权</option><option value="admin">系统管理员</option></select></label>
                 <label>重置密码<input name="password" type="password" placeholder="不修改则留空" /></label>
                 <div class="modal-actions">
                   <button class="secondary" type="button" data-user-account-modal-close>取消</button>
                   <button type="submit">保存账号</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="orgUnitModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="orgUnitModalTitle" aria-hidden="true">
+            <div class="modal-card org-unit-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="orgUnitModalTitle">新增团队</h2>
+                  <p>配置组织层级、独立路由、数据范围和 SSO 群组映射。</p>
+                </div>
+                <button class="modal-close" type="button" data-org-unit-modal-close aria-label="关闭">×</button>
+              </div>
+              <form id="orgUnitForm" class="org-unit-form">
+                <input name="id" type="hidden" />
+                <label>团队名称<input name="name" maxlength="60" placeholder="例如：MO" required /></label>
+                <label>路由标识<input name="slug" maxlength="48" placeholder="例如：mo" required /></label>
+                <label>上级团队<select name="parent_id"></select></label>
+                <label>数据可见范围
+                  <select name="visibility_mode">
+                    <option value="unit">仅当前团队</option>
+                    <option value="subtree">当前团队及全部下级</option>
+                    <option value="all">全部团队</option>
+                  </select>
+                </label>
+                <label>SSO 默认用户类型<select name="default_user_type"></select></label>
+                <label>排序<input name="sort_order" type="number" value="0" /></label>
+                <label class="org-groups-field">SSO 群组映射<textarea name="sso_groups" rows="3" placeholder="每行或逗号分隔，例如：ESS-MO、CN-MO-Team"></textarea><small>登录返回任一群组匹配时，自动关联到该团队；优先匹配最深层级。</small></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-org-unit-modal-close>取消</button>
+                  <button type="submit">保存团队</button>
                 </div>
               </form>
             </div>
@@ -931,6 +969,16 @@
             <section class="panel admin-only">
               <div class="panel-title">
                 <div>
+                  <h2>团队层级</h2>
+                  <p>维护组织树、独立路由和 SSO 群组映射；成员数据会按当前团队范围统计。</p>
+                </div>
+                <button id="orgUnitCreateBtn" type="button">新增团队</button>
+              </div>
+              <div id="orgUnitList" class="org-unit-list"></div>
+            </section>
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
                   <h2>用户类型与权限</h2>
                   <p>页面只保留类型概览；点击配置后设置模块权限、业务参与名单并评估影响。</p>
                 </div>
@@ -947,22 +995,53 @@
               <div class="panel-title">
                 <div>
                   <h2>账号管理</h2>
-                  <p>新增账号必须指定用户类型；可勾选多个账号后批量调整类型。</p>
+                  <p>新增账号必须指定用户类型；支持按账号信息筛选并批量调整或删除。</p>
                 </div>
               </div>
               <form id="userForm" class="user-create-form">
                 <input name="username" placeholder="登录账号" required />
                 <input name="employee_id" placeholder="工号（默认与账号相同）" />
                 <input name="display_name" placeholder="姓名" required />
+                <select name="org_unit_id" data-org-units required></select>
                 <select name="user_type" data-user-types required></select>
                 <select name="role"><option value="user">按用户类型授权</option><option value="admin">系统管理员</option></select>
                 <input name="password" placeholder="初始密码，默认 123456" />
                 <button>新增用户</button>
               </form>
+              <div class="user-management-filters" aria-label="账号筛选">
+                <label class="user-search-field">
+                  <span>搜索账号</span>
+                  <input id="userSearchInput" type="search" placeholder="账号、工号或姓名" autocomplete="off" />
+                </label>
+                <label>
+                  <span>所属团队</span>
+                  <select id="userOrgFilter"><option value="">全部团队</option></select>
+                </label>
+                <label>
+                  <span>用户类型</span>
+                  <select id="userTypeFilter"><option value="">全部类型</option></select>
+                </label>
+                <label>
+                  <span>授权方式</span>
+                  <select id="userAuthFilter">
+                    <option value="">全部方式</option>
+                    <option value="admin">系统管理员</option>
+                    <option value="sso">企业 SSO</option>
+                    <option value="local">系统账号</option>
+                  </select>
+                </label>
+                <span id="userFilterResult" class="user-filter-result" aria-live="polite"></span>
+              </div>
               <div id="userBulkToolbar" class="user-bulk-toolbar hidden">
                 <strong><span id="userBulkCount">0</span> 个账号已选择</strong>
-                <select id="userBulkType" aria-label="批量设置用户类型"></select>
-                <button id="userBulkApplyBtn" type="button">批量设置类型</button>
+                <select id="userBulkAction" aria-label="选择批量操作">
+                  <option value="">选择批量操作</option>
+                  <option value="type">设置用户类型</option>
+                  <option value="org">调整所属团队</option>
+                  <option value="delete">删除账号</option>
+                </select>
+                <select id="userBulkTarget" class="hidden" aria-label="选择批量操作目标"></select>
+                <button id="userBulkExecuteBtn" type="button" disabled>应用</button>
                 <button id="userBulkClearBtn" class="secondary" type="button">取消选择</button>
               </div>
               <div id="userList" class="table"></div>
@@ -1018,6 +1097,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260716-agenda-list-v10"></script>
+    <script type="module" src="/app.js?v=20260718-org-propagation-v1"></script>
   </body>
 </html>
