@@ -58,6 +58,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - 登录后回到系统账号页：页面会在 SSO 失败后主动停止循环跳转，先查看页面错误提示和服务日志，修复后点击“企业 SSO 登录”重试；
 - 提示工号缺失或关联冲突：核对“SSO 工号字段”和 UserInfo 返回值，并在“用户管理”确认工号唯一；
 - 首次 SSO 登录后只有只读权限：这是待分类保护；管理员在“用户管理”筛选“访客 / 待分类”，为账号单个或批量分配正式类型；
+- OneAccess 群组已经变化但账号团队没变：这是平滑保护；用户管理中会显示“SSO 建议团队”，由管理员确认后生效，登录本身不会自动搬迁账号和历史数据；
+- 调整团队后看不到旧讨论或会议：先在灰度数据库运行 `python scripts\migrate_org_data.py --database <db> --source <旧组织> --follow-current-users` 预览，再使用 `--apply`；不要直接手改生产数据库；
 - 其他电脑可打开页面但不能 SSO：不要使用局域网 HTTP 地址作为正式回调，应通过 HTTPS 域名和反向代理访问；
 - Windows 运行时出现 TLS/OpenSSL 错误：改用系统安装的 Python 3.10+ 启动，并确认 `python -c "import ssl; print(ssl.OPENSSL_VERSION)"` 正常。
 4. 管理员切换到用户视图进行复现；

@@ -26,7 +26,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `users` | 账号、姓名、角色、用户类型、密码哈希、认证来源、企业身份标识和启用状态 |
+| `users` | 账号、姓名、角色、用户类型、密码哈希、认证来源、企业身份标识、SSO 建议组织和启用状态 |
 | `org_units` | 可配置组织树、路由标识、可见范围、默认用户类型与 SSO 群组映射 |
 | `user_types` | 管理员自定义的用户类型、版本号、四类业务参与开关，以及保留的 `guest` 访客模板 |
 | `module_permissions` | 用户类型对模块的查看、新增、修改、删除权限 |
@@ -37,9 +37,11 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 `users.user_type` 必须指向一个启用的用户类型。系统账号由管理员直接分配非访客类型；SSO 自动创建的账号暂时使用 `guest`，并将 `users.classification_pending=1`。管理员单个或批量分配正式类型后，该标志自动清零。删除类型采用停用方式，且仅在没有有效用户引用时允许执行。`guest` 同时代表未登录访问与待分类 SSO 账号，服务端会强制其所有写权限和业务参与开关为关闭。
 
-`users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`sso_login_states` 只保存短期登录事务，成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
+`users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`suggested_org_unit_id` 保存最近一次 SSO 群组匹配出的建议组织，`sso_groups_json` 和 `sso_last_login_at` 用于管理员核对映射来源；登录本身不会修改现有 `org_unit_id`。管理员确认所属团队后清空建议字段。`sso_login_states` 只保存短期登录事务，成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
 
 `users.org_unit_id` 指向账号所属组织。`org_units.parent_id` 构成树，兄弟节点的 `slug` 唯一，完整路由由祖先 slug 组合生成。`visibility_mode` 为 `all/subtree/unit`；`sso_groups` 保存 JSON 数组。`team_posts.org_unit_id` 和 `meetings.org_unit_id` 记录内容创建时的组织上下文：会议和公告可向后代组织只读透传，写入仍以原组织为准。其余以用户为主体的数据通过关联用户组织过滤。`thank_you_votes` 同时关联发送人和接收人，用于计算跨团队动态可见范围；排名归属始终取接收人组织。
+
+组织调整不会隐式修改历史事实。需要将旧组织下的讨论或会议迁入新组织时，使用 `scripts/migrate_org_data.py`；脚本默认只预览，执行前创建 SQLite 备份，并记录逐行迁移清单供回滚。
 
 `user_types.include_in_members/include_in_morning/include_in_rules/include_in_thanks` 控制当前名单展示与新业务数据写入，不删除历史事实。`user_types.version` 和 `morning_items.version` 用于乐观并发控制，更新语句必须同时匹配客户端读取到的版本号。
 

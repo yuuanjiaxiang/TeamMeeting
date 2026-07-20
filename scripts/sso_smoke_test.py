@@ -121,7 +121,9 @@ def main():
                 }
                 for key, value in values.items():
                     conn.execute("UPDATE system_settings SET value=? WHERE key=?", (value, key))
-                conn.execute("UPDATE users SET employee_id='E10086' WHERE username='user'")
+                conn.execute(
+                    "UPDATE users SET employee_id='E10086', org_unit_id=(SELECT id FROM org_units WHERE name='MO') WHERE username='user'"
+                )
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='MO'", (json.dumps(["SMOKE-MO"]),))
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='WS'", (json.dumps(["SMOKE-WS"]),))
 
@@ -166,14 +168,14 @@ def main():
             if employee_count != 1:
                 raise RuntimeError("SSO employee matching created a duplicate user")
 
-            FakeOAuth2Handler.groups = ["UNMAPPED-GROUP"]
+            FakeOAuth2Handler.groups = ["SMOKE-WS"]
             preserve_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             with preserve_opener.open(f"{app_url}/api/sso/login", timeout=15):
                 pass
             with preserve_opener.open(f"{app_url}/api/me", timeout=15) as response:
                 preserved = (json.load(response).get("user") or {})
-            if preserved.get("org_unit_name") != "MO":
-                raise RuntimeError(f"Unmapped SSO group changed the existing organization: {preserved}")
+            if preserved.get("org_unit_name") != "MO" or preserved.get("suggested_org_unit_name") != "WS":
+                raise RuntimeError(f"SSO group change was not held for administrator approval: {preserved}")
 
             FakeOAuth2Handler.employee_id = "E20002"
             FakeOAuth2Handler.subject = "smoke-subject-new"
@@ -189,7 +191,8 @@ def main():
             if (
                 provisioned.get("username") != "E20002"
                 or provisioned.get("employee_id") != "E20002"
-                or provisioned.get("org_unit_name") != "WS"
+                or provisioned.get("org_unit_name") != "ESS"
+                or provisioned.get("suggested_org_unit_name") != "WS"
                 or provisioned.get("user_type") != app.GUEST_USER_TYPE_KEY
                 or not provisioned.get("classification_pending")
             ):
@@ -209,7 +212,19 @@ def main():
                 classified = (json.load(response).get("user") or {})
             if classified.get("user_type") != app.DEFAULT_USER_TYPE_KEY or classified.get("classification_pending"):
                 raise RuntimeError(f"Administrator classification did not activate the SSO account: {classified}")
-            print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "pkce": "S256"}, ensure_ascii=False))
+            assign_org_request = Request(
+                f"{app_url}/api/users/bulk-suggested-org",
+                data=json.dumps({"user_ids": [provisioned["id"]]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="PATCH",
+            )
+            with admin_opener.open(assign_org_request, timeout=15):
+                pass
+            with provision_opener.open(f"{app_url}/api/me", timeout=15) as response:
+                assigned = (json.load(response).get("user") or {})
+            if assigned.get("org_unit_name") != "WS" or assigned.get("suggested_org_unit_id"):
+                raise RuntimeError(f"Administrator could not adopt the suggested organization: {assigned}")
+            print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "org_approved": True, "pkce": "S256"}, ensure_ascii=False))
         finally:
             app_server.shutdown()
             oidc_server.shutdown()

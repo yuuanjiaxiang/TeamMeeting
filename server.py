@@ -1443,6 +1443,9 @@ def init_db():
         ensure_column(conn, "users", "employee_id", "TEXT")
         ensure_column(conn, "users", "org_unit_id", "INTEGER")
         ensure_column(conn, "users", "classification_pending", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "users", "suggested_org_unit_id", "INTEGER")
+        ensure_column(conn, "users", "sso_groups_json", "TEXT NOT NULL DEFAULT '[]'")
+        ensure_column(conn, "users", "sso_last_login_at", "TEXT")
         ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
@@ -1955,7 +1958,8 @@ class Handler(BaseHTTPRequestHandler):
                 user = conn.execute(
                     """
                     SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
-                           u.classification_pending,
+                           u.classification_pending, u.suggested_org_unit_id,
+                           suggested_org.name AS suggested_org_unit_name,
                            t.name AS user_type_name,
                            u.org_unit_id, o.name AS org_unit_name, o.slug AS org_unit_slug,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
@@ -1966,6 +1970,7 @@ class Handler(BaseHTTPRequestHandler):
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
                     LEFT JOIN org_units o ON o.id = u.org_unit_id
+                    LEFT JOIN org_units suggested_org ON suggested_org.id = u.suggested_org_unit_id
                     WHERE u.id=? AND u.active=1
                     """,
                     (session["user_id"],),
@@ -2147,6 +2152,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.bulk_update_user_type(user)
         if path == "/api/users/bulk-org" and method == "PATCH":
             return self.bulk_update_user_org(user)
+        if path == "/api/users/bulk-suggested-org" and method == "PATCH":
+            return self.bulk_apply_suggested_org(user)
         if path == "/api/users/bulk-delete" and method == "DELETE":
             return self.bulk_delete_users(user)
         if len(parts) == 3 and parts[:2] == ["api", "users"] and method == "PATCH":
@@ -2368,6 +2375,7 @@ class Handler(BaseHTTPRequestHandler):
             "org_unit_id", "org_unit_name", "org_unit_slug",
             "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
             "active", "created_at", "auth_source", "classification_pending",
+            "suggested_org_unit_id", "suggested_org_unit_name",
         )
         safe_user = {key: user_data.get(key) for key in safe_keys if key in user_data}
         write_audit(conn, safe_user, action, "session", safe_user["id"], summary, metadata or {}, self.client_address[0])
@@ -2476,18 +2484,22 @@ class Handler(BaseHTTPRequestHandler):
                 (unit for unit in organization_rows(conn) if not unit.get("parent_id")),
                 None,
             )
-            provision_org = matched_org or root_org
+            # SSO groups are an administrator-facing placement suggestion. New accounts
+            # remain at the root until an administrator confirms their team.
+            provision_org = root_org
             provision_org_id = provision_org["id"] if provision_org else None
             user = conn.execute(
                 """
                 SELECT u.*, t.name AS user_type_name,
                        o.name AS org_unit_name, o.slug AS org_unit_slug,
+                       suggested_org.name AS suggested_org_unit_name,
                        COALESCE(t.include_in_members, 1) AS eligible_members,
                        COALESCE(t.include_in_morning, 1) AS eligible_morning,
                        COALESCE(t.include_in_rules, 1) AS eligible_rules,
                        COALESCE(t.include_in_thanks, 1) AS eligible_thanks
                 FROM users u LEFT JOIN user_types t ON t.key=u.user_type
                 LEFT JOIN org_units o ON o.id=u.org_unit_id
+                LEFT JOIN org_units suggested_org ON suggested_org.id=u.suggested_org_unit_id
                 WHERE u.auth_source IN ('oidc', 'oauth2') AND u.external_subject=?
                 """,
                 (identity,),
@@ -2505,8 +2517,8 @@ class Handler(BaseHTTPRequestHandler):
                     if existing["external_subject"] and existing["external_subject"] != identity:
                         raise AppError(409, "该系统账号已绑定其他企业身份")
                     conn.execute(
-                        "UPDATE users SET auth_source=?, external_subject=?, employee_id=?, org_unit_id=COALESCE(?, org_unit_id) WHERE id=?",
-                        (auth_source, identity, employee_id, matched_org_id, existing["id"]),
+                        "UPDATE users SET auth_source=?, external_subject=?, employee_id=? WHERE id=?",
+                        (auth_source, identity, employee_id, existing["id"]),
                     )
                     linked_existing = True
                     user_id = existing["id"]
@@ -2522,10 +2534,18 @@ class Handler(BaseHTTPRequestHandler):
                     salt, password_hash = make_hash(secrets.token_urlsafe(48))
                     cursor = conn.execute(
                         """
-                        INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, active, created_at, auth_source, external_subject, classification_pending)
-                        VALUES(?,?,?,?,?,?,?,?,1,?,?,?,1)
+                        INSERT INTO users(
+                            username, employee_id, salt, password_hash, display_name, role, user_type,
+                            org_unit_id, active, created_at, auth_source, external_subject,
+                            classification_pending, suggested_org_unit_id, sso_groups_json, sso_last_login_at
+                        )
+                        VALUES(?,?,?,?,?,?,?,?,1,?,?,?,1,?,?,?)
                         """,
-                        (username, employee_id, salt, password_hash, display_name, "user", user_type["key"], provision_org_id, now_iso(), auth_source, identity),
+                        (
+                            username, employee_id, salt, password_hash, display_name, "user", user_type["key"],
+                            provision_org_id, now_iso(), auth_source, identity, matched_org_id,
+                            json.dumps(sso_groups, ensure_ascii=False), now.isoformat(),
+                        ),
                     )
                     user_id = cursor.lastrowid
                     created = True
@@ -2550,22 +2570,37 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if duplicate:
                     raise AppError(409, "该工号已关联其他系统用户，请联系管理员处理")
-                conn.execute("UPDATE users SET employee_id=?, auth_source=?, org_unit_id=COALESCE(?, org_unit_id) WHERE id=?", (employee_id, auth_source, matched_org_id, user["id"]))
+                conn.execute("UPDATE users SET employee_id=?, auth_source=? WHERE id=?", (employee_id, auth_source, user["id"]))
                 user = dict(user)
                 user["employee_id"] = employee_id
                 user["auth_source"] = auth_source
-                if matched_org:
-                    user["org_unit_id"] = matched_org["id"]
-                    user["org_unit_name"] = matched_org["name"]
-                    user["org_unit_slug"] = matched_org["slug"]
-            if matched_org and user and user["org_unit_id"] != matched_org["id"]:
-                conn.execute("UPDATE users SET org_unit_id=? WHERE id=?", (matched_org["id"], user["id"]))
-                user = dict(user)
-                user["org_unit_id"] = matched_org["id"]
-                user["org_unit_name"] = matched_org["name"]
-                user["org_unit_slug"] = matched_org["slug"]
             if not user or not user["active"]:
                 raise AppError(403, "企业账号对应的系统用户不可用")
+            suggested_org_id = matched_org_id if matched_org_id and matched_org_id != user["org_unit_id"] else None
+            conn.execute(
+                """
+                UPDATE users
+                SET suggested_org_unit_id=?, sso_groups_json=?, sso_last_login_at=?
+                WHERE id=?
+                """,
+                (suggested_org_id, json.dumps(sso_groups, ensure_ascii=False), now.isoformat(), user["id"]),
+            )
+            user = conn.execute(
+                """
+                SELECT u.*, t.name AS user_type_name,
+                       o.name AS org_unit_name, o.slug AS org_unit_slug,
+                       suggested_org.name AS suggested_org_unit_name,
+                       COALESCE(t.include_in_members, 1) AS eligible_members,
+                       COALESCE(t.include_in_morning, 1) AS eligible_morning,
+                       COALESCE(t.include_in_rules, 1) AS eligible_rules,
+                       COALESCE(t.include_in_thanks, 1) AS eligible_thanks
+                FROM users u LEFT JOIN user_types t ON t.key=u.user_type
+                LEFT JOIN org_units o ON o.id=u.org_unit_id
+                LEFT JOIN org_units suggested_org ON suggested_org.id=u.suggested_org_unit_id
+                WHERE u.id=? AND u.active=1
+                """,
+                (user["id"],),
+            ).fetchone()
             safe_user, cookie = self.issue_session(
                 conn,
                 user,
@@ -2602,6 +2637,7 @@ class Handler(BaseHTTPRequestHandler):
                 """
                 SELECT u.*, t.name AS user_type_name,
                        o.name AS org_unit_name, o.slug AS org_unit_slug,
+                       suggested_org.name AS suggested_org_unit_name,
                        COALESCE(t.include_in_members, 1) AS eligible_members,
                        COALESCE(t.include_in_morning, 1) AS eligible_morning,
                        COALESCE(t.include_in_rules, 1) AS eligible_rules,
@@ -2609,6 +2645,7 @@ class Handler(BaseHTTPRequestHandler):
                 FROM users u
                 LEFT JOIN user_types t ON t.key = u.user_type
                 LEFT JOIN org_units o ON o.id=u.org_unit_id
+                LEFT JOIN org_units suggested_org ON suggested_org.id=u.suggested_org_unit_id
                 WHERE LOWER(u.username)=LOWER(?) AND u.active=1
                 """,
                 (username,),
@@ -2658,6 +2695,7 @@ class Handler(BaseHTTPRequestHandler):
                     "org_unit_id", "org_unit_name", "org_unit_slug",
                     "eligible_members", "eligible_morning", "eligible_rules", "eligible_thanks",
                     "active", "created_at", "auth_source", "classification_pending",
+                    "suggested_org_unit_id", "suggested_org_unit_name",
                 )
             }
             write_audit(conn, safe_user, "auth.login", "session", safe_user["id"], "用户登录", {}, self.client_address[0])
@@ -3231,11 +3269,12 @@ class Handler(BaseHTTPRequestHandler):
     def list_users(self):
         self.require_admin()
         with connect() as conn:
-            return rows_to_list(
+            users = rows_to_list(
                 conn.execute(
                     """
                     SELECT u.id, u.username, u.employee_id, u.display_name, u.role, u.user_type, u.auth_source,
-                           u.classification_pending,
+                           u.classification_pending, u.suggested_org_unit_id, u.sso_groups_json, u.sso_last_login_at,
+                           suggested_org.name AS suggested_org_unit_name,
                            COALESCE(t.name, u.user_type) AS user_type_name,
                            COALESCE(t.include_in_members, 1) AS eligible_members,
                            COALESCE(t.include_in_morning, 1) AS eligible_morning,
@@ -3246,11 +3285,20 @@ class Handler(BaseHTTPRequestHandler):
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
                     LEFT JOIN org_units o ON o.id=u.org_unit_id
+                    LEFT JOIN org_units suggested_org ON suggested_org.id=u.suggested_org_unit_id
                     WHERE u.active=1
                     ORDER BY u.id
                     """
                 ).fetchall()
             )
+        for user in users:
+            try:
+                groups = json.loads(user.get("sso_groups_json") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                groups = []
+            user["sso_groups"] = [str(group).strip() for group in groups if str(group).strip()]
+            user.pop("sso_groups_json", None)
+        return users
 
     def list_participating_users(self, scope, viewer=None, collaboration=False):
         if scope not in PARTICIPATION_SCOPES:
@@ -3356,9 +3404,72 @@ class Handler(BaseHTTPRequestHandler):
             count = conn.execute(f"SELECT COUNT(*) FROM users WHERE id IN ({placeholders}) AND active=1", user_ids).fetchone()[0]
             if count != len(user_ids):
                 raise AppError(400, "部分账号不存在或已停用")
-            conn.execute(f"UPDATE users SET org_unit_id=? WHERE id IN ({placeholders})", [org_unit_id, *user_ids])
+            conn.execute(
+                f"UPDATE users SET org_unit_id=?, suggested_org_unit_id=NULL WHERE id IN ({placeholders})",
+                [org_unit_id, *user_ids],
+            )
             write_audit(conn, admin, "user.bulk_org", "user", None, "批量调整所属团队", {"user_ids": user_ids, "org_unit_id": org_unit_id, "org_unit_name": unit["name"]}, self.client_address[0])
         return {"message": f"已调整 {len(user_ids)} 个账号所属团队", "users": self.list_users()}
+
+    def bulk_apply_suggested_org(self, admin):
+        self.require_admin()
+        data = read_json(self)
+        raw_ids = data.get("user_ids") or []
+        try:
+            user_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+        except (TypeError, ValueError):
+            raise AppError(400, "用户参数不正确")
+        if not user_ids:
+            raise AppError(400, "请至少选择一个账号")
+        if len(user_ids) > 200:
+            raise AppError(400, "单次最多调整 200 个账号")
+        placeholders = ",".join("?" for _ in user_ids)
+        with connect() as conn:
+            assignments = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.id, u.display_name, u.suggested_org_unit_id, o.name AS suggested_org_name
+                    FROM users u
+                    JOIN org_units o ON o.id=u.suggested_org_unit_id AND o.active=1
+                    WHERE u.active=1 AND u.id IN ({placeholders})
+                    """,
+                    user_ids,
+                ).fetchall()
+            )
+            if not assignments:
+                raise AppError(400, "所选账号没有可采用的 SSO 建议团队")
+            for assignment in assignments:
+                conn.execute(
+                    "UPDATE users SET org_unit_id=?, suggested_org_unit_id=NULL WHERE id=?",
+                    (assignment["suggested_org_unit_id"], assignment["id"]),
+                )
+            write_audit(
+                conn,
+                admin,
+                "user.bulk_suggested_org",
+                "user",
+                None,
+                "批量采用 SSO 建议团队",
+                {
+                    "assignments": [
+                        {
+                            "user_id": item["id"],
+                            "display_name": item["display_name"],
+                            "org_unit_id": item["suggested_org_unit_id"],
+                            "org_unit_name": item["suggested_org_name"],
+                        }
+                        for item in assignments
+                    ],
+                    "skipped_user_ids": [user_id for user_id in user_ids if user_id not in {item["id"] for item in assignments}],
+                },
+                self.client_address[0],
+            )
+        return {
+            "message": f"已采用 {len(assignments)} 个账号的 SSO 建议团队",
+            "applied": len(assignments),
+            "skipped": len(user_ids) - len(assignments),
+            "users": self.list_users(),
+        }
 
     def bulk_delete_users(self, admin):
         self.require_admin()
@@ -3505,6 +3616,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise AppError(400, "所属团队参数不正确")
                 if not conn.execute("SELECT id FROM org_units WHERE id=? AND active=1", (org_unit_id,)).fetchone():
                     raise AppError(400, "所属团队不存在")
+                current_org = conn.execute("SELECT org_unit_id FROM users WHERE id=?", (user_id,)).fetchone()
+                if current_org and current_org["org_unit_id"] != org_unit_id:
+                    fields.append("suggested_org_unit_id=NULL")
             conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
             sync_member_for_user(conn, user_id)
             write_audit(conn, admin, "user.update", "user", user_id, "用户已更新", {"fields": list(data.keys())}, self.client_address[0])

@@ -60,7 +60,8 @@ Use these references conditionally:
 ### Cross-module behavior
 
 - Keep users and member profiles consistent.
-- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, map the deepest configured SSO group to an organization route, preserve an existing organization when no group matches, and auto-provision unknown identities only as `guest` accounts with `classification_pending=1` until an administrator assigns a type.
+- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, preserve the provider plus `sub` as the stable identity, map the deepest configured SSO group only into `suggested_org_unit_id`, and auto-provision unknown identities only as root-organization `guest` accounts with `classification_pending=1` until an administrator assigns a type and team. Never move an existing account or historical data during login.
+- Migrate organization-owned history only through `scripts/migrate_org_data.py`: preview first, back up before apply, keep the row manifest, and validate rollback on gray data before production.
 - Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; production must use `TEAM_LOOP_REQUIRE_HTTPS=1`, reject direct HTTP login and mutations, and issue Secure cookies for HTTPS proxy requests.
 - Keep workbench and morning-meeting data synchronized.
 - Keep shared date filters initialized to the current month without page-specific overrides.

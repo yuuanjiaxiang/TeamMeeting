@@ -151,6 +151,10 @@
                 <label>工号（SSO 关联）<input name="employee_id" required /></label>
                 <label>姓名<input name="display_name" required /></label>
                 <label>所属团队<select name="org_unit_id" required></select></label>
+                <div id="userSuggestedOrg" class="user-suggested-org hidden">
+                  <div><strong>SSO 建议团队</strong><span id="userSuggestedOrgName"></span></div>
+                  <button id="userUseSuggestedOrgBtn" class="secondary" type="button">采用建议</button>
+                </div>
                 <label>用户类型<select name="user_type" required></select></label>
                 <label>授权方式<select name="role"><option value="user">按类型授权</option><option value="admin">系统管理员</option></select></label>
                 <label>重置密码<input name="password" type="password" placeholder="不修改则留空" /></label>
@@ -185,7 +189,7 @@
                 </label>
                 <label>账号分类建议<select name="default_user_type"></select><small>仅供管理员分类时参考；SSO 新账号仍先使用访客只读权限。</small></label>
                 <label>排序<input name="sort_order" type="number" value="0" /></label>
-                <label class="org-groups-field">SSO 群组映射<textarea name="sso_groups" rows="3" placeholder="每行或逗号分隔，例如：ESS-MO、CN-MO-Team"></textarea><small>登录返回任一群组匹配时，自动关联到该团队；优先匹配最深层级。</small></label>
+                <label class="org-groups-field">SSO 群组映射<textarea name="sso_groups" rows="3" placeholder="每行或逗号分隔，例如：ESS-MO、CN-MO-Team"></textarea><small>登录返回任一群组匹配时生成团队建议；优先匹配最深层级，由管理员确认后生效。</small></label>
                 <div class="modal-actions">
                   <button class="secondary" type="button" data-org-unit-modal-close>取消</button>
                   <button type="submit">保存团队</button>
@@ -1053,6 +1057,7 @@
                   <option value="">选择批量操作</option>
                   <option value="type">设置用户类型</option>
                   <option value="org">调整所属团队</option>
+                  <option value="suggested-org">采用 SSO 建议团队</option>
                   <option value="delete">删除账号</option>
                 </select>
                 <select id="userBulkTarget" class="hidden" aria-label="选择批量操作目标"></select>

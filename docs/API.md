@@ -48,7 +48,7 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 }
 ```
 
-SSO 回调成功后按群组匹配到的组织跳转，例如 `/org/ess/mo/ws?sso=success`；失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。首次登录可自动建号，新账号返回 `classification_pending=1` 并使用 `guest` 只读权限；管理员通过 `PATCH /api/users/{id}` 或 `PATCH /api/users/bulk-type` 分配正式类型后解除待分类。`/api/me` 只公开 SSO 是否可用、是否自动登录、是否强制 HTTPS 及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
+SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?sso=success`；失败时跳转到 `/?sso_error=<可读原因>`。开启自动登录后，前端仅在一次页面会话中自动发起一次 SSO；失败、主动退出、访客浏览或选择系统账号都会停止自动跳转。首次登录可自动建号，新账号返回 `classification_pending=1` 并使用 `guest` 只读权限。SSO 群组匹配结果只写入 `suggested_org_unit_id`，不会在登录过程中直接迁移已有账号或历史数据；管理员确认用户类型和团队后才正式生效。`/api/me` 只公开 SSO 是否可用、是否自动登录、是否强制 HTTPS 及按钮文案，不返回任何端点、Issuer、Client ID 或 Client Secret。
 
 ## 3. 用户、成员与权限
 
@@ -58,6 +58,7 @@ SSO 回调成功后按群组匹配到的组织跳转，例如 `/org/ess/mo/ws?ss
 | PATCH/DELETE | `/api/users/{id}` | 修改或软删除用户 |
 | PATCH | `/api/users/bulk-type` | 将 `user_ids` 中的账号批量调整到指定 `user_type` |
 | PATCH | `/api/users/bulk-org` | 将 `user_ids` 中的账号批量调整到指定 `org_unit_id` |
+| PATCH | `/api/users/bulk-suggested-org` | 为 `user_ids` 中存在 SSO 团队建议的账号采用各自建议组织；没有建议的账号跳过 |
 | DELETE | `/api/users/bulk-delete` | 软删除 `user_ids` 中的账号，撤销登录会话并逐条写入回收站；禁止包含当前登录账号 |
 | GET | `/api/org-context` | 获取当前路由选择、可访问组织和可见组织范围 |
 | GET/POST | `/api/org-units` | 管理员查询或创建组织层级 |

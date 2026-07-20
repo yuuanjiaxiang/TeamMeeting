@@ -1742,7 +1742,14 @@ function filteredManagementUsers() {
   const filters = state.userFilters;
   const query = filters.query.trim().toLocaleLowerCase("zh-CN");
   return state.users.filter((user) => {
-    const searchable = [user.username, user.employee_id, user.display_name].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
+    const searchable = [
+      user.username,
+      user.employee_id,
+      user.display_name,
+      user.org_unit_name,
+      user.suggested_org_unit_name,
+      ...(user.sso_groups || []),
+    ].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
     return (!query || searchable.includes(query))
       && (!filters.org || String(user.org_unit_id || "") === filters.org)
       && (!filters.type || user.user_type === filters.type)
@@ -1783,7 +1790,7 @@ function renderUserTable(users) {
       <td class="user-select-col"><input class="user-bulk-checkbox" type="checkbox" value="${user.id}" aria-label="选择 ${escapeHtml(user.display_name)}" ${Number(user.id) === Number(state.user?.id) ? "disabled title=\"当前登录账号不能批量操作\"" : state.selectedUserIds.has(Number(user.id)) ? "checked" : ""}></td>
       <td><strong>${escapeHtml(user.username)}</strong><small>工号 ${escapeHtml(user.employee_id || user.username)}</small></td>
       <td>${escapeHtml(user.display_name)}</td>
-      <td><span class="pill org-pill">${escapeHtml(user.org_unit_name || "未分配")}</span></td>
+      <td><div class="user-org-assignment"><span class="pill org-pill">${escapeHtml(user.org_unit_name || "未分配")}</span>${user.suggested_org_unit_name ? `<small>SSO 建议 → ${escapeHtml(user.suggested_org_unit_name)}</small>` : ""}</div></td>
       <td>${user.classification_pending
         ? '<span class="pill user-pending-pill">待分类 · 访客权限</span>'
         : `<span class="pill">${escapeHtml(user.user_type_name || user.user_type)}</span>`}</td>
@@ -1850,6 +1857,12 @@ function openUserAccountModal(userId) {
   form.elements.display_name.value = user.display_name || "";
   form.elements.org_unit_id.innerHTML = renderOrgOptions(user.org_unit_id);
   form.elements.org_unit_id.value = user.org_unit_id || "";
+  const suggestion = $("#userSuggestedOrg");
+  const suggestionName = $("#userSuggestedOrgName");
+  const suggestionButton = $("#userUseSuggestedOrgBtn");
+  suggestion?.classList.toggle("hidden", !user.suggested_org_unit_id);
+  if (suggestionName) suggestionName.textContent = user.suggested_org_unit_name || "";
+  if (suggestionButton) suggestionButton.dataset.orgUnitId = user.suggested_org_unit_id || "";
   form.elements.user_type.innerHTML = renderUserTypeOptions(user.user_type);
   form.elements.user_type.value = user.user_type;
   form.elements.role.value = user.role || "user";
@@ -2150,7 +2163,7 @@ function renderSettings() {
     </div>
     <details class="settings-group" open>
       <summary>企业 SSO 登录</summary>
-      <p class="settings-group-note">推荐只填写 Issuer、Client ID、回调地址和工号字段；不支持 Discovery 的平台可切换为手动 OAuth2 端点。全程使用授权码 + PKCE。</p>
+      <p class="settings-group-note">推荐只填写 Issuer、Client ID、回调地址和工号字段；华为云 OneAccess 可选择手动 OAuth2，填入服务配置中的授权、Token、UserInfo 地址，并把 employee_id、name、groups 映射给应用。群组只生成建议团队，由管理员确认后生效。全程使用授权码 + PKCE。</p>
       <div class="settings-grid">${ssoSettings.map(renderSettingField).join("")}</div>
     </details>
     <button>保存系统配置</button>`;
@@ -5487,6 +5500,16 @@ function bindEvents() {
       closeUserAccountModal();
       return;
     }
+    const useSuggestedOrg = event.target.closest("#userUseSuggestedOrgBtn");
+    if (useSuggestedOrg) {
+      const suggestedOrgId = String(useSuggestedOrg.dataset.orgUnitId || "");
+      const form = $("#userAccountEditForm");
+      if (suggestedOrgId && form?.elements.org_unit_id) {
+        form.elements.org_unit_id.value = suggestedOrgId;
+        toast("已填入 SSO 建议团队，保存账号后生效");
+      }
+      return;
+    }
     if (event.target.closest("#userBulkClearBtn")) {
       clearUserBulkSelection();
       return;
@@ -5512,6 +5535,12 @@ function bindEvents() {
         confirmMessage = `确定将 ${userIds.length} 个账号批量调整到“${target?.name || "目标团队"}”吗？`;
         successMessage = `已批量调整 ${userIds.length} 个账号的所属团队`;
         request = () => api("/api/users/bulk-org", { method: "PATCH", body: JSON.stringify({ user_ids: userIds, org_unit_id: orgUnitId }) });
+      } else if (action === "suggested-org") {
+        const suggestedCount = userIds.filter((id) => state.users.find((user) => Number(user.id) === id)?.suggested_org_unit_id).length;
+        if (!suggestedCount) return toast("所选账号没有 SSO 建议团队");
+        confirmMessage = `确定采用 ${suggestedCount} 个账号的 SSO 建议团队吗？没有建议的账号将跳过。`;
+        successMessage = `已采用所选账号的 SSO 建议团队`;
+        request = () => api("/api/users/bulk-suggested-org", { method: "PATCH", body: JSON.stringify({ user_ids: userIds }) });
       } else if (action === "delete") {
         const names = userIds.map((id) => state.users.find((user) => Number(user.id) === id)?.display_name).filter(Boolean);
         const preview = names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 人` : "");

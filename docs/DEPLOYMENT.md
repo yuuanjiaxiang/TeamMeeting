@@ -142,6 +142,37 @@ python server.py --host 0.0.0.0 --port 8000
 
 生产 SSO 必须通过 HTTPS 域名访问，反向代理需原样转发 Cookie 和 `/api/sso/*`。身份平台和 Team Loop 服务器时间应保持同步。项目优先使用系统安装的 Python 3.10+；若运行时缺少可用的 TLS/OpenSSL，OAuth2 HTTPS 请求将无法工作。
 
+### 9.1 华为云 OneAccess / IDaaS
+
+1. 在 OneAccess“资源 → 应用”中创建自建应用，认证集成选择 OIDC，并启用授权码模式；
+2. Redirect URL 填写 `https://你的域名/api/sso/callback`，在授权管理中授权允许访问的用户；
+3. 从“设置 → 服务配置 → OIDC”取得认证授权、Token 和 UserInfo 地址。若 OneAccess 没有提供可用 Issuer Discovery，在 Team Loop 中选择“手动 OAuth2”并填写这三个地址；
+4. 在 OneAccess“映射配置”中至少返回 `employee_id`、`name`、`groups`：`employee_id` 映射唯一工号，`name` 映射姓名，`groups` 映射组织或账号权限；Team Loop 对应字段分别填这三个属性名；
+5. 已有账号按工号关联并保留管理员设置的团队；未命中账号自动创建为根组织下的“访客 / 待分类”，OneAccess 群组只形成建议团队；管理员在用户管理中确认用户类型和团队后生效。
+
+不要把 OneAccess ClientSecret 写入代码或提交 Git，使用服务器环境变量 `TEAM_LOOP_SSO_CLIENT_SECRET`。
+
+### 9.2 历史组织数据平滑迁移
+
+先预览旧组织中由已迁移用户创建的讨论和会议将去往哪里：
+
+```powershell
+python scripts\migrate_org_data.py `
+  --database data\weekly_team.db `
+  --source ess `
+  --follow-current-users
+```
+
+确认预览后增加 `--apply`。脚本执行前自动生成数据库备份和逐行 JSON 清单。需要回滚时使用：
+
+```powershell
+python scripts\migrate_org_data.py `
+  --database data\weekly_team.db `
+  --rollback data\org_migrations\org_migration_YYYYMMDD-HHMMSS.json
+```
+
+如果确定要把旧组织的全部讨论、会议和有效用户统一迁往某个二级组织，可使用 `--source ess --target ess/mo --include-users --apply`。默认只允许迁往源组织的下级，跨分支必须显式添加 `--allow-cross-branch`。正式数据库应先停写或进入维护窗口；第一次务必在灰度数据库上演练。
+
 ## 10. 公共域名与 Nginx
 
 ### 10.1 网络和证书前置条件
