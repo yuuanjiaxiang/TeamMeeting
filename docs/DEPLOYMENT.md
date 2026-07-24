@@ -138,7 +138,7 @@ python server.py --host 0.0.0.0 --port 8000
 6. 通过服务器环境变量配置 `TEAM_LOOP_SSO_CLIENT_SECRET`，再启用企业 SSO 与首页自动登录；
 7. 先在灰度环境完成已有工号关联、待分类自动建号、管理员归类、权限、失败回退和退出验证，再提升正式环境。
 
-所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。
+所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。管理员已知三个地址时，在系统配置中选择“手动 OAuth2”，依次填写“OAuth2 认证地址、Access Token 地址、UserInfo 地址”；界面文案变化不会改变这些环境变量键。
 
 生产 SSO 必须通过 HTTPS 域名访问，反向代理需原样转发 Cookie 和 `/api/sso/*`。身份平台和 Team Loop 服务器时间应保持同步。项目优先使用系统安装的 Python 3.10+；若运行时缺少可用的 TLS/OpenSSL，OAuth2 HTTPS 请求将无法工作。
 

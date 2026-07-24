@@ -53,9 +53,9 @@ DEFAULT_SETTINGS = [
     ("sso_mode", "OAuth2 配置方式", "discovery", "choice", "推荐使用 OIDC 自动发现；不支持 Discovery 时选择手动 OAuth2 端点"),
     ("sso_button_label", "SSO 按钮名称", "企业 SSO 登录", "text", "登录页统一身份入口的显示名称"),
     ("sso_issuer_url", "OIDC Issuer 地址", "", "text", "企业身份平台的 Issuer，不含 /.well-known/openid-configuration"),
-    ("sso_authorization_url", "OAuth2 授权地址", "", "text", "手动模式必填，例如 https://sso.example.com/oauth2/authorize"),
-    ("sso_token_url", "OAuth2 Token 地址", "", "text", "手动模式必填，例如 https://sso.example.com/oauth2/token"),
-    ("sso_userinfo_url", "OAuth2 用户信息地址", "", "text", "手动模式必填，需返回工号与姓名字段"),
+    ("sso_authorization_url", "OAuth2 认证地址", "", "text", "用户登录时跳转的认证地址，例如 https://sso.example.com/oauth2/authorize"),
+    ("sso_token_url", "Access Token 地址", "", "text", "用授权码换取 Access Token 的地址，例如 https://sso.example.com/oauth2/token"),
+    ("sso_userinfo_url", "UserInfo 地址", "", "text", "用 Access Token 获取用户信息的地址，需返回工号与姓名字段"),
     ("sso_client_id", "OAuth2 Client ID", "", "text", "身份平台为 Team Loop 分配的 Client ID"),
     ("sso_client_secret", "OAuth2 Client Secret", "", "password", "建议通过 TEAM_LOOP_SSO_CLIENT_SECRET 环境变量提供；留空表示不修改"),
     ("sso_redirect_uri", "OAuth2 回调地址", "", "text", "正式部署必须填写，例如 https://team.example.com/api/sso/callback；本机可自动生成"),
@@ -77,6 +77,7 @@ MODULE_CATALOG = [
     {"key": "dashboard", "name": "工作台", "description": "团队关键指标概览"},
     {"key": "archive", "name": "搜索归档", "description": "跨年度检索会议、对话和早例会事项"},
     {"key": "morning", "name": "早例会", "description": "按人追踪当日事项、风险和下一步"},
+    {"key": "processes", "name": "流程中心", "description": "维护流程模板并按 Checklist 推进个人流程"},
     {"key": "meetings", "name": "会议沙盘", "description": "周例会议题、纪要和签到"},
     {"key": "shifts", "name": "机台排班", "description": "白夜班排班和工时统计"},
     {"key": "rules", "name": "红黑榜", "description": "红黑榜细则和积分看板"},
@@ -104,6 +105,7 @@ INITIAL_TYPE_OPERATIONS = {
         "dashboard": (1, 0, 0, 0),
         "archive": (1, 0, 0, 0),
         "morning": (1, 1, 1, 1),
+        "processes": (1, 1, 1, 1),
         "meetings": (1, 1, 1, 0),
         "shifts": (1, 0, 0, 0),
         "rules": (1, 0, 0, 0),
@@ -328,6 +330,14 @@ def seed_system_settings(conn):
             VALUES(?,?,?,?,?,?)
             """,
             (key, label, value, value_type, description, now_iso()),
+        )
+        conn.execute(
+            """
+            UPDATE system_settings
+            SET label=?, value_type=?, description=?
+            WHERE key=?
+            """,
+            (label, value_type, description, key),
         )
 
 
@@ -1405,6 +1415,60 @@ def init_db():
                 active INTEGER NOT NULL DEFAULT 1
             );
 
+            CREATE TABLE IF NOT EXISTS process_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS process_template_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL REFERENCES process_templates(id) ON DELETE CASCADE,
+                parent_item_id INTEGER REFERENCES process_template_items(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                required INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS process_instances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER REFERENCES process_templates(id),
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                owner_id INTEGER NOT NULL REFERENCES users(id),
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'completed', 'cancelled')),
+                due_date TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS process_instance_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instance_id INTEGER NOT NULL REFERENCES process_instances(id) ON DELETE CASCADE,
+                template_item_id INTEGER REFERENCES process_template_items(id) ON DELETE SET NULL,
+                parent_item_id INTEGER REFERENCES process_instance_items(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                required INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT,
+                completed_by INTEGER REFERENCES users(id),
+                version INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS system_settings (
                 key TEXT PRIMARY KEY,
                 label TEXT NOT NULL,
@@ -1520,6 +1584,8 @@ def init_db():
         ensure_column(conn, "morning_items", "updated_at", "TEXT")
         ensure_column(conn, "morning_items", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "morning_items", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "process_template_items", "parent_item_id", "INTEGER")
+        ensure_column(conn, "process_instance_items", "parent_item_id", "INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active ON auth_sessions(user_id, revoked_at, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash)")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity ON users(auth_source, external_subject) WHERE external_subject IS NOT NULL AND external_subject<>''")
@@ -1532,6 +1598,10 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_org_date ON meetings(org_unit_id, meeting_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_templates_org ON process_templates(org_unit_id, active, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_owner ON process_instances(owner_id, status, active, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_org ON process_instances(org_unit_id, status, active, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instance_items ON process_instance_items(instance_id, sort_order)")
         conn.execute("UPDATE team_posts SET title=substr(content, 1, 40) WHERE title IS NULL OR trim(title)=''")
         conn.execute("UPDATE team_posts SET category=CASE WHEN kind='roast' THEN 'roast' ELSE 'general' END WHERE category IS NULL OR trim(category)=''")
         conn.execute("UPDATE team_posts SET status='open' WHERE status IS NULL OR trim(status)=''")
@@ -2013,6 +2083,8 @@ class Handler(BaseHTTPRequestHandler):
             return "archive"
         if path.startswith("/api/morning-items"):
             return "morning"
+        if path.startswith("/api/process-"):
+            return "processes"
         if path.startswith("/api/rules") or path.startswith("/api/scores") or path.startswith("/api/dashboards/red-black"):
             return "rules"
         if path.startswith("/api/meetings") or path.startswith("/api/meeting-"):
@@ -2204,6 +2276,29 @@ class Handler(BaseHTTPRequestHandler):
             return self.update_morning_item(int(parts[2]), user)
         if len(parts) == 3 and parts[:2] == ["api", "morning-items"] and method == "DELETE":
             return self.delete_morning_item(int(parts[2]), user)
+
+        if path == "/api/process-templates":
+            if method == "GET":
+                return {"templates": self.list_process_templates(user)}
+            if method == "POST":
+                return self.create_process_template(user)
+        if len(parts) == 3 and parts[:2] == ["api", "process-templates"]:
+            if method == "PATCH":
+                return self.update_process_template(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_process_template(int(parts[2]), user)
+        if path == "/api/process-instances":
+            if method == "GET":
+                return {"instances": self.list_process_instances(user, query)}
+            if method == "POST":
+                return self.create_process_instance(user)
+        if len(parts) == 3 and parts[:2] == ["api", "process-instances"]:
+            if method == "PATCH":
+                return self.update_process_instance(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_process_instance(int(parts[2]), user)
+        if len(parts) == 3 and parts[:2] == ["api", "process-instance-items"] and method == "PATCH":
+            return self.update_process_instance_item(int(parts[2]), user)
 
         if path == "/api/rules":
             if method == "GET":
@@ -3697,12 +3792,25 @@ class Handler(BaseHTTPRequestHandler):
         if len(member_ids) != len(set(member_ids)):
             raise AppError(400, "成员排序不能包含重复成员")
         with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", admin)
             active_ids = {
                 row["id"]
-                for row in conn.execute("SELECT id FROM members WHERE active=1").fetchall()
+                for row in conn.execute(
+                    f"""
+                    SELECT m.id
+                    FROM members m
+                    JOIN users u ON u.id=m.user_id
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE m.active=1
+                      AND u.active=1
+                      AND COALESCE(t.include_in_members, 1)=1
+                      AND {org_where}
+                    """,
+                    org_params,
+                ).fetchall()
             }
             if set(member_ids) != active_ids:
-                raise AppError(400, "成员排序列表与当前成员不一致，请刷新后重试")
+                raise AppError(400, "成员排序列表与当前团队成员不一致，请刷新后重试")
             for index, member_id in enumerate(member_ids, start=1):
                 conn.execute("UPDATE members SET sort_order=? WHERE id=?", (index, member_id))
             write_audit(
@@ -3715,7 +3823,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"member_ids": member_ids},
                 self.client_address[0],
             )
-        return {"message": "成员顺序已更新", "members": self.list_members()}
+        return {"message": "成员顺序已更新", "members": self.list_members(admin)}
 
     def create_member(self):
         self.require_admin()
@@ -4424,6 +4532,659 @@ class Handler(BaseHTTPRequestHandler):
                 self.client_address[0],
             )
         return {"message": "早例会事项已删除", **self.list_morning_items({"date": [item["item_date"]]})}
+
+    def normalize_process_template_items(self, raw_items):
+        if not isinstance(raw_items, list) or not raw_items:
+            raise AppError(400, "流程模板至少需要一个 Checklist")
+        if len(raw_items) > 60:
+            raise AppError(400, "单个流程模板最多包含 60 个 Checklist")
+        items = []
+        seen_keys = set()
+        required_by_key = {}
+        for index, raw in enumerate(raw_items):
+            if not isinstance(raw, dict):
+                raise AppError(400, "Checklist 格式不正确")
+            title = str(raw.get("title") or "").strip()
+            if not title:
+                raise AppError(400, f"第 {index + 1} 个 Checklist 标题不能为空")
+            if len(title) > 120:
+                raise AppError(400, f"第 {index + 1} 个 Checklist 标题不能超过 120 字")
+            description = str(raw.get("description") or "").strip()
+            if len(description) > 500:
+                raise AppError(400, f"第 {index + 1} 个 Checklist 说明不能超过 500 字")
+            item_key = str(raw.get("key") or f"step-{index + 1}").strip()
+            if not item_key or len(item_key) > 64:
+                raise AppError(400, f"第 {index + 1} 个 Checklist 标识不正确")
+            if item_key in seen_keys:
+                raise AppError(400, "Checklist 标识不能重复")
+            parent_key = str(raw.get("parent_key") or "").strip() or None
+            if parent_key and parent_key not in seen_keys:
+                raise AppError(400, f"第 {index + 1} 个 Checklist 的上一步必须位于它之前")
+            required = 0 if raw.get("required") is False else 1
+            if required and parent_key and not required_by_key.get(parent_key):
+                raise AppError(400, "必做步骤不能依赖可选步骤")
+            items.append({
+                "key": item_key,
+                "parent_key": parent_key,
+                "title": title,
+                "description": description,
+                "required": required,
+                "sort_order": index + 1,
+            })
+            seen_keys.add(item_key)
+            required_by_key[item_key] = required
+        if not any(item["required"] for item in items):
+            raise AppError(400, "流程模板至少需要一个必做 Checklist")
+        return items
+
+    def replace_process_template_items(self, conn, template_id, items):
+        conn.execute("DELETE FROM process_template_items WHERE template_id=?", (template_id,))
+        inserted_ids = {}
+        for item in items:
+            parent_item_id = inserted_ids.get(item["parent_key"]) if item["parent_key"] else None
+            cursor = conn.execute(
+                """
+                INSERT INTO process_template_items(
+                    template_id, parent_item_id, title, description, required, sort_order
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    template_id,
+                    parent_item_id,
+                    item["title"],
+                    item["description"],
+                    item["required"],
+                    item["sort_order"],
+                ),
+            )
+            inserted_ids[item["key"]] = cursor.lastrowid
+
+    def list_process_templates(self, user):
+        if not user:
+            raise AppError(401, "请先登录后使用流程中心")
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+            org_where, org_params = self.organization_entity_filter(
+                conn,
+                "t.org_unit_id",
+                user,
+                inherit_ancestors=True,
+            )
+            templates = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT t.*, o.name AS org_unit_name, creator.display_name AS created_by_name,
+                           (SELECT COUNT(*) FROM process_instances p WHERE p.template_id=t.id AND p.active=1) AS instance_count
+                    FROM process_templates t
+                    JOIN org_units o ON o.id=t.org_unit_id
+                    JOIN users creator ON creator.id=t.created_by
+                    WHERE t.active=1 AND {org_where}
+                    ORDER BY CASE WHEN t.org_unit_id=? THEN 0 ELSE 1 END, t.updated_at DESC, t.id DESC
+                    """,
+                    [*org_params, context["selected"]["id"]],
+                ).fetchall()
+            )
+            template_ids = [template["id"] for template in templates]
+            item_map = {}
+            if template_ids:
+                placeholders = ",".join("?" for _ in template_ids)
+                template_items = rows_to_list(
+                    conn.execute(
+                        f"""
+                        SELECT *
+                        FROM process_template_items
+                        WHERE template_id IN ({placeholders})
+                        ORDER BY template_id, sort_order, id
+                        """,
+                        template_ids,
+                    ).fetchall()
+                )
+                for item in template_items:
+                    item["required"] = bool(item["required"])
+                    item_map.setdefault(item["template_id"], []).append(item)
+        visible_ids = set(context["visible_ids"])
+        for template in templates:
+            template["items"] = item_map.get(template["id"], [])
+            template["inherited"] = template["org_unit_id"] not in visible_ids
+        return templates
+
+    def create_process_template(self, user):
+        if user["role"] != "admin":
+            raise AppError(403, "仅管理员可以维护流程模板")
+        data = read_json(self)
+        name = str(data.get("name") or "").strip()
+        description = str(data.get("description") or "").strip()
+        if not name:
+            raise AppError(400, "流程模板名称不能为空")
+        if len(name) > 80:
+            raise AppError(400, "流程模板名称不能超过 80 字")
+        if len(description) > 1000:
+            raise AppError(400, "流程模板说明不能超过 1000 字")
+        items = self.normalize_process_template_items(data.get("items"))
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+            org_unit_id = context["selected"]["id"] if context.get("selected") else user.get("org_unit_id")
+            self.require_org_unit_access(conn, org_unit_id, user)
+            duplicate = conn.execute(
+                "SELECT id FROM process_templates WHERE org_unit_id=? AND active=1 AND LOWER(name)=LOWER(?)",
+                (org_unit_id, name),
+            ).fetchone()
+            if duplicate:
+                raise AppError(400, "当前团队已存在同名流程模板")
+            created_at = now_iso()
+            cursor = conn.execute(
+                """
+                INSERT INTO process_templates(org_unit_id, name, description, active, version, created_by, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (org_unit_id, name, description, 1, 1, user["id"], created_at, created_at),
+            )
+            template_id = cursor.lastrowid
+            self.replace_process_template_items(conn, template_id, items)
+            write_audit(
+                conn,
+                user,
+                "process_template.create",
+                "process_template",
+                template_id,
+                "流程模板已创建",
+                {"name": name, "checklist_count": len(items), "org_unit_id": org_unit_id},
+                self.client_address[0],
+            )
+        return {"message": "流程模板已创建", "templates": self.list_process_templates(user)}
+
+    def update_process_template(self, template_id, user):
+        if user["role"] != "admin":
+            raise AppError(403, "仅管理员可以维护流程模板")
+        data = read_json(self)
+        with connect() as conn:
+            template = conn.execute(
+                "SELECT * FROM process_templates WHERE id=? AND active=1",
+                (template_id,),
+            ).fetchone()
+            if not template:
+                raise AppError(404, "流程模板不存在")
+            self.require_org_unit_access(conn, template["org_unit_id"], user)
+            expected_version = data.get("expected_version")
+            if expected_version is not None and int(expected_version) != int(template["version"]):
+                raise AppError(409, "流程模板已被其他人修改，请刷新后重试")
+            name = str(data.get("name", template["name"]) or "").strip()
+            description = str(data.get("description", template["description"]) or "").strip()
+            if not name:
+                raise AppError(400, "流程模板名称不能为空")
+            if len(name) > 80 or len(description) > 1000:
+                raise AppError(400, "流程模板名称或说明过长")
+            items = None
+            if "items" in data:
+                items = self.normalize_process_template_items(data.get("items"))
+            duplicate = conn.execute(
+                """
+                SELECT id FROM process_templates
+                WHERE org_unit_id=? AND active=1 AND LOWER(name)=LOWER(?) AND id<>?
+                """,
+                (template["org_unit_id"], name, template_id),
+            ).fetchone()
+            if duplicate:
+                raise AppError(400, "当前团队已存在同名流程模板")
+            updated = conn.execute(
+                """
+                UPDATE process_templates
+                SET name=?, description=?, updated_at=?, version=version+1
+                WHERE id=? AND version=?
+                """,
+                (name, description, now_iso(), template_id, template["version"]),
+            )
+            if updated.rowcount != 1:
+                raise AppError(409, "流程模板已被其他人修改，请刷新后重试")
+            if items is not None:
+                self.replace_process_template_items(conn, template_id, items)
+            write_audit(
+                conn,
+                user,
+                "process_template.update",
+                "process_template",
+                template_id,
+                "流程模板已更新",
+                {"name": name, "checklist_count": len(items) if items is not None else None},
+                self.client_address[0],
+            )
+        return {"message": "流程模板已更新", "templates": self.list_process_templates(user)}
+
+    def delete_process_template(self, template_id, user):
+        if user["role"] != "admin":
+            raise AppError(403, "仅管理员可以维护流程模板")
+        with connect() as conn:
+            template = conn.execute(
+                "SELECT * FROM process_templates WHERE id=? AND active=1",
+                (template_id,),
+            ).fetchone()
+            if not template:
+                raise AppError(404, "流程模板不存在")
+            self.require_org_unit_access(conn, template["org_unit_id"], user)
+            instance_count = conn.execute(
+                "SELECT COUNT(*) FROM process_instances WHERE template_id=?",
+                (template_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE process_templates SET active=0, updated_at=?, version=version+1 WHERE id=?",
+                (now_iso(), template_id),
+            )
+            write_audit(
+                conn,
+                user,
+                "process_template.delete",
+                "process_template",
+                template_id,
+                "流程模板已停用",
+                {"name": template["name"], "historical_instances": instance_count},
+                self.client_address[0],
+            )
+        return {
+            "message": "流程模板已停用，已生成的个人流程不受影响",
+            "templates": self.list_process_templates(user),
+        }
+
+    def list_process_instances(self, user, query):
+        if not user:
+            raise AppError(401, "请先登录后使用流程中心")
+        status = str((query.get("status") or ["active"])[0] or "active")
+        if status not in {"active", "completed", "all"}:
+            status = "active"
+        scope = str((query.get("scope") or ["mine"])[0] or "mine")
+        if user["role"] != "admin":
+            scope = "mine"
+        with connect() as conn:
+            org_where, org_params = self.organization_entity_filter(conn, "p.org_unit_id", user)
+            clauses = ["p.active=1", org_where]
+            params = list(org_params)
+            if scope == "mine":
+                clauses.append("p.owner_id=?")
+                params.append(user["id"])
+            if status != "all":
+                clauses.append("p.status=?")
+                params.append(status)
+            instances = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT p.*, t.name AS template_name, owner.display_name AS owner_name,
+                           creator.display_name AS created_by_name, o.name AS org_unit_name,
+                           COUNT(i.id) AS checklist_total,
+                           SUM(CASE WHEN i.completed=1 THEN 1 ELSE 0 END) AS checklist_completed,
+                           SUM(CASE WHEN i.required=1 THEN 1 ELSE 0 END) AS required_total,
+                           SUM(CASE WHEN i.required=1 AND i.completed=1 THEN 1 ELSE 0 END) AS required_completed
+                    FROM process_instances p
+                    LEFT JOIN process_templates t ON t.id=p.template_id
+                    JOIN users owner ON owner.id=p.owner_id
+                    JOIN users creator ON creator.id=p.created_by
+                    JOIN org_units o ON o.id=p.org_unit_id
+                    LEFT JOIN process_instance_items i ON i.instance_id=p.id
+                    WHERE {' AND '.join(clauses)}
+                    GROUP BY p.id
+                    ORDER BY CASE p.status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
+                             CASE WHEN p.due_date IS NULL OR p.due_date='' THEN 1 ELSE 0 END,
+                             p.due_date, p.updated_at DESC, p.id DESC
+                    """,
+                    params,
+                ).fetchall()
+            )
+            instance_ids = [instance["id"] for instance in instances]
+            item_map = {}
+            if instance_ids:
+                placeholders = ",".join("?" for _ in instance_ids)
+                items = rows_to_list(
+                    conn.execute(
+                        f"""
+                        SELECT i.*, completer.display_name AS completed_by_name
+                        FROM process_instance_items i
+                        LEFT JOIN users completer ON completer.id=i.completed_by
+                        WHERE i.instance_id IN ({placeholders})
+                        ORDER BY i.instance_id, i.sort_order, i.id
+                        """,
+                        instance_ids,
+                    ).fetchall()
+                )
+                for item in items:
+                    item["required"] = bool(item["required"])
+                    item["completed"] = bool(item["completed"])
+                    item_map.setdefault(item["instance_id"], []).append(item)
+        for instance in instances:
+            instance["checklist_total"] = int(instance.get("checklist_total") or 0)
+            instance["checklist_completed"] = int(instance.get("checklist_completed") or 0)
+            instance["required_total"] = int(instance.get("required_total") or 0)
+            instance["required_completed"] = int(instance.get("required_completed") or 0)
+            instance["progress"] = round(
+                (instance["required_completed"] / instance["required_total"]) * 100
+            ) if instance["required_total"] else 0
+            instance["items"] = item_map.get(instance["id"], [])
+            instance["overdue"] = bool(
+                instance["status"] == "active"
+                and instance.get("due_date")
+                and instance["due_date"] < today_iso()
+            )
+            instance["can_edit"] = user["role"] == "admin" or instance["owner_id"] == user["id"]
+        return instances
+
+    def create_process_instance(self, user):
+        data = read_json(self)
+        try:
+            template_id = int(data.get("template_id"))
+        except (TypeError, ValueError):
+            raise AppError(400, "请选择流程模板")
+        due_date = str(data.get("due_date") or "").strip()
+        if due_date:
+            try:
+                dt.date.fromisoformat(due_date)
+            except ValueError:
+                raise AppError(400, "截止日期格式不正确")
+        with connect() as conn:
+            template = conn.execute(
+                "SELECT * FROM process_templates WHERE id=? AND active=1",
+                (template_id,),
+            ).fetchone()
+            if not template:
+                raise AppError(404, "流程模板不存在或已停用")
+            context = self.organization_context(conn, user)
+            allowed_template_orgs = set(context["visible_ids"]) | set(context["ancestor_ids"])
+            if template["org_unit_id"] not in allowed_template_orgs:
+                raise AppError(404, "流程模板不存在或无权访问")
+            items = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT * FROM process_template_items
+                    WHERE template_id=?
+                    ORDER BY sort_order, id
+                    """,
+                    (template_id,),
+                ).fetchall()
+            )
+            if not items:
+                raise AppError(400, "该流程模板没有可执行的 Checklist")
+            title = str(data.get("title") or template["name"]).strip()
+            if not title:
+                title = template["name"]
+            if len(title) > 120:
+                raise AppError(400, "个人流程名称不能超过 120 字")
+            created_at = now_iso()
+            cursor = conn.execute(
+                """
+                INSERT INTO process_instances(
+                    template_id, org_unit_id, owner_id, title, status, due_date,
+                    started_at, active, version, created_by, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    template_id,
+                    user["org_unit_id"],
+                    user["id"],
+                    title,
+                    "active",
+                    due_date or None,
+                    created_at,
+                    1,
+                    1,
+                    user["id"],
+                    created_at,
+                    created_at,
+                ),
+            )
+            instance_id = cursor.lastrowid
+            snapshot_ids = {}
+            for item in items:
+                parent_item_id = snapshot_ids.get(item["parent_item_id"]) if item["parent_item_id"] else None
+                item_cursor = conn.execute(
+                    """
+                    INSERT INTO process_instance_items(
+                        instance_id, template_item_id, parent_item_id, title, description,
+                        required, sort_order, completed, version
+                    ) VALUES(?,?,?,?,?,?,?,0,1)
+                    """,
+                    (
+                        instance_id,
+                        item["id"],
+                        parent_item_id,
+                        item["title"],
+                        item["description"],
+                        item["required"],
+                        item["sort_order"],
+                    ),
+                )
+                snapshot_ids[item["id"]] = item_cursor.lastrowid
+            write_audit(
+                conn,
+                user,
+                "process_instance.create",
+                "process_instance",
+                instance_id,
+                "个人流程已创建",
+                {"template_id": template_id, "title": title, "checklist_count": len(items)},
+                self.client_address[0],
+            )
+        return {
+            "message": "已根据模板生成个人流程",
+            "instances": self.list_process_instances(user, {"scope": ["mine"], "status": ["active"]}),
+        }
+
+    def require_process_instance_access(self, conn, instance_id, user):
+        instance = conn.execute(
+            "SELECT * FROM process_instances WHERE id=? AND active=1",
+            (instance_id,),
+        ).fetchone()
+        if not instance:
+            raise AppError(404, "个人流程不存在")
+        if user["role"] == "admin":
+            self.require_org_unit_access(conn, instance["org_unit_id"], user)
+        elif instance["owner_id"] != user["id"]:
+            raise AppError(404, "个人流程不存在或无权访问")
+        return instance
+
+    def update_process_instance(self, instance_id, user):
+        data = read_json(self)
+        fields = []
+        values = []
+        if "title" in data:
+            title = str(data.get("title") or "").strip()
+            if not title:
+                raise AppError(400, "个人流程名称不能为空")
+            if len(title) > 120:
+                raise AppError(400, "个人流程名称不能超过 120 字")
+            fields.append("title=?")
+            values.append(title)
+        if "due_date" in data:
+            due_date = str(data.get("due_date") or "").strip()
+            if due_date:
+                try:
+                    dt.date.fromisoformat(due_date)
+                except ValueError:
+                    raise AppError(400, "截止日期格式不正确")
+            fields.append("due_date=?")
+            values.append(due_date or None)
+        if not fields:
+            raise AppError(400, "没有可更新字段")
+        with connect() as conn:
+            instance = self.require_process_instance_access(conn, instance_id, user)
+            expected_version = data.get("expected_version")
+            if expected_version is not None and int(expected_version) != int(instance["version"]):
+                raise AppError(409, "个人流程已被更新，请刷新后重试")
+            fields.extend(["updated_at=?", "version=version+1"])
+            values.append(now_iso())
+            updated = conn.execute(
+                f"UPDATE process_instances SET {', '.join(fields)} WHERE id=? AND version=?",
+                [*values, instance_id, instance["version"]],
+            )
+            if updated.rowcount != 1:
+                raise AppError(409, "个人流程已被更新，请刷新后重试")
+            write_audit(
+                conn,
+                user,
+                "process_instance.update",
+                "process_instance",
+                instance_id,
+                "个人流程已更新",
+                {"fields": [key for key in ("title", "due_date") if key in data]},
+                self.client_address[0],
+            )
+        return {"message": "个人流程已更新"}
+
+    def delete_process_instance(self, instance_id, user):
+        with connect() as conn:
+            instance = self.require_process_instance_access(conn, instance_id, user)
+            conn.execute(
+                """
+                UPDATE process_instances
+                SET active=0, status='cancelled', updated_at=?, version=version+1
+                WHERE id=?
+                """,
+                (now_iso(), instance_id),
+            )
+            write_audit(
+                conn,
+                user,
+                "process_instance.delete",
+                "process_instance",
+                instance_id,
+                "个人流程已取消",
+                {"title": instance["title"]},
+                self.client_address[0],
+            )
+        return {"message": "个人流程已取消"}
+
+    def update_process_instance_item(self, item_id, user):
+        data = read_json(self)
+        if "completed" not in data:
+            raise AppError(400, "请指定 Checklist 完成状态")
+        completed = bool(data.get("completed"))
+        with connect() as conn:
+            item = conn.execute(
+                """
+                SELECT i.*, p.owner_id, p.org_unit_id, p.status AS instance_status,
+                       p.active AS instance_active
+                FROM process_instance_items i
+                JOIN process_instances p ON p.id=i.instance_id
+                WHERE i.id=?
+                """,
+                (item_id,),
+            ).fetchone()
+            if not item or not item["instance_active"]:
+                raise AppError(404, "Checklist 不存在")
+            if user["role"] == "admin":
+                self.require_org_unit_access(conn, item["org_unit_id"], user)
+            elif item["owner_id"] != user["id"]:
+                raise AppError(404, "Checklist 不存在或无权操作")
+            expected_version = data.get("expected_version")
+            if expected_version is not None and int(expected_version) != int(item["version"]):
+                raise AppError(409, "Checklist 已被更新，请刷新后重试")
+            if completed and item["parent_item_id"]:
+                parent = conn.execute(
+                    """
+                    SELECT completed
+                    FROM process_instance_items
+                    WHERE id=? AND instance_id=?
+                    """,
+                    (item["parent_item_id"], item["instance_id"]),
+                ).fetchone()
+                if not parent or not parent["completed"]:
+                    raise AppError(409, "请先完成该步骤的上一步")
+            updated = conn.execute(
+                """
+                UPDATE process_instance_items
+                SET completed=?, completed_at=?, completed_by=?, version=version+1
+                WHERE id=? AND version=?
+                """,
+                (
+                    1 if completed else 0,
+                    now_iso() if completed else None,
+                    user["id"] if completed else None,
+                    item_id,
+                    item["version"],
+                ),
+            )
+            if updated.rowcount != 1:
+                raise AppError(409, "Checklist 已被更新，请刷新后重试")
+            reset_descendants = 0
+            if not completed:
+                descendants = conn.execute(
+                    """
+                    WITH RECURSIVE descendants(id) AS (
+                        SELECT id
+                        FROM process_instance_items
+                        WHERE parent_item_id=? AND instance_id=?
+                        UNION ALL
+                        SELECT child.id
+                        FROM process_instance_items child
+                        JOIN descendants parent ON child.parent_item_id=parent.id
+                        WHERE child.instance_id=?
+                    )
+                    SELECT id FROM descendants
+                    """,
+                    (item_id, item["instance_id"], item["instance_id"]),
+                ).fetchall()
+                descendant_ids = [row["id"] for row in descendants]
+                if descendant_ids:
+                    placeholders = ",".join("?" for _ in descendant_ids)
+                    reset = conn.execute(
+                        f"""
+                        UPDATE process_instance_items
+                        SET completed=0, completed_at=NULL, completed_by=NULL, version=version+1
+                        WHERE id IN ({placeholders}) AND completed=1
+                        """,
+                        descendant_ids,
+                    )
+                    reset_descendants = reset.rowcount
+            totals = conn.execute(
+                """
+                SELECT SUM(CASE WHEN required=1 THEN 1 ELSE 0 END) AS required_total,
+                       SUM(CASE WHEN required=1 AND completed=1 THEN 1 ELSE 0 END) AS required_completed
+                FROM process_instance_items
+                WHERE instance_id=?
+                """,
+                (item["instance_id"],),
+            ).fetchone()
+            all_completed = bool(
+                totals["required_total"]
+                and totals["required_total"] == (totals["required_completed"] or 0)
+            )
+            new_status = "completed" if all_completed else "active"
+            conn.execute(
+                """
+                UPDATE process_instances
+                SET status=?, completed_at=?, updated_at=?, version=version+1
+                WHERE id=?
+                """,
+                (
+                    new_status,
+                    now_iso() if all_completed else None,
+                    now_iso(),
+                    item["instance_id"],
+                ),
+            )
+            write_audit(
+                conn,
+                user,
+                "process_checklist.update",
+                "process_instance_item",
+                item_id,
+                "流程 Checklist 已更新",
+                {
+                    "instance_id": item["instance_id"],
+                    "completed": completed,
+                    "instance_status": new_status,
+                    "reset_descendants": reset_descendants,
+                },
+                self.client_address[0],
+            )
+        return {
+            "message": (
+                "Checklist 已完成"
+                if completed
+                else (
+                    f"Checklist 已恢复，并同步撤销 {reset_descendants} 个下游步骤"
+                    if reset_descendants
+                    else "Checklist 已恢复为未完成"
+                )
+            ),
+            "instance_status": new_status,
+            "reset_descendants": reset_descendants,
+        }
 
     def list_rules(self, query):
         clauses = ["1=1"]

@@ -235,6 +235,23 @@ def main():
                     raise RuntimeError("Organization route did not serve the SPA")
             admin_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             request_json(admin_opener, base_url, "/api/login", "POST", {"username": "admin", "password": "admin123"})
+            sortable_members = request_json(
+                admin_opener,
+                base_url,
+                "/api/members",
+                org_path="ess/mo",
+            ).get("members") or []
+            reversed_member_ids = [item["id"] for item in reversed(sortable_members)]
+            reordered_members = request_json(
+                admin_opener,
+                base_url,
+                "/api/members/order",
+                "PATCH",
+                {"member_ids": reversed_member_ids},
+                "ess/mo",
+            ).get("members") or []
+            if [item["id"] for item in reordered_members] != reversed_member_ids:
+                raise RuntimeError(f"Organization-scoped member sorting failed: {reordered_members}")
             unrelated_thanks = request_json(
                 admin_opener,
                 base_url,
@@ -254,7 +271,7 @@ def main():
             temporary = next(item for item in created.get("units") or [] if item["name"] == "TMP")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "PATCH", {"name": "TMP2", "slug": "tmp2"}, "ess")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "DELETE", org_path="ess")
-            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "ws_star": "WS成员", "cross_team_vote": cross_vote_id, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
+            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "member_drag_order": True, "ws_star": "WS成员", "cross_team_vote": cross_vote_id, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
         finally:
             server.shutdown()
             thread.join(timeout=5)

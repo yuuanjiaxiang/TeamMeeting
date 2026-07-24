@@ -60,10 +60,12 @@ Use these references conditionally:
 ### Cross-module behavior
 
 - Keep users and member profiles consistent.
-- Treat OAuth2/OIDC settings as secrets: never expose Client Secret or provider endpoints publicly, preserve password fields when submitted blank, use employee ID as the managed account link, preserve the provider plus `sub` as the stable identity, map the deepest configured SSO group only into `suggested_org_unit_id`, and auto-provision unknown identities only as root-organization `guest` accounts with `classification_pending=1` until an administrator assigns a type and team. Never move an existing account or historical data during login.
+- Validate member ordering against the complete member set visible in the selected organization route, return that same scoped list, and retain arrow controls as the keyboard/touch fallback for drag sorting.
+- Treat OAuth2/OIDC settings as secrets: keep manual authorization, access-token and UserInfo endpoints grouped for administrators but never expose them publicly; never expose Client Secret, preserve password fields when submitted blank, use employee ID as the managed account link, preserve the provider plus `sub` as the stable identity, map the deepest configured SSO group only into `suggested_org_unit_id`, and auto-provision unknown identities only as root-organization `guest` accounts with `classification_pending=1` until an administrator assigns a type and team. Never move an existing account or historical data during login.
 - Migrate organization-owned history only through `scripts/migrate_org_data.py`: preview first, back up before apply, keep the row manifest, and validate rollback on gray data before production.
 - Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; production must use `TEAM_LOOP_REQUIRE_HTTPS=1`, reject direct HTTP login and mutations, and issue Secure cookies for HTTPS proxy requests.
 - Keep workbench and morning-meeting data synchronized.
+- Keep process instances as immutable snapshots of template nodes and parent relations at creation time. Templates are forests: empty parents are parallel roots, siblings are branches, parents must precede children, and required nodes cannot depend on optional nodes. Treat the mind-map editor as a projection of ordered parent keys rather than persisting coordinates. Lock children until the parent is complete and recursively reset descendants when a parent is unchecked. Parent templates inherit downward read-only, only administrators maintain templates, and required nodes drive automatic completion.
 - Keep shared date filters initialized to the current month without page-specific overrides.
 - Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.
 - Keep meeting state locks enforced by the server.
@@ -80,7 +82,8 @@ Use these references conditionally:
 Run at minimum:
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\organization_scope_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\organization_scope_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python scripts\process_flow_smoke_test.py
 python scripts\organization_scope_smoke_test.py
 python scripts\sso_smoke_test.py
 python scripts\forum_smoke_test.py

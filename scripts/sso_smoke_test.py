@@ -149,6 +149,18 @@ def main():
             secret = next((item for item in settings if item.get("key") == "sso_client_secret"), {})
             if secret.get("value") or not secret.get("configured"):
                 raise RuntimeError("SSO Client Secret was echoed or not marked as configured")
+            expected_labels = {
+                "sso_authorization_url": "OAuth2 认证地址",
+                "sso_token_url": "Access Token 地址",
+                "sso_userinfo_url": "UserInfo 地址",
+            }
+            actual_labels = {
+                item.get("key"): item.get("label")
+                for item in settings
+                if item.get("key") in expected_labels
+            }
+            if actual_labels != expected_labels:
+                raise RuntimeError(f"SSO endpoint labels were not migrated: {actual_labels}")
 
             with opener.open(f"{app_url}/api/sso/login", timeout=15) as response:
                 if response.status != 200:

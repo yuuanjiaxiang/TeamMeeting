@@ -25,6 +25,7 @@ TeamMeeting/
 ├─ scripts/
 │  ├─ dev_server.py             # 文件监视与开发热更新
 │  ├─ smoke_test.py             # 部署后的只读冒烟测试
+│  ├─ process_flow_smoke_test.py # 流程模板、快照、权限与进度测试
 │  ├─ sso_smoke_test.py         # OAuth2/OIDC 工号关联集成测试
 │  ├─ forum_smoke_test.py       # 讨论区权限、回复、表情和回收测试
 │  ├─ proxy_smoke_test.py       # 可信代理、真实 IP 和 Secure Cookie 测试
@@ -120,9 +121,11 @@ if path == "/api/example":
 
 登录会话持久化在 SQLite 中，只保存令牌摘要。新增认证功能时同时考虑超时、撤销、密码修改后的其他设备退出、失败次数锁定和 401 后前端自动回到登录视图。
 
-企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、待分类建号、管理员归类、建议组织、敏感配置隔离和 Cookie 会话。
+企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。手动配置页按 OAuth2 认证地址、Access Token 地址、UserInfo 地址和应用凭据分组，但存储键继续使用 `sso_authorization_url/sso_token_url/sso_userinfo_url`，避免仅因文案调整破坏环境变量和既有数据库。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中；密码型设置留空表示保留旧值。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、已有工号关联、待分类建号、管理员归类、建议组织、敏感配置隔离和 Cookie 会话。
 
 组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。成员、论坛、早例会、会议、排班、红黑榜与 Thank You 的读取和写入都必须复用组织过滤。管理员虽可切换全部组织，业务页面仍应按所选路由过滤。
+
+成员拖动排序提交的必须是当前组织路由完整可见成员集合。`update_member_order()` 应复用 `organization_user_filter()` 校验，而不是拿全库有效成员作比较；响应也必须带当前组织上下文重新查询，保证拖动后前端不会突然混入其他团队。桌面拖动之外保留上移/下移操作，作为触屏与键盘回退。
 
 组织数据必须先声明归属和传播方式，不能用一个“可见组织集合”同时决定读写：
 
@@ -141,6 +144,8 @@ SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只�
 讨论主题采用软删除。主题作者可编辑、删除自己的内容，管理员可置顶、发布公告、标记已解决及从回收站恢复。公告分类和置顶能力必须在服务端校验；列表、详情、回复写入都必须排除已删除主题。修改论坛链路后运行 `python scripts\forum_smoke_test.py`，验证越权拦截、嵌套回复、任意 Emoji、删除隐藏与恢复后回复保留。
 
 会议创建遵循 `meetings.create` 操作权限，不应写死为管理员；一级议题分类和二级预设议题的维护仍是管理员能力。创建会议后通过 `/api/meetings/{id}/agenda-options` 批量加入预设议题并指定责任人。`meetings.start_time` 使用 `HH:MM`，为空表示未指定开始时间。
+
+流程中心的模板属于组织，当前团队可以读取祖先模板，但只有管理员能维护当前团队模板。模板节点只允许引用排在自己之前的父节点；空父节点表示并行起点，同父节点的多个子节点表示树形分支。脑图编辑器不保存布局坐标，只是有序节点与 `parent_key` 的即时投影；选中节点后只显示该节点属性，添加子步骤继承选中节点，添加并行线创建空父节点。必做节点不能依赖可选节点。用户从模板生成流程时必须复制节点及父子关系快照，不能在查询时动态引用模板项，否则模板调整会改写历史执行事实。子节点完成前必须验证父节点已完成；取消父节点时应在同一事务递归撤销下游节点、重算流程状态并写审计日志。修改该模块后运行 `python scripts\process_flow_smoke_test.py`。
 
 红黑榜黑榜可见性必须在服务端和前端同时执行。普通用户调用 `/api/scores` 或 `/api/dashboards/red-black` 时，服务端根据两个 `red_black_show_black_*` 配置裁剪结果；前端隐藏只用于管理员切换用户视图时保持一致体验，不能替代接口过滤。
 
@@ -191,9 +196,10 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
 node --check static\app.js
 git diff --check
+python scripts\process_flow_smoke_test.py
 python scripts\sso_smoke_test.py
 python scripts\forum_smoke_test.py
 python scripts\proxy_smoke_test.py

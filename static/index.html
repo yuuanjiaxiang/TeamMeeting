@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260718-org-tree-v2" />
+    <link rel="stylesheet" href="/style.css?v=20260725-member-sso-mindmap-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -695,6 +695,117 @@
             </section>
           </section>
 
+          <section id="processes" class="page">
+            <section class="panel process-hero">
+              <div class="panel-title">
+                <div>
+                  <h2>流程中心</h2>
+                  <p>把重复工作固化成模板，再生成自己的流程，逐项完成 Checklist。</p>
+                </div>
+                <button id="openProcessTemplateBtn" type="button">新建流程模板</button>
+              </div>
+              <div id="processStats" class="process-stats"></div>
+            </section>
+
+            <section class="panel process-template-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>流程模板</h2>
+                  <p>支持并行起点和树形分支；模板更新不影响已经生成的个人流程。</p>
+                </div>
+              </div>
+              <div id="processTemplateGraph" class="process-template-graph hidden"></div>
+              <div id="processTemplateList" class="process-template-list"></div>
+            </section>
+
+            <section class="panel process-instance-panel">
+              <div class="panel-title process-instance-title">
+                <div>
+                  <h2>流程事项</h2>
+                  <p>勾完全部必做项后自动完成，取消勾选会重新回到进行中。</p>
+                </div>
+                <div class="process-view-controls">
+                  <div class="segmented-control" role="group" aria-label="流程范围">
+                    <button class="active" type="button" data-process-scope="mine">我的流程</button>
+                    <button type="button" data-process-scope="team">团队流程</button>
+                  </div>
+                  <div class="segmented-control" role="group" aria-label="流程状态">
+                    <button class="active" type="button" data-process-status="active">进行中</button>
+                    <button type="button" data-process-status="completed">已完成</button>
+                    <button type="button" data-process-status="all">全部</button>
+                  </div>
+                </div>
+              </div>
+              <div id="processInstanceList" class="process-instance-list"></div>
+            </section>
+          </section>
+
+          <div id="processTemplateModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="processTemplateModalTitle" aria-hidden="true">
+            <div class="modal-card process-template-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="processTemplateModalTitle">新建流程模板</h2>
+                  <p id="processTemplateModalHint">设置每个步骤的上一步；多个起点会形成并行线路。</p>
+                </div>
+                <button class="modal-close" type="button" data-process-template-close aria-label="关闭">×</button>
+              </div>
+              <form id="processTemplateForm" class="process-template-form">
+                <input name="expected_version" type="hidden" />
+                <div class="process-template-basic">
+                  <label>模板名称<input name="name" maxlength="80" placeholder="例如：新员工入组准备" required /></label>
+                  <label>模板说明<textarea name="description" maxlength="1000" rows="3" placeholder="说明适用场景和完成目标"></textarea></label>
+                </div>
+                <section class="process-mindmap-editor">
+                  <div class="process-mindmap-editor-head">
+                    <div>
+                      <strong>流程脑图</strong>
+                      <span>点击节点编辑；添加子步骤形成分支，添加并行线创建新的起点。</span>
+                    </div>
+                    <div class="process-mindmap-actions">
+                      <button id="addProcessTemplateItemBtn" type="button">＋ 子步骤</button>
+                      <button id="addProcessRootItemBtn" class="secondary" type="button">＋ 并行线</button>
+                    </div>
+                  </div>
+                  <div id="processTemplateMindmap" class="process-template-mindmap"></div>
+                </section>
+                <div class="process-template-items-head">
+                  <div><strong>节点属性</strong><span id="processSelectedItemHint">选择脑图中的节点后编辑</span></div>
+                </div>
+                <div id="processTemplateItems" class="process-template-items"></div>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-process-template-close>取消</button>
+                  <button type="submit">保存模板</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="processStartModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="processStartModalTitle" aria-hidden="true">
+            <div class="modal-card process-start-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="processStartModalTitle">生成我的流程</h2>
+                  <p>基于模板创建独立副本，后续模板调整不会影响当前流程。</p>
+                </div>
+                <button class="modal-close" type="button" data-process-start-close aria-label="关闭">×</button>
+              </div>
+              <form id="processStartForm" class="process-start-form">
+                <input name="template_id" type="hidden" />
+                <div class="process-start-template">
+                  <strong id="processStartTemplateName"></strong>
+                  <span id="processStartTemplateMeta"></span>
+                </div>
+                <label>流程名称<input name="title" maxlength="120" required /></label>
+                <label>截止日期<input name="due_date" type="date" /></label>
+                <div id="processStartChecklistPreview" class="process-start-checklist-preview"></div>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-process-start-close>取消</button>
+                  <button type="submit">开始流程</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="meetings" class="page">
             <section class="panel meeting-calendar-panel">
               <div class="panel-title">
@@ -1117,6 +1228,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260718-org-tree-v1"></script>
+    <script type="module" src="/app.js?v=20260725-member-sso-mindmap-v1"></script>
   </body>
 </html>

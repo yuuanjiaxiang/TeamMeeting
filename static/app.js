@@ -24,6 +24,15 @@ const state = {
   meetings: [],
   morningItems: [],
   morningUsers: [],
+  processTemplates: [],
+  processInstances: [],
+  processScope: "mine",
+  processStatus: "active",
+  editingProcessTemplateId: null,
+  selectedProcessTemplateItemKey: null,
+  selectedProcessTemplateId: null,
+  selectedProcessTemplateGraphId: null,
+  processInstanceViews: {},
   thankUsers: [],
   morningReadOnly: false,
   morningCarriedCount: 0,
@@ -74,6 +83,7 @@ const pages = [
   ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
   ["archive", "⌕", "搜索归档", "跨年度搜索会议、讨论和早例会事项。"],
   ["morning", "☀", "早例会", "按人追踪当天事项、风险和下一步。"],
+  ["processes", "✓", "流程中心", "从团队模板生成个人流程，并按 Checklist 推进。"],
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
   ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
@@ -1649,6 +1659,510 @@ async function loadMorning() {
   renderMorning();
 }
 
+let processTemplateKeySequence = 0;
+
+function nextProcessTemplateKey() {
+  processTemplateKeySequence += 1;
+  return `step-${Date.now()}-${processTemplateKeySequence}`;
+}
+
+function processTemplateItemEditor(item = {}, index = 0) {
+  const itemKey = item._key || nextProcessTemplateKey();
+  return `
+    <div class="process-template-item-editor ${state.selectedProcessTemplateItemKey === itemKey ? "is-selected" : ""}" data-process-template-item data-process-item-key="${escapeHtml(itemKey)}" data-process-parent-key="${escapeHtml(item._parentKey || "")}">
+      <span class="process-template-item-order">${index + 1}</span>
+      <div class="process-template-item-fields">
+        <input data-process-item-title maxlength="120" value="${escapeHtml(item.title || "")}" placeholder="步骤标题，例如：确认输入资料齐全" />
+        <input data-process-item-description maxlength="500" value="${escapeHtml(item.description || "")}" placeholder="补充完成标准或注意事项（可选）" />
+      </div>
+      <label class="process-parent-field">
+        <span>上一步</span>
+        <select data-process-item-parent aria-label="上一步"></select>
+      </label>
+      <label class="process-required-toggle"><input data-process-item-required type="checkbox" ${item.required === false ? "" : "checked"} /><span>必做</span></label>
+      <div class="process-template-item-actions">
+        <button class="icon-button" type="button" data-process-item-move="-1" title="上移" aria-label="上移">↑</button>
+        <button class="icon-button" type="button" data-process-item-move="1" title="下移" aria-label="下移">↓</button>
+        <button class="icon-button danger" type="button" data-process-item-remove title="删除 Checklist" aria-label="删除 Checklist">×</button>
+      </div>
+    </div>
+  `;
+}
+
+function processTemplateEditorItems() {
+  return $$("#processTemplateItems [data-process-template-item]").map((row, index) => ({
+    key: row.dataset.processItemKey || "",
+    parentKey: $("[data-process-item-parent]", row)?.value || row.dataset.processParentKey || "",
+    title: $("[data-process-item-title]", row)?.value.trim() || `步骤 ${index + 1}`,
+    required: Boolean($("[data-process-item-required]", row)?.checked),
+    order: index + 1,
+  }));
+}
+
+function renderProcessTemplateMindmap() {
+  const target = $("#processTemplateMindmap");
+  if (!target) return;
+  const items = processTemplateEditorItems();
+  if (!items.length) {
+    target.innerHTML = '<div class="process-flow-empty">请添加流程节点</div>';
+    return;
+  }
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  const children = new Map();
+  items.forEach((item) => {
+    if (!item.parentKey || !byKey.has(item.parentKey)) return;
+    if (!children.has(item.parentKey)) children.set(item.parentKey, []);
+    children.get(item.parentKey).push(item);
+  });
+  const roots = items.filter((item) => !item.parentKey || !byKey.has(item.parentKey));
+  const renderNode = (item, trail = new Set()) => {
+    if (trail.has(item.key)) return "";
+    const nextTrail = new Set(trail);
+    nextTrail.add(item.key);
+    const descendants = children.get(item.key) || [];
+    return `
+      <li>
+        <button
+          class="process-mindmap-node ${state.selectedProcessTemplateItemKey === item.key ? "is-selected" : ""}"
+          type="button"
+          data-process-mindmap-select="${escapeHtml(item.key)}"
+          title="点击编辑 ${escapeHtml(item.title)}"
+        >
+          <span>${item.order}</span>
+          <strong>${escapeHtml(item.title)}</strong>
+          <small>${item.required ? "必做" : "可选"}</small>
+        </button>
+        ${descendants.length ? `<ul>${descendants.map((child) => renderNode(child, nextTrail)).join("")}</ul>` : ""}
+      </li>`;
+  };
+  target.innerHTML = `
+    <div class="process-flow-scroll process-mindmap-scroll">
+      <div class="process-flow-tree process-mindmap-tree">
+        <ul>${roots.map((root) => renderNode(root)).join("")}</ul>
+      </div>
+    </div>`;
+}
+
+function selectProcessTemplateItem(itemKey, focusTitle = false) {
+  const rows = $$("#processTemplateItems [data-process-template-item]");
+  const selected = rows.find((row) => row.dataset.processItemKey === itemKey) || rows[0];
+  state.selectedProcessTemplateItemKey = selected?.dataset.processItemKey || null;
+  rows.forEach((row) => row.classList.toggle("is-selected", row === selected));
+  const hint = $("#processSelectedItemHint");
+  if (hint && selected) {
+    const title = $("[data-process-item-title]", selected)?.value.trim() || "未命名节点";
+    hint.textContent = `正在编辑：${title}`;
+  }
+  const addChild = $("#addProcessTemplateItemBtn");
+  if (addChild) addChild.disabled = !selected;
+  renderProcessTemplateMindmap();
+  if (focusTitle) $("[data-process-item-title]", selected)?.focus();
+}
+
+function appendProcessTemplateItem(parentKey = "") {
+  const target = $("#processTemplateItems");
+  if (!target) return;
+  const itemKey = nextProcessTemplateKey();
+  target.insertAdjacentHTML(
+    "beforeend",
+    processTemplateItemEditor(
+      {
+        _key: itemKey,
+        _parentKey: parentKey,
+      },
+      target.children.length,
+    ),
+  );
+  state.selectedProcessTemplateItemKey = itemKey;
+  refreshProcessTemplateItemOrder();
+  selectProcessTemplateItem(itemKey, true);
+}
+
+function refreshProcessTemplateItemOrder() {
+  const rows = $$("#processTemplateItems [data-process-template-item]");
+  rows.forEach((row, index) => {
+    const order = $(".process-template-item-order", row);
+    if (order) order.textContent = index + 1;
+    const select = $("[data-process-item-parent]", row);
+    if (!select) return;
+    const currentParent = select.value || row.dataset.processParentKey || "";
+    const options = rows.slice(0, index).map((candidate, candidateIndex) => {
+      const key = candidate.dataset.processItemKey || "";
+      const title = $("[data-process-item-title]", candidate)?.value.trim() || `步骤 ${candidateIndex + 1}`;
+      return `<option value="${escapeHtml(key)}">${candidateIndex + 1}. ${escapeHtml(title)}</option>`;
+    });
+    select.innerHTML = `<option value="">并行起点</option>${options.join("")}`;
+    const validParent = rows.slice(0, index).some((candidate) => candidate.dataset.processItemKey === currentParent);
+    select.value = validParent ? currentParent : "";
+    row.dataset.processParentKey = select.value;
+    const requiredInput = $("[data-process-item-required]", row);
+    const parentRow = rows.slice(0, index).find((candidate) => candidate.dataset.processItemKey === select.value);
+    const parentOptional = Boolean(parentRow && !$("[data-process-item-required]", parentRow)?.checked);
+    if (requiredInput) {
+      if (parentOptional) requiredInput.checked = false;
+      requiredInput.disabled = parentOptional;
+      requiredInput.title = parentOptional ? "上一步为可选节点，本节点也必须是可选" : "";
+    }
+  });
+  if (!rows.some((row) => row.dataset.processItemKey === state.selectedProcessTemplateItemKey)) {
+    state.selectedProcessTemplateItemKey = rows[0]?.dataset.processItemKey || null;
+  }
+  selectProcessTemplateItem(state.selectedProcessTemplateItemKey);
+}
+
+function closeProcessTemplateModal() {
+  $("#processTemplateModal")?.classList.add("hidden");
+  $("#processTemplateModal")?.setAttribute("aria-hidden", "true");
+  state.editingProcessTemplateId = null;
+  state.selectedProcessTemplateItemKey = null;
+  document.body.classList.remove("modal-open");
+}
+
+function openProcessTemplateModal(templateId = null) {
+  const template = state.processTemplates.find((item) => Number(item.id) === Number(templateId));
+  const modal = $("#processTemplateModal");
+  const form = $("#processTemplateForm");
+  if (!modal || !form) return;
+  state.editingProcessTemplateId = template?.id || null;
+  $("#processTemplateModalTitle").textContent = template ? "编辑流程模板" : "新建流程模板";
+  $("#processTemplateModalHint").textContent = template
+    ? "修改只影响以后生成的流程，已经生成的个人流程保持原样。"
+    : "设置每个步骤的上一步；多个起点会形成并行线路。";
+  form.reset();
+  form.elements.name.value = template?.name || "";
+  form.elements.description.value = template?.description || "";
+  form.elements.expected_version.value = template?.version || "";
+  const keyById = new Map((template?.items || []).map((item) => [Number(item.id), `item-${item.id}`]));
+  const items = template?.items?.length
+    ? template.items.map((item) => ({
+        ...item,
+        _key: keyById.get(Number(item.id)),
+        _parentKey: keyById.get(Number(item.parent_item_id)) || "",
+      }))
+    : [{ title: "", description: "", required: true, _key: nextProcessTemplateKey(), _parentKey: "" }];
+  state.selectedProcessTemplateItemKey = items[0]?._key || null;
+  $("#processTemplateItems").innerHTML = items.map(processTemplateItemEditor).join("");
+  refreshProcessTemplateItemOrder();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.name.focus();
+}
+
+function processTemplatePayload(form) {
+  const items = $$("#processTemplateItems [data-process-template-item]").map((row) => ({
+    key: row.dataset.processItemKey || "",
+    parent_key: $("[data-process-item-parent]", row)?.value || "",
+    title: $("[data-process-item-title]", row)?.value.trim() || "",
+    description: $("[data-process-item-description]", row)?.value.trim() || "",
+    required: Boolean($("[data-process-item-required]", row)?.checked),
+  }));
+  if (!items.length) throw new Error("流程模板至少需要一个 Checklist");
+  if (items.some((item) => !item.title)) throw new Error("请填写每个 Checklist 的标题");
+  return {
+    name: form.elements.name.value.trim(),
+    description: form.elements.description.value.trim(),
+    expected_version: form.elements.expected_version.value || undefined,
+    items,
+  };
+}
+
+function closeProcessStartModal() {
+  $("#processStartModal")?.classList.add("hidden");
+  $("#processStartModal")?.setAttribute("aria-hidden", "true");
+  state.selectedProcessTemplateId = null;
+  document.body.classList.remove("modal-open");
+}
+
+function openProcessStartModal(templateId) {
+  const template = state.processTemplates.find((item) => Number(item.id) === Number(templateId));
+  const modal = $("#processStartModal");
+  const form = $("#processStartForm");
+  if (!template || !modal || !form) return;
+  state.selectedProcessTemplateId = template.id;
+  form.reset();
+  form.elements.template_id.value = template.id;
+  form.elements.title.value = template.name;
+  $("#processStartTemplateName").textContent = template.name;
+  $("#processStartTemplateMeta").textContent = `${template.items.length} 项 Checklist${template.inherited ? ` · 来自 ${template.org_unit_name}` : ""}`;
+  $("#processStartChecklistPreview").innerHTML = processFlowTreeMarkup(template.items, { compact: true });
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.title.focus();
+}
+
+function processTreeModel(items = []) {
+  const ordered = [...items].sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0));
+  const byId = new Map(ordered.map((item) => [Number(item.id), item]));
+  const children = new Map();
+  ordered.forEach((item) => {
+    const parentId = Number(item.parent_item_id || 0);
+    if (!parentId || !byId.has(parentId)) return;
+    if (!children.has(parentId)) children.set(parentId, []);
+    children.get(parentId).push(item);
+  });
+  let roots = ordered.filter((item) => !Number(item.parent_item_id || 0) || !byId.has(Number(item.parent_item_id)));
+  if (!roots.length && ordered.length) roots = [ordered[0]];
+  return { ordered, byId, children, roots };
+}
+
+function processTreeMetrics(items = []) {
+  const model = processTreeModel(items);
+  const depthCache = new Map();
+  const depthOf = (item, trail = new Set()) => {
+    if (depthCache.has(item.id)) return depthCache.get(item.id);
+    const parentId = Number(item.parent_item_id || 0);
+    if (!parentId || !model.byId.has(parentId) || trail.has(item.id)) return 1;
+    const nextTrail = new Set(trail);
+    nextTrail.add(item.id);
+    const depth = depthOf(model.byId.get(parentId), nextTrail) + 1;
+    depthCache.set(item.id, depth);
+    return depth;
+  };
+  return {
+    roots: model.roots.length,
+    depth: model.ordered.reduce((maximum, item) => Math.max(maximum, depthOf(item)), 0),
+    branches: [...model.children.values()].filter((itemsAtNode) => itemsAtNode.length > 1).length,
+  };
+}
+
+function processFlowTreeMarkup(items = [], options = {}) {
+  if (!items.length) return '<div class="process-flow-empty">还没有流程节点</div>';
+  const { instance = false, editable = false, compact = false } = options;
+  const model = processTreeModel(items);
+  const orderById = new Map(model.ordered.map((item, index) => [Number(item.id), index + 1]));
+  const renderNode = (item, path = new Set()) => {
+    const itemId = Number(item.id);
+    if (path.has(itemId)) return "";
+    const nextPath = new Set(path);
+    nextPath.add(itemId);
+    const parent = model.byId.get(Number(item.parent_item_id || 0));
+    const locked = Boolean(instance && parent && !parent.completed);
+    const descendants = model.children.get(itemId) || [];
+    const statusControl = instance
+      ? `
+        <input
+          type="checkbox"
+          data-process-item-toggle="${item.id}"
+          data-process-item-version="${item.version}"
+          aria-label="${escapeHtml(item.title)}"
+          ${item.completed ? "checked" : ""}
+          ${editable && !locked ? "" : "disabled"}
+        />
+        <span class="process-flow-check" aria-hidden="true">${item.completed ? "✓" : locked ? "…" : ""}</span>`
+      : `<span class="process-flow-order">${orderById.get(itemId) || ""}</span>`;
+    return `
+      <li>
+        <label class="process-flow-node ${item.completed ? "is-done" : ""} ${locked ? "is-locked" : ""} ${item.required ? "" : "is-optional"}">
+          ${statusControl}
+          <span class="process-flow-node-copy">
+            <strong>${escapeHtml(item.title)}</strong>
+            ${!compact && item.description ? `<small>${escapeHtml(item.description)}</small>` : ""}
+            ${locked ? "<em>等待上一步</em>" : item.required ? "<em>必做</em>" : "<em>可选</em>"}
+          </span>
+        </label>
+        ${descendants.length ? `<ul>${descendants.map((child) => renderNode(child, nextPath)).join("")}</ul>` : ""}
+      </li>`;
+  };
+  return `
+    <div class="process-flow-scroll ${compact ? "is-compact" : ""}">
+      <div class="process-flow-tree">
+        <ul>${model.roots.map((root) => renderNode(root)).join("")}</ul>
+      </div>
+    </div>`;
+}
+
+function renderProcessTemplateGraph(templates) {
+  const target = $("#processTemplateGraph");
+  if (!target) return;
+  if (!templates.length) {
+    target.innerHTML = "";
+    target.classList.add("hidden");
+    return;
+  }
+  const selected = templates.find(
+    (template) => Number(template.id) === Number(state.selectedProcessTemplateGraphId),
+  ) || templates[0];
+  state.selectedProcessTemplateGraphId = selected.id;
+  const metrics = processTreeMetrics(selected.items);
+  target.classList.remove("hidden");
+  target.innerHTML = `
+    <div class="process-template-graph-head">
+      <div>
+        <span>当前流程图</span>
+        <h3>${escapeHtml(selected.name)}</h3>
+      </div>
+      <div class="process-graph-metrics">
+        <span>${metrics.roots} 条并行线</span>
+        <span>${metrics.depth} 层</span>
+        <span>${metrics.branches} 个分支点</span>
+      </div>
+    </div>
+    ${processFlowTreeMarkup(selected.items)}
+  `;
+}
+
+function renderProcessTemplates() {
+  const target = $("#processTemplateList");
+  if (!target) return;
+  const templates = state.processTemplates || [];
+  if (!templates.length) {
+    renderProcessTemplateGraph([]);
+    target.innerHTML = `
+      <div class="process-empty">
+        <strong>还没有可用流程模板</strong>
+        <span>${isAdminView() ? "先新建一个模板，把经常重复的步骤固化下来。" : "请联系管理员维护团队流程模板。"}</span>
+      </div>`;
+    return;
+  }
+  renderProcessTemplateGraph(templates);
+  target.innerHTML = templates.map((template) => `
+    <article class="process-template-card ${Number(template.id) === Number(state.selectedProcessTemplateGraphId) ? "is-selected" : ""}">
+      <div class="process-template-head">
+        <div>
+          <div class="process-template-title-line">
+            <h3>${escapeHtml(template.name)}</h3>
+            ${template.inherited ? `<span class="process-origin-badge">上级 · ${escapeHtml(template.org_unit_name)}</span>` : ""}
+          </div>
+          <p>${escapeHtml(template.description || "按顺序完成以下标准步骤。")}</p>
+        </div>
+        ${isAdminView() && !template.inherited ? `
+          <div class="process-card-menu">
+            <button class="icon-button" type="button" data-process-template-edit="${template.id}" title="编辑模板" aria-label="编辑模板">✎</button>
+            <button class="icon-button danger" type="button" data-process-template-delete="${template.id}" data-process-template-name="${escapeHtml(template.name)}" title="停用模板" aria-label="停用模板">×</button>
+          </div>` : ""}
+      </div>
+      <div class="process-template-steps">
+        ${template.items.slice(0, 4).map((item, index) => `
+          <div><span>${index + 1}</span><strong>${escapeHtml(item.title)}</strong></div>
+        `).join("")}
+        ${template.items.length > 4 ? `<small>还有 ${template.items.length - 4} 项</small>` : ""}
+      </div>
+      <div class="process-template-footer">
+        <span>${template.items.length} 项 Checklist · 已生成 ${Number(template.instance_count || 0)} 次</span>
+        <div>
+          <button class="secondary" type="button" data-process-template-graph="${template.id}">查看流程图</button>
+          ${canOperate("processes", "create") && state.user ? `<button type="button" data-process-start="${template.id}">生成我的流程</button>` : ""}
+        </div>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderProcessInstances() {
+  const target = $("#processInstanceList");
+  if (!target) return;
+  const instances = state.processInstances || [];
+  if (!instances.length) {
+    target.innerHTML = `
+      <div class="process-empty">
+        <strong>${state.processStatus === "completed" ? "还没有已完成流程" : "当前没有进行中的流程"}</strong>
+        <span>${state.processStatus === "active" ? "从上方模板生成一个个人流程即可开始。" : "完成全部必做项后会自动归档到这里。"}</span>
+      </div>`;
+    return;
+  }
+  target.innerHTML = instances.map((instance, index) => {
+    const editable = Boolean(instance.can_edit) && canOperate("processes", "edit");
+    const itemMap = new Map(instance.items.map((item) => [Number(item.id), item]));
+    const view = state.processInstanceViews[instance.id] || "graph";
+    const checklistMarkup = instance.items.map((item) => {
+      const parent = itemMap.get(Number(item.parent_item_id || 0));
+      const locked = Boolean(parent && !parent.completed);
+      return `
+        <label class="process-check-item ${item.completed ? "is-done" : ""} ${locked ? "is-locked" : ""}">
+          <input type="checkbox" data-process-item-toggle="${item.id}" data-process-item-version="${item.version}" ${item.completed ? "checked" : ""} ${editable && !locked ? "" : "disabled"} />
+          <span class="process-check-control" aria-hidden="true"></span>
+          <span class="process-check-copy">
+            <strong>${escapeHtml(item.title)}</strong>
+            ${item.description ? `<small>${escapeHtml(item.description)}</small>` : ""}
+            ${parent ? `<small class="process-parent-copy">上一步：${escapeHtml(parent.title)}</small>` : '<small class="process-parent-copy">并行起点</small>'}
+            ${item.completed_at ? `<em>${escapeHtml(item.completed_by_name || "成员")} · ${escapeHtml(shortDateTime(item.completed_at))}</em>` : locked ? "<em>等待上一步完成</em>" : ""}
+          </span>
+          ${item.required ? '<span class="process-required-badge">必做</span>' : '<span class="process-optional-badge">可选</span>'}
+        </label>`;
+    }).join("");
+    return `
+      <details class="process-instance-card ${instance.status === "completed" ? "is-completed" : ""} ${instance.overdue ? "is-overdue" : ""}" ${index === 0 && state.processStatus === "active" ? "open" : ""}>
+        <summary>
+          <div class="process-instance-summary-main">
+            <span class="process-status-mark">${instance.status === "completed" ? "✓" : instance.overdue ? "!" : "→"}</span>
+            <div>
+              <h3>${escapeHtml(instance.title)}</h3>
+              <p>${escapeHtml(instance.owner_name)} · ${escapeHtml(instance.template_name || "历史模板")} · 开始于 ${escapeHtml(shortDate(instance.started_at))}</p>
+            </div>
+          </div>
+          <div class="process-progress-summary">
+            <strong>${Number(instance.progress || 0)}%</strong>
+            <span>必做 ${Number(instance.required_completed || 0)} / ${Number(instance.required_total || 0)}</span>
+          </div>
+        </summary>
+        <div class="process-progress-track"><span style="width:${Number(instance.progress || 0)}%"></span></div>
+        <div class="process-instance-meta">
+          <div>
+            <span>${instance.status === "completed" ? `完成于 ${escapeHtml(shortDateTime(instance.completed_at))}` : instance.due_date ? `截止 ${escapeHtml(shortDate(instance.due_date))}` : "未设置截止日期"}</span>
+            ${instance.overdue ? '<span class="process-overdue-badge">已逾期</span>' : ""}
+            ${state.processScope === "team" ? `<span>${escapeHtml(instance.org_unit_name || "")}</span>` : ""}
+          </div>
+          <div class="segmented-control process-instance-view-switch" role="group" aria-label="流程展示方式">
+            <button class="${view === "graph" ? "active" : ""}" type="button" data-process-instance-view="${instance.id}" data-process-view="graph">流程图</button>
+            <button class="${view === "list" ? "active" : ""}" type="button" data-process-instance-view="${instance.id}" data-process-view="list">清单</button>
+          </div>
+        </div>
+        ${view === "graph"
+          ? `<div class="process-instance-graph">${processFlowTreeMarkup(instance.items, { instance: true, editable })}</div>`
+          : `<div class="process-checklist">${checklistMarkup}</div>`}
+        ${editable && canOperate("processes", "delete") ? `
+          <div class="process-instance-actions">
+            <button class="secondary danger" type="button" data-process-instance-delete="${instance.id}" data-process-instance-name="${escapeHtml(instance.title)}">取消流程</button>
+          </div>` : ""}
+      </details>
+    `;
+  }).join("");
+}
+
+function renderProcesses() {
+  const active = state.processInstances.filter((item) => item.status === "active").length;
+  const completed = state.processInstances.filter((item) => item.status === "completed").length;
+  const overdue = state.processInstances.filter((item) => item.overdue).length;
+  const stats = $("#processStats");
+  if (stats) {
+    stats.innerHTML = `
+      <div><span>可用模板</span><strong>${state.processTemplates.length}</strong></div>
+      <div><span>当前列表</span><strong>${state.processInstances.length}</strong></div>
+      <div><span>进行中</span><strong>${active}</strong></div>
+      <div class="${overdue ? "is-alert" : ""}"><span>已逾期</span><strong>${overdue}</strong></div>
+      <div><span>已完成</span><strong>${completed}</strong></div>
+    `;
+  }
+  $("#openProcessTemplateBtn")?.classList.toggle("hidden", !isAdminView());
+  $$("[data-process-scope]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.processScope === state.processScope);
+    button.classList.toggle("hidden", button.dataset.processScope === "team" && !isAdminView());
+  });
+  $$("[data-process-status]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.processStatus === state.processStatus);
+  });
+  renderProcessTemplates();
+  renderProcessInstances();
+}
+
+async function loadProcesses() {
+  if (!canLoadModule("processes") || !state.user) return;
+  if (!isAdminView()) state.processScope = "mine";
+  const query = new URLSearchParams({
+    scope: state.processScope,
+    status: state.processStatus,
+  });
+  const [templates, instances] = await Promise.all([
+    api("/api/process-templates"),
+    api(`/api/process-instances?${query}`),
+  ]);
+  state.processTemplates = templates.templates || [];
+  state.processInstances = instances.instances || [];
+  renderProcesses();
+}
+
 async function loadUsers() {
   if (!isAdminView()) return;
   const [data, typeData, orgData] = await Promise.all([
@@ -2143,7 +2657,7 @@ function renderSettingField(setting) {
   }
   const inputType = setting.value_type === "number" ? "number" : setting.value_type === "password" ? "password" : "text";
   const placeholder = setting.value_type === "password" && setting.configured ? "已配置，留空保持不变" : "";
-  return `<label class="setting-field${modeClass}">
+  return `<label class="setting-field${modeClass}" data-setting-key="${key}" data-configured="${setting.configured ? "true" : "false"}">
     <span>${escapeHtml(setting.label)}</span>
     <input name="${key}" type="${inputType}" value="${escapeHtml(setting.value || "")}" placeholder="${placeholder}">
     <small>${escapeHtml(setting.description || "")}</small>
@@ -2153,9 +2667,9 @@ function renderSettingField(setting) {
 function renderSettings() {
   const form = $("#settingsForm");
   if (!form) return;
-  const ssoOrder = ["sso_enabled", "sso_auto_login", "sso_mode", "sso_issuer_url", "sso_authorization_url", "sso_token_url", "sso_userinfo_url", "sso_client_id", "sso_client_secret", "sso_redirect_uri", "sso_scopes", "sso_username_claim", "sso_display_name_claim", "sso_group_claim", "sso_default_user_type", "sso_auto_provision", "sso_button_label"];
-  const ssoSettings = state.settings.filter((setting) => setting.key.startsWith("sso_"))
-    .sort((left, right) => ssoOrder.indexOf(left.key) - ssoOrder.indexOf(right.key));
+  const ssoSettings = state.settings.filter((setting) => setting.key.startsWith("sso_"));
+  const ssoByKey = new Map(ssoSettings.map((setting) => [setting.key, setting]));
+  const renderSsoFields = (keys) => keys.map((key) => ssoByKey.get(key)).filter(Boolean).map(renderSettingField).join("");
   const generalSettings = state.settings.filter((setting) => !setting.key.startsWith("sso_"));
   form.innerHTML = `
     <div class="settings-grid">
@@ -2163,8 +2677,29 @@ function renderSettings() {
     </div>
     <details class="settings-group" open>
       <summary>企业 SSO 登录</summary>
-      <p class="settings-group-note">推荐只填写 Issuer、Client ID、回调地址和工号字段；华为云 OneAccess 可选择手动 OAuth2，填入服务配置中的授权、Token、UserInfo 地址，并把 employee_id、name、groups 映射给应用。群组只生成建议团队，由管理员确认后生效。全程使用授权码 + PKCE。</p>
-      <div class="settings-grid">${ssoSettings.map(renderSettingField).join("")}</div>
+      <p class="settings-group-note">已知认证、Access Token、UserInfo 三个地址时，选择“手动 OAuth2 端点”并按顺序填写即可。系统使用授权码 + PKCE，群组只生成建议团队，由管理员确认后生效。</p>
+      <div class="sso-setup-head">
+        <div class="sso-mode-field">${renderSsoFields(["sso_mode"])}</div>
+        <div id="ssoConfigReadiness" class="sso-config-readiness" aria-live="polite"></div>
+      </div>
+      <section class="sso-config-section sso-discovery-only">
+        <div><strong>OIDC 自动发现</strong><span>身份平台提供 Issuer 时只需填写一个入口。</span></div>
+        <div class="settings-grid">${renderSsoFields(["sso_issuer_url"])}</div>
+      </section>
+      <section class="sso-config-section sso-manual-only">
+        <div><strong>OAuth2 服务地址</strong><span>直接粘贴身份平台提供的三个地址。</span></div>
+        <div class="sso-endpoint-stack">
+          ${renderSsoFields(["sso_authorization_url", "sso_token_url", "sso_userinfo_url"])}
+        </div>
+      </section>
+      <section class="sso-config-section">
+        <div><strong>应用凭据与回调</strong><span>Client Secret 留空表示保持原配置不变。</span></div>
+        <div class="settings-grid">${renderSsoFields(["sso_client_id", "sso_client_secret", "sso_redirect_uri", "sso_scopes"])}</div>
+      </section>
+      <details class="sso-advanced-settings">
+        <summary>字段映射与登录策略</summary>
+        <div class="settings-grid">${renderSsoFields(["sso_username_claim", "sso_display_name_claim", "sso_group_claim", "sso_button_label", "sso_enabled", "sso_auto_login", "sso_auto_provision", "sso_default_user_type"])}</div>
+      </details>
     </details>
     <button>保存系统配置</button>`;
   updateSsoModeFields();
@@ -2174,6 +2709,22 @@ function updateSsoModeFields() {
   const manual = $("#ssoModeSelect")?.value === "manual";
   $$(".sso-discovery-only").forEach((field) => field.classList.toggle("hidden", manual));
   $$(".sso-manual-only").forEach((field) => field.classList.toggle("hidden", !manual));
+  const readiness = $("#ssoConfigReadiness");
+  if (!readiness) return;
+  const valueOf = (key) => $(`#settingsForm [name="${key}"]`)?.value.trim() || "";
+  const required = manual
+    ? [
+        ["sso_authorization_url", "认证地址"],
+        ["sso_token_url", "Access Token 地址"],
+        ["sso_userinfo_url", "UserInfo 地址"],
+        ["sso_client_id", "Client ID"],
+      ]
+    : [["sso_issuer_url", "Issuer"], ["sso_client_id", "Client ID"]];
+  const missing = required.filter(([key]) => !valueOf(key)).map(([, label]) => label);
+  readiness.classList.toggle("is-ready", missing.length === 0);
+  readiness.innerHTML = missing.length
+    ? `<strong>还差 ${missing.length} 项</strong><span>${missing.map(escapeHtml).join("、")}</span>`
+    : "<strong>配置完整</strong><span>保存后即可发起企业登录</span>";
 }
 
 function renderBackups() {
@@ -4145,6 +4696,7 @@ async function refreshPageData(id = state.currentPage) {
     dashboard: loadDashboard,
     archive: loadArchive,
     morning: loadMorning,
+    processes: loadProcesses,
     meetings: loadMeetings,
     shifts: loadShifts,
     rules: loadRulesAndScores,
@@ -4164,6 +4716,7 @@ async function refreshAll() {
   if (canLoadModule("rules")) loaders.push(loadRulesAndScores);
   if (canLoadModule("members")) loaders.push(loadMembers);
   if (canLoadModule("morning")) loaders.push(loadMorning);
+  if (!isGuest() && canLoadModule("processes")) loaders.push(loadProcesses);
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
@@ -4822,6 +5375,7 @@ function renderMemberCard(member, memberIndex = 0, memberCount = 1) {
       <section class="member-profile">
         ${isAdminView() ? `
           <div class="member-order-actions" aria-label="调整成员顺序">
+            <span class="member-drag-handle" draggable="true" data-member-drag-id="${member.id}" title="拖动调整顺序" aria-label="拖动调整成员顺序">⋮⋮</span>
             <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="up" title="向前移动" ${memberIndex === 0 ? "disabled" : ""}>↑</button>
             <button class="member-order-btn" type="button" data-member-id="${member.id}" data-order-direction="down" title="向后移动" ${memberIndex === memberCount - 1 ? "disabled" : ""}>↓</button>
           </div>` : ""}
@@ -4848,13 +5402,9 @@ function renderMemberCards() {
   return state.members.map((member, index) => renderMemberCard(member, index, state.members.length)).join("");
 }
 
-async function moveMemberCard(memberId, direction) {
-  const member = state.members.find((item) => Number(item.id) === Number(memberId));
-  if (!member || !isAdminView()) return;
-  const index = state.members.findIndex((item) => Number(item.id) === Number(memberId));
-  const swapIndex = direction === "up" ? index - 1 : index + 1;
-  if (index < 0 || swapIndex < 0 || swapIndex >= state.members.length) return;
-  [state.members[index], state.members[swapIndex]] = [state.members[swapIndex], state.members[index]];
+async function saveMemberOrder(nextMembers, successMessage = "成员顺序已保存") {
+  const previousMembers = [...state.members];
+  state.members = nextMembers;
   $("#memberList").innerHTML = renderMemberCards();
   try {
     const data = await api("/api/members/order", {
@@ -4863,11 +5413,39 @@ async function moveMemberCard(memberId, direction) {
     });
     state.members = data.members || state.members;
     $("#memberList").innerHTML = renderMemberCards();
-    toast("成员顺序已保存");
+    toast(successMessage);
   } catch (error) {
-    await loadMembers();
+    state.members = previousMembers;
+    $("#memberList").innerHTML = renderMemberCards();
     throw error;
   }
+}
+
+async function moveMemberCard(memberId, direction) {
+  const member = state.members.find((item) => Number(item.id) === Number(memberId));
+  if (!member || !isAdminView()) return;
+  const index = state.members.findIndex((item) => Number(item.id) === Number(memberId));
+  const swapIndex = direction === "up" ? index - 1 : index + 1;
+  if (index < 0 || swapIndex < 0 || swapIndex >= state.members.length) return;
+  const nextMembers = [...state.members];
+  [nextMembers[index], nextMembers[swapIndex]] = [nextMembers[swapIndex], nextMembers[index]];
+  await saveMemberOrder(nextMembers);
+}
+
+async function reorderMemberCards(draggedMemberId, targetMemberId, placeAfter) {
+  if (!isAdminView()) return;
+  const draggedId = Number(draggedMemberId);
+  const targetId = Number(targetMemberId);
+  if (!draggedId || !targetId || draggedId === targetId) return;
+  const nextMembers = [...state.members];
+  const draggedIndex = nextMembers.findIndex((member) => Number(member.id) === draggedId);
+  if (draggedIndex < 0) return;
+  const [dragged] = nextMembers.splice(draggedIndex, 1);
+  const targetIndex = nextMembers.findIndex((member) => Number(member.id) === targetId);
+  if (targetIndex < 0) return;
+  nextMembers.splice(targetIndex + (placeAfter ? 1 : 0), 0, dragged);
+  if (nextMembers.every((member, index) => Number(member.id) === Number(state.members[index]?.id))) return;
+  await saveMemberOrder(nextMembers, "拖动排序已保存");
 }
 
 async function loadMembers() {
@@ -5140,6 +5718,81 @@ function bindEvents() {
     };
     return api("/api/morning-items", { method: "POST", body: JSON.stringify(payload) });
   });
+  $("#processTemplateForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      const templateId = state.editingProcessTemplateId;
+      await api(templateId ? `/api/process-templates/${templateId}` : "/api/process-templates", {
+        method: templateId ? "PATCH" : "POST",
+        body: JSON.stringify(processTemplatePayload(form)),
+      });
+      closeProcessTemplateModal();
+      await loadProcesses();
+      toast(templateId ? "流程模板已更新" : "流程模板已创建");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+  $("#processTemplateItems")?.addEventListener("input", (event) => {
+    if (event.target.closest("[data-process-item-title]")) refreshProcessTemplateItemOrder();
+  });
+  $("#processTemplateItems")?.addEventListener("change", (event) => {
+    const parentSelect = event.target.closest("[data-process-item-parent]");
+    if (parentSelect) {
+      const row = parentSelect.closest("[data-process-template-item]");
+      if (row) row.dataset.processParentKey = parentSelect.value;
+      refreshProcessTemplateItemOrder();
+      return;
+    }
+    if (event.target.closest("[data-process-item-required]")) refreshProcessTemplateItemOrder();
+  });
+  $("#processStartForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      await api("/api/process-instances", {
+        method: "POST",
+        body: JSON.stringify(formData(form)),
+      });
+      state.processScope = "mine";
+      state.processStatus = "active";
+      closeProcessStartModal();
+      await loadProcesses();
+      toast("已生成个人流程");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+  $("#processInstanceList")?.addEventListener("change", async (event) => {
+    const checkbox = event.target.closest("[data-process-item-toggle]");
+    if (!checkbox) return;
+    checkbox.disabled = true;
+    try {
+      const result = await api(`/api/process-instance-items/${checkbox.dataset.processItemToggle}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          completed: checkbox.checked,
+          expected_version: Number(checkbox.dataset.processItemVersion || 1),
+        }),
+      });
+      await loadProcesses();
+      toast(result.message || (checkbox.checked ? "Checklist 已完成" : "Checklist 已恢复"));
+    } catch (error) {
+      checkbox.checked = !checkbox.checked;
+      checkbox.disabled = false;
+      toast(error.message);
+      if (error.status === 409) loadProcesses().catch(() => {});
+    }
+  });
   bindForm("#topicTypeForm", (data) => api("/api/meeting-topic-types", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#topicOptionForm", (data) => api("/api/meeting-topic-options", { method: "POST", body: JSON.stringify(data) }));
   bindForm("#linkForm", (data) => api("/api/links", { method: "POST", body: JSON.stringify(prepareLinkPayload(data)) }));
@@ -5171,6 +5824,9 @@ function bindEvents() {
     }
   });
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
+  $("#settingsForm")?.addEventListener("input", (event) => {
+    if (event.target.name?.startsWith("sso_")) updateSsoModeFields();
+  });
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
   [$("#meetingForm"), $("#meetingCreateForm")].filter(Boolean).forEach((form) => {
@@ -5348,6 +6004,8 @@ function bindEvents() {
       closeUserAccountModal();
       closeMemberEditModal();
       closeMorningHistoryModal();
+      closeProcessTemplateModal();
+      closeProcessStartModal();
       closeMeetingMinuteModal();
       closeMeetingAgendaModal();
       closeMeetingAttendanceModal();
@@ -5381,6 +6039,112 @@ function bindEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
+    if (event.target.closest("#openProcessTemplateBtn")) {
+      openProcessTemplateModal();
+      return;
+    }
+    if (event.target.closest("[data-process-template-close]") || event.target === $("#processTemplateModal")) {
+      closeProcessTemplateModal();
+      return;
+    }
+    if (event.target.closest("[data-process-start-close]") || event.target === $("#processStartModal")) {
+      closeProcessStartModal();
+      return;
+    }
+    const mindmapNode = event.target.closest("[data-process-mindmap-select]");
+    if (mindmapNode) {
+      selectProcessTemplateItem(mindmapNode.dataset.processMindmapSelect, true);
+      return;
+    }
+    if (event.target.closest("#addProcessTemplateItemBtn")) {
+      appendProcessTemplateItem(state.selectedProcessTemplateItemKey || "");
+      return;
+    }
+    if (event.target.closest("#addProcessRootItemBtn")) {
+      appendProcessTemplateItem("");
+      return;
+    }
+    const processItemRemove = event.target.closest("[data-process-item-remove]");
+    if (processItemRemove) {
+      const rows = $$("#processTemplateItems [data-process-template-item]");
+      if (rows.length <= 1) return toast("流程模板至少需要一个 Checklist");
+      const row = processItemRemove.closest("[data-process-template-item]");
+      const parentKey = row?.dataset.processParentKey || "";
+      const fallback = rows.find((candidate) => candidate.dataset.processItemKey === parentKey)
+        || row?.previousElementSibling
+        || row?.nextElementSibling;
+      row?.remove();
+      state.selectedProcessTemplateItemKey = fallback?.dataset.processItemKey || null;
+      refreshProcessTemplateItemOrder();
+      return;
+    }
+    const processItemMove = event.target.closest("[data-process-item-move]");
+    if (processItemMove) {
+      const row = processItemMove.closest("[data-process-template-item]");
+      const direction = Number(processItemMove.dataset.processItemMove || 0);
+      const sibling = direction < 0 ? row?.previousElementSibling : row?.nextElementSibling;
+      if (row && sibling) {
+        if (direction < 0) row.parentElement.insertBefore(row, sibling);
+        else row.parentElement.insertBefore(sibling, row);
+        refreshProcessTemplateItemOrder();
+      }
+      return;
+    }
+    const processTemplateEdit = event.target.closest("[data-process-template-edit]");
+    if (processTemplateEdit) {
+      openProcessTemplateModal(processTemplateEdit.dataset.processTemplateEdit);
+      return;
+    }
+    const processTemplateGraph = event.target.closest("[data-process-template-graph]");
+    if (processTemplateGraph) {
+      state.selectedProcessTemplateGraphId = Number(processTemplateGraph.dataset.processTemplateGraph);
+      renderProcessTemplates();
+      $("#processTemplateGraph")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return;
+    }
+    const processTemplateDelete = event.target.closest("[data-process-template-delete]");
+    if (processTemplateDelete) {
+      const name = processTemplateDelete.dataset.processTemplateName || "该流程模板";
+      if (!window.confirm(`确定停用“${name}”吗？已经生成的个人流程会继续保留。`)) return;
+      api(`/api/process-templates/${processTemplateDelete.dataset.processTemplateDelete}`, { method: "DELETE" })
+        .then(loadProcesses)
+        .then(() => toast("流程模板已停用"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const processStart = event.target.closest("[data-process-start]");
+    if (processStart) {
+      openProcessStartModal(processStart.dataset.processStart);
+      return;
+    }
+    const processScope = event.target.closest("[data-process-scope]");
+    if (processScope) {
+      state.processScope = processScope.dataset.processScope || "mine";
+      loadProcesses().catch((error) => toast(error.message));
+      return;
+    }
+    const processStatus = event.target.closest("[data-process-status]");
+    if (processStatus) {
+      state.processStatus = processStatus.dataset.processStatus || "active";
+      loadProcesses().catch((error) => toast(error.message));
+      return;
+    }
+    const processInstanceView = event.target.closest("[data-process-instance-view]");
+    if (processInstanceView) {
+      state.processInstanceViews[processInstanceView.dataset.processInstanceView] = processInstanceView.dataset.processView || "graph";
+      renderProcessInstances();
+      return;
+    }
+    const processInstanceDelete = event.target.closest("[data-process-instance-delete]");
+    if (processInstanceDelete) {
+      const name = processInstanceDelete.dataset.processInstanceName || "该流程";
+      if (!window.confirm(`确定取消“${name}”吗？取消后将从流程列表隐藏。`)) return;
+      api(`/api/process-instances/${processInstanceDelete.dataset.processInstanceDelete}`, { method: "DELETE" })
+        .then(loadProcesses)
+        .then(() => toast("流程已取消"))
+        .catch((error) => toast(error.message));
+      return;
+    }
     if (event.target.closest("#orgUnitCreateBtn")) {
       openOrgUnitModal();
       return;
@@ -6071,6 +6835,41 @@ function bindEvents() {
     }
   });
 
+  let draggedMemberId = null;
+  document.body.addEventListener("dragstart", (event) => {
+    const handle = event.target.closest(".member-drag-handle[draggable='true']");
+    if (!handle || !isAdminView()) return;
+    const card = handle.closest(".member-card");
+    draggedMemberId = handle.dataset.memberDragId;
+    card?.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", `member:${draggedMemberId}`);
+  });
+  document.body.addEventListener("dragover", (event) => {
+    const card = event.target.closest("#memberList .member-card");
+    if (!card || !draggedMemberId || card.dataset.memberId === draggedMemberId) return;
+    event.preventDefault();
+    const placeAfter = event.clientY > card.getBoundingClientRect().top + card.getBoundingClientRect().height / 2;
+    $$("#memberList .member-card.is-drop-before, #memberList .member-card.is-drop-after").forEach((entry) => {
+      entry.classList.remove("is-drop-before", "is-drop-after");
+    });
+    card.classList.add(placeAfter ? "is-drop-after" : "is-drop-before");
+    event.dataTransfer.dropEffect = "move";
+  });
+  document.body.addEventListener("drop", (event) => {
+    const card = event.target.closest("#memberList .member-card");
+    if (!card || !draggedMemberId || card.dataset.memberId === draggedMemberId) return;
+    event.preventDefault();
+    const placeAfter = card.classList.contains("is-drop-after");
+    reorderMemberCards(draggedMemberId, card.dataset.memberId, placeAfter).catch((error) => toast(error.message));
+  });
+  document.body.addEventListener("dragend", () => {
+    draggedMemberId = null;
+    $$("#memberList .member-card.is-dragging, #memberList .member-card.is-drop-before, #memberList .member-card.is-drop-after").forEach((entry) => {
+      entry.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+    });
+  });
+
   let draggedMeetingItemId = null;
   document.body.addEventListener("dragstart", (event) => {
     const item = event.target.closest(".meeting-agenda-item[draggable='true']");
@@ -6101,6 +6900,10 @@ function bindEvents() {
 
   document.body.addEventListener("change", (event) => {
     if (event.target.matches("#ssoModeSelect")) {
+      updateSsoModeFields();
+      return;
+    }
+    if (event.target.closest("#settingsForm") && event.target.name?.startsWith("sso_")) {
       updateSsoModeFields();
       return;
     }
