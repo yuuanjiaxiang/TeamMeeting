@@ -688,6 +688,22 @@ function renderNav() {
     .filter(([id]) => canAccessPage(id))
     .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
     .join("");
+  requestAnimationFrame(() => {
+    const nav = $("#nav");
+    const active = nav?.querySelector(".nav-item.active");
+    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+    const left = active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2;
+    nav.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+  });
+}
+
+function setSidebarAccountExpanded(expanded) {
+  const userBox = $(".user-box");
+  const button = $("#sidebarAccountToggle");
+  if (!userBox || !button) return;
+  userBox.classList.toggle("account-open", expanded);
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  button.textContent = expanded ? "收起" : "账户";
 }
 
 function switchPage(id) {
@@ -705,6 +721,9 @@ function switchPage(id) {
   $("#pageDesc").textContent = meta?.[3] || "";
   renderPageToolbar(id);
   renderNav();
+  if (window.matchMedia("(max-width: 900px)").matches) {
+    setSidebarAccountExpanded(false);
+  }
 }
 
 async function loadReferenceData() {
@@ -1140,7 +1159,8 @@ function renderPersonalMorningCalendar(items = []) {
           const segmentClass = `${hasPrevious ? "connect-left" : "segment-start"} ${hasNext ? "connect-right" : "segment-end"}`;
           const highlighted = chain.id === state.activePersonalMorningChain ? "highlighted" : "";
           const [statusLabel] = morningStatusMeta[item.status] || morningStatusMeta.todo;
-          return `<span class="personal-calendar-line ${statusClass} ${segmentClass} ${highlighted}" data-chain-id="${escapeHtml(chain.id)}" data-personal-calendar-focus="${escapeHtml(chain.id)}" tabindex="0" style="--line-color:${chain.color}" title="${escapeHtml(item.title)}">
+          const popoverEdge = date.getDay() === 1 ? "popover-edge-left" : date.getDay() === 0 ? "popover-edge-right" : "";
+          return `<span class="personal-calendar-line ${statusClass} ${segmentClass} ${highlighted} ${popoverEdge}" data-chain-id="${escapeHtml(chain.id)}" data-personal-calendar-focus="${escapeHtml(chain.id)}" tabindex="0" style="--line-color:${chain.color}" title="${escapeHtml(item.title)}">
             <span class="personal-line-popover">
               <strong>${escapeHtml(shortDate(dateKey))} · ${escapeHtml(statusLabel)} · ${escapeHtml(morningPriorityMeta[item.priority] || "中")}</strong>
               <b>${escapeHtml(item.title)}</b>
@@ -5751,6 +5771,10 @@ function bindEvents() {
       switchPage(button.dataset.page);
       refreshPageData(state.currentPage).catch((error) => toast(error.message));
     }
+  });
+  $("#sidebarAccountToggle")?.addEventListener("click", (event) => {
+    const expanded = event.currentTarget.getAttribute("aria-expanded") !== "true";
+    setSidebarAccountExpanded(expanded);
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);

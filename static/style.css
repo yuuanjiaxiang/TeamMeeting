@@ -10119,3 +10119,284 @@ body[data-theme] .org-tree-node.active .org-tree-select {
     width: 168px;
   }
 }
+
+/* Responsive compatibility hardening */
+.sidebar-account-toggle {
+  display: none;
+}
+
+.personal-calendar-line.popover-edge-left .personal-line-popover {
+  left: 0;
+  transform: translate(0, 6px);
+}
+
+.personal-calendar-line.popover-edge-right .personal-line-popover {
+  right: 0;
+  left: auto;
+  transform: translate(0, 6px);
+}
+
+.personal-calendar-line.popover-edge-left:hover .personal-line-popover,
+.personal-calendar-line.popover-edge-left:focus-visible .personal-line-popover,
+.personal-calendar-line.popover-edge-left.highlighted .personal-line-popover,
+.personal-calendar-line.popover-edge-right:hover .personal-line-popover,
+.personal-calendar-line.popover-edge-right:focus-visible .personal-line-popover,
+.personal-calendar-line.popover-edge-right.highlighted .personal-line-popover {
+  transform: translate(0, 0);
+}
+
+.personal-calendar-line.highlighted .personal-line-popover {
+  right: 0;
+  left: auto;
+}
+
+.personal-calendar-section {
+  contain: layout;
+}
+
+@media (min-width: 901px) and (max-width: 1180px) {
+  .app-shell,
+  body[data-theme] .app-shell {
+    grid-template-columns: 228px minmax(0, 1fr);
+  }
+
+  .sidebar,
+  body[data-theme] .sidebar,
+  body[data-theme="dingtalk"] .sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    height: 100vh;
+    margin: 0;
+    padding: 16px 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    overflow: visible;
+    border-right: 1px solid var(--line);
+    border-radius: 0;
+  }
+
+  nav,
+  body[data-theme] nav,
+  body[data-theme="dingtalk"] nav {
+    display: flex;
+    grid-area: auto;
+    min-width: 0;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .brand,
+  body[data-theme] .brand {
+    grid-area: auto;
+    padding: 4px 6px 12px;
+  }
+
+  .org-switcher,
+  body[data-theme] .org-switcher {
+    grid-area: auto;
+    width: auto;
+    margin: 10px 12px 6px;
+  }
+
+  .user-box,
+  body[data-theme] .user-box,
+  body[data-theme="dingtalk"] .user-box {
+    grid-area: auto;
+    width: auto;
+    margin-top: auto;
+    padding: 12px 2px 0;
+    align-self: auto;
+    align-content: normal;
+    border-top: 1px solid var(--line);
+  }
+
+  .content,
+  body[data-theme] .content {
+    width: auto;
+  }
+
+  .user-management-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .user-search-field,
+  .user-filter-result {
+    grid-column: 1 / -1;
+  }
+
+  .user-filter-result {
+    justify-self: start;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar,
+  body[data-theme] .sidebar,
+  body[data-theme="dingtalk"] .sidebar {
+    grid-template-columns: minmax(145px, 0.9fr) minmax(0, 1.1fr);
+    grid-template-areas:
+      "brand org"
+      "nav nav"
+      "user user";
+    gap: 8px 12px;
+    padding: 10px 12px;
+  }
+
+  nav,
+  body[data-theme] nav,
+  body[data-theme="dingtalk"] nav {
+    display: flex;
+    width: 100%;
+    padding-bottom: 2px;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    overscroll-behavior-x: contain;
+  }
+
+  .nav-item,
+  body[data-theme] .nav-item {
+    width: auto;
+    min-width: 100px;
+    flex: 0 0 auto;
+    justify-content: center;
+    white-space: nowrap;
+  }
+
+  .nav-item span,
+  body[data-theme] .nav-item span {
+    width: auto;
+  }
+
+  .user-box,
+  body[data-theme] .user-box,
+  body[data-theme="dingtalk"] .user-box {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    margin: 0;
+    padding: 7px 0 0;
+    align-items: center;
+    border-top: 1px solid var(--line);
+  }
+
+  #currentUser {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-account-toggle {
+    display: inline-flex;
+    min-height: 34px;
+    padding: 5px 12px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .user-box:not(.account-open) > .theme-switcher,
+  .user-box:not(.account-open) > #viewModeBtn,
+  .user-box:not(.account-open) > #passwordBtn,
+  .user-box:not(.account-open) > #loginEntryBtn,
+  .user-box:not(.account-open) > #logoutBtn {
+    display: none !important;
+  }
+
+  .user-box.account-open {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .user-box.account-open .theme-switcher {
+    grid-column: 1 / -1;
+  }
+
+  .user-box.account-open > button:not(.sidebar-account-toggle) {
+    width: 100%;
+  }
+
+  .user-box.account-open > #logoutBtn,
+  .user-box.account-open > #loginEntryBtn {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 720px) {
+  .content,
+  body[data-theme] .content {
+    padding: 12px;
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
+  }
+
+  .sidebar,
+  body[data-theme] .sidebar,
+  body[data-theme="dingtalk"] .sidebar {
+    padding-top: max(10px, env(safe-area-inset-top));
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand strong {
+    font-size: 15px;
+  }
+
+  .brand span {
+    font-size: 11px;
+  }
+
+  .org-tree-trigger,
+  body[data-theme] .org-tree-trigger {
+    min-height: 48px;
+  }
+
+  .topbar > .toolbar,
+  body[data-theme] .topbar > .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .topbar > .toolbar > button,
+  body[data-theme] .topbar > .toolbar > button {
+    flex: 1 1 120px;
+  }
+
+  .topbar > .toolbar > .period-controls,
+  body[data-theme] .topbar > .toolbar > .period-controls {
+    flex: 1 1 100%;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  .modal {
+    padding: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .modal-card {
+    max-height: calc(100dvh - 24px);
+  }
+
+  .meeting-agenda-picker-card {
+    height: calc(100dvh - 24px);
+  }
+
+  .toolbar button,
+  .modal-actions button,
+  .meeting-meta-actions button,
+  .month-switch button {
+    min-height: 42px;
+  }
+}
