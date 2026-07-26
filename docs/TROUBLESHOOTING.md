@@ -52,11 +52,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 
 ## 企业 SSO 登录失败
 
+- 页面填写过配置但 SSO 仍不可用：先查看 SSO 区底部是否显示“已保存并启用”。“配置完整”只代表当前表单已填齐，不代表已经写入数据库；灰度环境重新部署时会从正式库重新创建，灰度里单独填写的配置不会自动进入正式库；
+- Postman 能获取 UserInfo，但系统不能建号：在“系统管理 → 诊断已保存配置”粘贴同一个临时 Access Token，查看实际采用的工号字段。OneAccess 通常返回 `userName`、`name`、`id`，系统已自动兼容，也可在高级映射中显式填写；
+- OneAccess 授权页或 Token 接口提示 Scope 错误：OneAccess OAuth2 的授权范围固定为 `get_user_info`，点击配置区的“OneAccess 预设”或手工修改 Scope；
+- Client ID/Secret 莫名变成系统登录账号：旧版可能被浏览器密码管理器自动填充；新版已隔离登录凭据自动填充。请重新填写真实 Client ID/Secret 并保存；
 - 登录页没有 SSO 按钮：自动发现模式检查 Issuer 与 Client ID；手动模式检查授权、Token、UserInfo 三个地址与 Client ID；
 - 提示回调不一致：企业身份平台登记值必须与“OAuth2 回调地址”逐字一致；
 - 提示无法连接身份平台：检查服务器 DNS、代理、防火墙、HTTPS 证书和系统时间；
 - 登录后回到系统账号页：页面会在 SSO 失败后主动停止循环跳转，先查看页面错误提示和服务日志，修复后点击“企业 SSO 登录”重试；
 - 提示工号缺失或关联冲突：核对“SSO 工号字段”和 UserInfo 返回值，并在“用户管理”确认工号唯一；
+- 提示 Access Token 或 UserInfo 请求失败：错误会标明失败阶段、HTTP 状态和身份平台返回的安全错误说明；依次检查 Client Secret、Scope、回调地址、服务器 DNS/代理和出口防火墙；
 - 首次 SSO 登录后只有只读权限：这是待分类保护；管理员在“用户管理”筛选“访客 / 待分类”，为账号单个或批量分配正式类型；
 - OneAccess 群组已经变化但账号团队没变：这是平滑保护；用户管理中会显示“SSO 建议团队”，由管理员确认后生效，登录本身不会自动搬迁账号和历史数据；
 - 调整团队后看不到旧讨论或会议：先在灰度数据库运行 `python scripts\migrate_org_data.py --database <db> --source <旧组织> --follow-current-users` 预览，再使用 `--apply`；不要直接手改生产数据库；

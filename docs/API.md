@@ -32,6 +32,7 @@ if (!response.ok) throw new Error(data.error || "请求失败");
 | POST | `/api/login` | 登录，正文包含 `username`、`password` |
 | GET | `/api/sso/login` | 发起 OAuth2/OIDC 授权码登录，生成一次性 state、nonce 和 PKCE 校验参数后跳转身份平台 |
 | GET | `/api/sso/callback` | OAuth2/OIDC 回调，完成换令牌、按工号关联账号和会话签发后跳回首页 |
+| POST | `/api/sso/diagnose` | 管理员检查已保存 SSO 配置；可提交一次性 `access_token` 验证 UserInfo 字段映射、账号匹配和建议团队，令牌不持久化 |
 | POST | `/api/logout` | 退出并清除当前会话 |
 | GET | `/api/me` | 当前用户、权限、模块目录和公开设置 |
 | PATCH | `/api/me/password` | 修改当前用户密码 |

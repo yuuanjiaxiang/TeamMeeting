@@ -2657,9 +2657,14 @@ function renderSettingField(setting) {
   }
   const inputType = setting.value_type === "number" ? "number" : setting.value_type === "password" ? "password" : "text";
   const placeholder = setting.value_type === "password" && setting.configured ? "已配置，留空保持不变" : "";
+  const ssoAutocomplete = setting.key === "sso_client_secret"
+    ? ' autocomplete="new-password" data-lpignore="true" data-1p-ignore="true"'
+    : setting.key.startsWith("sso_")
+      ? ' autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true"'
+      : "";
   return `<label class="setting-field${modeClass}" data-setting-key="${key}" data-configured="${setting.configured ? "true" : "false"}">
     <span>${escapeHtml(setting.label)}</span>
-    <input name="${key}" type="${inputType}" value="${escapeHtml(setting.value || "")}" placeholder="${placeholder}">
+    <input name="${key}" type="${inputType}" value="${escapeHtml(setting.value || "")}" placeholder="${placeholder}"${ssoAutocomplete}>
     <small>${escapeHtml(setting.description || "")}</small>
   </label>`;
 }
@@ -2671,17 +2676,30 @@ function renderSettings() {
   const ssoByKey = new Map(ssoSettings.map((setting) => [setting.key, setting]));
   const renderSsoFields = (keys) => keys.map((key) => ssoByKey.get(key)).filter(Boolean).map(renderSettingField).join("");
   const generalSettings = state.settings.filter((setting) => !setting.key.startsWith("sso_"));
+  const storedMode = ssoByKey.get("sso_mode")?.value === "manual" ? "manual" : "discovery";
+  const storedRequired = storedMode === "manual"
+    ? ["sso_authorization_url", "sso_token_url", "sso_userinfo_url", "sso_client_id"]
+    : ["sso_issuer_url", "sso_client_id"];
+  const storedComplete = storedRequired.every((key) => Boolean(ssoByKey.get(key)?.value));
+  const storedEnabled = ssoByKey.get("sso_enabled")?.value === "1";
   form.innerHTML = `
     <div class="settings-grid">
       ${generalSettings.map(renderSettingField).join("")}
     </div>
     <details class="settings-group" open>
       <summary>企业 SSO 登录</summary>
-      <p class="settings-group-note">已知认证、Access Token、UserInfo 三个地址时，选择“手动 OAuth2 端点”并按顺序填写即可。系统使用授权码 + PKCE，群组只生成建议团队，由管理员确认后生效。</p>
+      <div class="settings-group-note sso-provider-note">
+        <span>已知认证、Access Token、UserInfo 三个地址时，选择“手动 OAuth2 端点”并按顺序填写即可。系统使用授权码 + PKCE。</span>
+        <button id="ssoOneAccessPresetBtn" class="secondary" type="button">应用华为云 OneAccess 预设</button>
+      </div>
       <div class="sso-setup-head">
         <div class="sso-mode-field">${renderSsoFields(["sso_mode"])}</div>
         <div id="ssoConfigReadiness" class="sso-config-readiness" aria-live="polite"></div>
       </div>
+      <section class="sso-config-section">
+        <div><strong>启用与建号策略</strong><span>新账号先进入访客 / 待分类，等待管理员分配用户类型和团队。</span></div>
+        <div class="settings-grid">${renderSsoFields(["sso_enabled", "sso_auto_login", "sso_auto_provision"])}</div>
+      </section>
       <section class="sso-config-section sso-discovery-only">
         <div><strong>OIDC 自动发现</strong><span>身份平台提供 Issuer 时只需填写一个入口。</span></div>
         <div class="settings-grid">${renderSsoFields(["sso_issuer_url"])}</div>
@@ -2698,10 +2716,18 @@ function renderSettings() {
       </section>
       <details class="sso-advanced-settings">
         <summary>字段映射与登录策略</summary>
-        <div class="settings-grid">${renderSsoFields(["sso_username_claim", "sso_display_name_claim", "sso_group_claim", "sso_button_label", "sso_enabled", "sso_auto_login", "sso_auto_provision", "sso_default_user_type"])}</div>
+        <div class="settings-grid">${renderSsoFields(["sso_username_claim", "sso_display_name_claim", "sso_group_claim", "sso_button_label", "sso_default_user_type"])}</div>
       </details>
+      <div class="sso-save-actions">
+        <div id="ssoPersistedState" class="sso-persisted-state ${storedComplete ? "is-saved" : ""}">
+          <strong>${storedComplete ? (storedEnabled ? "已保存并启用" : "已保存，尚未启用") : "当前数据库尚未保存完整 SSO 配置"}</strong>
+          <span>${storedComplete ? "可运行诊断确认 UserInfo 映射" : "填写后必须点击右侧保存按钮"}</span>
+        </div>
+        <button id="ssoDiagnoseBtn" class="secondary" type="button">诊断已保存配置</button>
+        <button type="submit">保存 SSO 配置</button>
+      </div>
     </details>
-    <button>保存系统配置</button>`;
+    <button>保存全部系统配置</button>`;
   updateSsoModeFields();
 }
 
@@ -2725,6 +2751,98 @@ function updateSsoModeFields() {
   readiness.innerHTML = missing.length
     ? `<strong>还差 ${missing.length} 项</strong><span>${missing.map(escapeHtml).join("、")}</span>`
     : "<strong>配置完整</strong><span>保存后即可发起企业登录</span>";
+}
+
+function applyOneAccessPreset() {
+  const values = {
+    sso_mode: "manual",
+    sso_scopes: "get_user_info",
+    sso_username_claim: "userName",
+    sso_display_name_claim: "name",
+    sso_group_claim: "groups",
+  };
+  Object.entries(values).forEach(([name, value]) => {
+    const input = $(`#settingsForm [name="${name}"]`);
+    if (input) input.value = value;
+  });
+  updateSsoModeFields();
+  const persisted = $("#ssoPersistedState");
+  if (persisted) {
+    persisted.classList.remove("is-saved");
+    persisted.innerHTML = "<strong>已应用 OneAccess 预设，尚未保存</strong><span>继续填写三个服务地址、Client ID、Secret 和回调地址</span>";
+  }
+  toast("已设置 Scope=get_user_info、工号=userName、姓名=name");
+}
+
+function closeSsoDiagnosticModal() {
+  const modal = $("#ssoDiagnosticModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  $("#ssoDiagnosticForm")?.reset();
+}
+
+function renderSsoDiagnosticResult(data) {
+  const target = $("#ssoDiagnosticResult");
+  if (!target) return;
+  const statusLabel = {
+    incomplete: "配置未完成",
+    configured: "配置可用",
+    mapping_failed: "字段映射失败",
+    matched: "已匹配用户",
+    will_create: "将自动创建",
+  }[data.status] || "诊断结果";
+  const rows = [
+    ["状态", statusLabel],
+    ["说明", data.message || ""],
+    ["模式", data.mode === "manual" ? "手动 OAuth2 端点" : "OIDC 自动发现"],
+    ["Scope", data.scopes || "未配置"],
+    ["回调地址", data.redirect_uri || "未配置"],
+  ];
+  if (data.userinfo_checked) {
+    rows.push(
+      ["映射工号", data.employee_id || "未找到"],
+      ["映射姓名", data.display_name || "未找到"],
+      ["实际工号字段", data.username_claim_used || "未找到"],
+      ["实际姓名字段", data.display_name_claim_used || "未找到"],
+      ["现有账号", data.existing_user ? `${data.existing_user.display_name}（${data.existing_user.username}）` : "无"],
+      ["建议团队", data.suggested_org?.path || data.suggested_org?.name || "未匹配"],
+    );
+  }
+  target.innerHTML = `
+    <div class="sso-diagnostic-status sso-diagnostic-${escapeHtml(data.status || "configured")}">
+      <strong>${escapeHtml(statusLabel)}</strong>
+      <span>${escapeHtml(data.message || "")}</span>
+    </div>
+    <dl class="sso-diagnostic-grid">
+      ${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+    </dl>
+    ${data.warnings?.length ? `<div class="sso-diagnostic-warnings">${data.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${data.available_claims?.length ? `<div class="sso-claim-list"><strong>UserInfo 可用字段</strong><span>${data.available_claims.map((item) => `<code>${escapeHtml(item)}</code>`).join("")}</span></div>` : ""}
+    ${data.groups?.length ? `<div class="sso-claim-list"><strong>群组值</strong><span>${data.groups.map((item) => `<code>${escapeHtml(item)}</code>`).join("")}</span></div>` : ""}`;
+}
+
+async function runSsoDiagnostic(accessToken = "") {
+  const target = $("#ssoDiagnosticResult");
+  if (target) target.innerHTML = '<p class="empty-note">正在连接已保存的 SSO 配置…</p>';
+  const data = await api("/api/sso/diagnose", {
+    method: "POST",
+    body: JSON.stringify({ access_token: accessToken }),
+  });
+  renderSsoDiagnosticResult(data);
+}
+
+function openSsoDiagnosticModal() {
+  const modal = $("#ssoDiagnosticModal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  runSsoDiagnostic().catch((error) => {
+    const target = $("#ssoDiagnosticResult");
+    if (target) target.innerHTML = `<div class="sso-diagnostic-status sso-diagnostic-mapping_failed"><strong>诊断失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+  });
 }
 
 function renderBackups() {
@@ -5825,7 +5943,28 @@ function bindEvents() {
   });
   bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
   $("#settingsForm")?.addEventListener("input", (event) => {
-    if (event.target.name?.startsWith("sso_")) updateSsoModeFields();
+    if (!event.target.name?.startsWith("sso_")) return;
+    updateSsoModeFields();
+    const persisted = $("#ssoPersistedState");
+    if (persisted) {
+      persisted.classList.remove("is-saved");
+      persisted.innerHTML = "<strong>有未保存的 SSO 改动</strong><span>诊断只读取数据库中的已保存配置</span>";
+    }
+  });
+  $("#ssoDiagnosticForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      await runSsoDiagnostic(form.elements.access_token.value.trim());
+      form.elements.access_token.value = "";
+    } catch (error) {
+      const target = $("#ssoDiagnosticResult");
+      if (target) target.innerHTML = `<div class="sso-diagnostic-status sso-diagnostic-mapping_failed"><strong>诊断失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+    } finally {
+      if (submit) submit.disabled = false;
+    }
   });
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
@@ -6018,6 +6157,7 @@ function bindEvents() {
       closeReminderModal();
       closeForumCreateModal();
       closeForumDetailModal();
+      closeSsoDiagnosticModal();
       closeShiftPopover();
       return;
     }
@@ -6039,6 +6179,18 @@ function bindEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
+    if (event.target.closest("#ssoOneAccessPresetBtn")) {
+      applyOneAccessPreset();
+      return;
+    }
+    if (event.target.closest("#ssoDiagnoseBtn")) {
+      openSsoDiagnosticModal();
+      return;
+    }
+    if (event.target.closest("[data-sso-diagnostic-close]") || event.target === $("#ssoDiagnosticModal")) {
+      closeSsoDiagnosticModal();
+      return;
+    }
     if (event.target.closest("#openProcessTemplateBtn")) {
       openProcessTemplateModal();
       return;
@@ -6905,6 +7057,11 @@ function bindEvents() {
     }
     if (event.target.closest("#settingsForm") && event.target.name?.startsWith("sso_")) {
       updateSsoModeFields();
+      const persisted = $("#ssoPersistedState");
+      if (persisted) {
+        persisted.classList.remove("is-saved");
+        persisted.innerHTML = "<strong>有未保存的 SSO 改动</strong><span>诊断只读取数据库中的已保存配置</span>";
+      }
       return;
     }
     if (event.target.matches('.participation-toggle input[name="participation"]')) {

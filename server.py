@@ -484,12 +484,36 @@ def seed_organization_units(conn):
     conn.execute("UPDATE users SET org_unit_id=? WHERE org_unit_id IS NULL", (root_id,))
 
 
-def claim_values(claims, path):
+def claim_path_value(claims, path):
     value = claims
     for part in str(path or "").split("."):
         if not part or not isinstance(value, dict):
-            return []
-        value = value.get(part)
+            return None
+        if part in value:
+            value = value[part]
+            continue
+        matched_key = next((key for key in value if str(key).casefold() == part.casefold()), None)
+        if matched_key is None:
+            return None
+        value = value[matched_key]
+    return value
+
+
+def sso_claim_sources(claims):
+    sources = [claims]
+    for key in ("data", "result", "user", "userInfo", "userinfo"):
+        nested = claim_path_value(claims, key)
+        if isinstance(nested, dict) and nested not in sources:
+            sources.append(nested)
+    return sources
+
+
+def claim_values(claims, path):
+    value = None
+    for source in sso_claim_sources(claims):
+        value = claim_path_value(source, path)
+        if value not in (None, "", []):
+            break
     if isinstance(value, (str, int)):
         raw_values = re.split(r"[,;]", str(value))
     elif isinstance(value, list):
@@ -849,8 +873,22 @@ def validate_sso_url(value, label):
     return value
 
 
-def fetch_json(url, method="GET", form=None, headers=None):
-    validate_sso_url(url, "OIDC 服务地址")
+def provider_error_message(payload):
+    try:
+        data = json.loads(payload.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("error_description", "error_msg", "message", "error"):
+        value = data.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()[:240]
+    return ""
+
+
+def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份平台"):
+    validate_sso_url(url, f"{purpose}地址")
     request_headers = {"Accept": "application/json", "User-Agent": "TeamLoop-OIDC/1.0", **(headers or {})}
     body = None
     if form is not None:
@@ -861,17 +899,19 @@ def fetch_json(url, method="GET", form=None, headers=None):
         with urlopen(request, timeout=12) as response:
             payload = response.read(1024 * 1024 + 1)
     except HTTPError as exc:
-        raise AppError(502, f"企业身份平台返回 HTTP {exc.code}") from exc
+        detail = provider_error_message(exc.read(16 * 1024))
+        suffix = f"：{detail}" if detail else ""
+        raise AppError(502, f"{purpose}请求失败（HTTP {exc.code}）{suffix}") from exc
     except (URLError, TimeoutError, OSError) as exc:
-        raise AppError(502, "无法连接企业身份平台，请检查 SSO 地址和网络") from exc
+        raise AppError(502, f"无法连接{purpose}，请检查地址、DNS、代理和防火墙") from exc
     if len(payload) > 1024 * 1024:
-        raise AppError(502, "企业身份平台响应过大")
+        raise AppError(502, f"{purpose}响应过大")
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AppError(502, "企业身份平台返回了无效数据") from exc
+        raise AppError(502, f"{purpose}返回的不是有效 JSON") from exc
     if not isinstance(data, dict):
-        raise AppError(502, "企业身份平台响应格式不正确")
+        raise AppError(502, f"{purpose}响应必须是 JSON 对象")
     return data
 
 
@@ -890,7 +930,7 @@ def load_oidc_discovery(config):
         endpoints["token_endpoint_auth_methods_supported"] = ["client_secret_post"]
         return endpoints
     issuer = validate_sso_url(config.get("issuer_url"), "OIDC Issuer 地址").rstrip("/")
-    discovery = fetch_json(f"{issuer}/.well-known/openid-configuration")
+    discovery = fetch_json(f"{issuer}/.well-known/openid-configuration", purpose="OIDC Discovery")
     discovered_issuer = str(discovery.get("issuer") or "").rstrip("/")
     if discovered_issuer and discovered_issuer != issuer:
         raise AppError(502, "OIDC Discovery 返回的 Issuer 与系统配置不一致")
@@ -902,11 +942,24 @@ def load_oidc_discovery(config):
 
 
 def sso_configuration_ready(config):
-    if not config.get("enabled") or not config.get("client_id"):
-        return False
+    return bool(config.get("enabled")) and not sso_missing_fields(config)
+
+
+def sso_missing_fields(config):
+    missing = []
+    if not config.get("client_id"):
+        missing.append("Client ID")
     if config.get("mode") == "manual":
-        return all(config.get(key) for key in ("authorization_url", "token_url", "userinfo_url"))
-    return bool(config.get("issuer_url"))
+        for key, label in (
+            ("authorization_url", "OAuth2 认证地址"),
+            ("token_url", "Access Token 地址"),
+            ("userinfo_url", "UserInfo 地址"),
+        ):
+            if not config.get(key):
+                missing.append(label)
+    elif not config.get("issuer_url"):
+        missing.append("OIDC Issuer 地址")
+    return missing
 
 
 def base64url_digest(value):
@@ -915,14 +968,46 @@ def base64url_digest(value):
 
 
 def claim_value(claims, path):
-    value = claims
-    for part in str(path or "").split("."):
-        if not part or not isinstance(value, dict):
-            return ""
-        value = value.get(part)
-    if isinstance(value, (str, int)):
-        return str(value).strip()
+    for source in sso_claim_sources(claims):
+        value = claim_path_value(source, path)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()
     return ""
+
+
+SSO_USERNAME_FALLBACKS = (
+    "userName", "username", "employee_id", "employeeNumber", "employee_no",
+    "job_number", "preferred_username", "upn", "email", "id",
+)
+
+
+def resolve_sso_identity(claims, config):
+    employee_id = claim_value(claims, config.get("username_claim"))
+    username_claim_used = config.get("username_claim") if employee_id else ""
+    if not employee_id:
+        for fallback in SSO_USERNAME_FALLBACKS:
+            employee_id = claim_value(claims, fallback)
+            if employee_id:
+                username_claim_used = fallback
+                break
+    display_name = claim_value(claims, config.get("display_name_claim"))
+    display_name_claim_used = config.get("display_name_claim") if display_name else ""
+    if not display_name:
+        for fallback in ("name", "displayName", "display_name", "realName", "userName", "username"):
+            display_name = claim_value(claims, fallback)
+            if display_name:
+                display_name_claim_used = fallback
+                break
+    subject = claim_value(claims, "sub") or claim_value(claims, "id") or employee_id
+    groups = claim_values(claims, config.get("group_claim") or "groups")
+    return {
+        "employee_id": employee_id.strip()[:120],
+        "display_name": (display_name or employee_id).strip()[:120],
+        "subject": subject.strip()[:240],
+        "groups": groups[:100],
+        "username_claim_used": username_claim_used,
+        "display_name_claim_used": display_name_claim_used,
+    }
 
 
 def write_audit(conn, user, action, entity_type, entity_id=None, summary="", metadata=None, ip_address=""):
@@ -2095,7 +2180,7 @@ class Handler(BaseHTTPRequestHandler):
             return "shifts"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
-        if path.startswith("/api/settings") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
+        if path.startswith("/api/settings") or path.startswith("/api/sso/diagnose") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
             return "system"
         if path.startswith("/api/team-replies"):
             return "members"
@@ -2422,6 +2507,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"settings": self.list_settings()}
             if method == "PATCH":
                 return self.update_settings()
+        if path == "/api/sso/diagnose" and method == "POST":
+            return self.diagnose_sso()
 
         if path == "/api/audit-logs" and method == "GET":
             return {"logs": self.list_audit_logs(query)}
@@ -2550,25 +2637,35 @@ class Handler(BaseHTTPRequestHandler):
                 token_headers["Authorization"] = f"Basic {credentials}"
             else:
                 token_form["client_secret"] = config["client_secret"]
-        tokens = fetch_json(discovery["token_endpoint"], method="POST", form=token_form, headers=token_headers)
+        tokens = fetch_json(
+            discovery["token_endpoint"],
+            method="POST",
+            form=token_form,
+            headers=token_headers,
+            purpose="Access Token 接口",
+        )
         access_token = str(tokens.get("access_token") or "")
         if not access_token:
-            raise AppError(502, "企业身份平台未返回访问令牌")
-        claims = fetch_json(discovery["userinfo_endpoint"], headers={"Authorization": f"Bearer {access_token}"})
-        sso_groups = claim_values(claims, config.get("group_claim") or "groups")
-        employee_id = claim_value(claims, config["username_claim"])
-        if not employee_id:
-            for fallback in ("employee_id", "employeeNumber", "employee_no", "job_number", "preferred_username", "upn", "email"):
-                employee_id = claim_value(claims, fallback)
-                if employee_id:
-                    break
-        subject = claim_value(claims, "sub") or employee_id
-        display_name = claim_value(claims, config["display_name_claim"]) or claim_value(claims, "name") or employee_id
-        employee_id = employee_id.strip()[:120]
+            available = "、".join(sorted(str(key) for key in tokens.keys())[:12]) or "无"
+            raise AppError(502, f"Access Token 接口未返回 access_token，可用字段：{available}")
+        claims = fetch_json(
+            discovery["userinfo_endpoint"],
+            headers={"Authorization": f"Bearer {access_token}"},
+            purpose="UserInfo 接口",
+        )
+        identity_claims = resolve_sso_identity(claims, config)
+        sso_groups = identity_claims["groups"]
+        employee_id = identity_claims["employee_id"]
+        subject = identity_claims["subject"]
+        display_name = identity_claims["display_name"]
         username = employee_id
-        display_name = display_name.strip()[:120]
         if not subject or not employee_id or not display_name or re.search(r"[\x00-\x1f\x7f]", employee_id):
-            raise AppError(400, f"企业账号信息缺少工号字段 {config['username_claim']} 或姓名字段")
+            available = "、".join(sorted(str(key) for key in claims.keys())[:16]) or "无"
+            raise AppError(
+                400,
+                f"UserInfo 无法映射账号。当前工号字段为 {config['username_claim']}，"
+                f"顶层可用字段：{available}；可在系统管理中运行映射诊断",
+            )
         provider_key = (config.get("issuer_url") or urlparse(discovery["authorization_endpoint"]).netloc).rstrip("/")
         identity = f"{provider_key}|{subject}"
         auth_source = "oauth2" if config.get("mode") == "manual" else "oidc"
@@ -7278,6 +7375,104 @@ class Handler(BaseHTTPRequestHandler):
         values["sso_ready"] = "1" if sso_configuration_ready(config) else "0"
         values["https_required"] = "1" if REQUIRE_HTTPS else "0"
         return values
+
+    def diagnose_sso(self):
+        self.require_admin()
+        data = read_json(self)
+        access_token = str(data.get("access_token") or "").strip()
+        if len(access_token) > 16384:
+            raise AppError(400, "Access Token 长度异常")
+        with connect() as conn:
+            config = sso_configuration(conn)
+            missing = sso_missing_fields(config)
+        result = {
+            "enabled": config["enabled"],
+            "mode": config["mode"],
+            "auto_provision": config["auto_provision"],
+            "client_secret_configured": bool(config["client_secret"]),
+            "missing": missing,
+            "username_claim": config["username_claim"],
+            "display_name_claim": config["display_name_claim"],
+            "group_claim": config["group_claim"],
+            "scopes": config["scopes"],
+            "redirect_uri": self.sso_redirect_uri(config) if not missing else (config.get("redirect_uri") or ""),
+            "userinfo_checked": False,
+        }
+        result["warnings"] = []
+        if config["mode"] == "manual" and config["scopes"] != "get_user_info":
+            result["warnings"].append(
+                "华为云 OneAccess 的 OAuth2 Scope 固定为 get_user_info；当前值不同，请确认身份平台要求"
+            )
+        if missing:
+            result["status"] = "incomplete"
+            result["message"] = f"已保存配置仍缺少：{'、'.join(missing)}"
+            return result
+        discovery = load_oidc_discovery(config)
+        result["status"] = "configured"
+        result["message"] = "已保存的 OAuth2 配置完整"
+        result["authorization_host"] = urlparse(discovery["authorization_endpoint"]).netloc
+        result["token_host"] = urlparse(discovery["token_endpoint"]).netloc
+        result["userinfo_host"] = urlparse(discovery["userinfo_endpoint"]).netloc
+        if not access_token:
+            return result
+        claims = fetch_json(
+            discovery["userinfo_endpoint"],
+            headers={"Authorization": f"Bearer {access_token}"},
+            purpose="UserInfo 诊断",
+        )
+        identity_claims = resolve_sso_identity(claims, config)
+        available_claims = sorted(str(key) for key in claims.keys())[:40]
+        result.update({
+            "userinfo_checked": True,
+            "available_claims": available_claims,
+            "employee_id": identity_claims["employee_id"],
+            "display_name": identity_claims["display_name"],
+            "username_claim_used": identity_claims["username_claim_used"],
+            "display_name_claim_used": identity_claims["display_name_claim_used"],
+            "groups": identity_claims["groups"][:20],
+        })
+        if not identity_claims["employee_id"]:
+            result["status"] = "mapping_failed"
+            result["message"] = "UserInfo 调用成功，但没有找到可用于匹配账号的工号字段"
+            return result
+        with connect() as conn:
+            matched_org = match_sso_org_unit(conn, identity_claims["groups"])
+            existing = conn.execute(
+                """
+                SELECT id, display_name, username, employee_id, active, auth_source
+                FROM users
+                WHERE LOWER(employee_id)=LOWER(?) OR LOWER(username)=LOWER(?)
+                ORDER BY CASE WHEN LOWER(employee_id)=LOWER(?) THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (
+                    identity_claims["employee_id"],
+                    identity_claims["employee_id"],
+                    identity_claims["employee_id"],
+                ),
+            ).fetchone()
+        result["status"] = "matched" if existing else "will_create"
+        result["message"] = "已匹配现有系统用户" if existing else (
+            "未匹配现有用户，首次 SSO 登录时将创建访客账号"
+            if config["auto_provision"]
+            else "未匹配现有用户，且自动创建已关闭"
+        )
+        result["existing_user"] = (
+            {
+                "id": existing["id"],
+                "display_name": existing["display_name"],
+                "username": existing["username"],
+                "employee_id": existing["employee_id"],
+                "active": bool(existing["active"]),
+                "auth_source": existing["auth_source"],
+            }
+            if existing else None
+        )
+        result["suggested_org"] = (
+            {"id": matched_org["id"], "name": matched_org["name"], "path": matched_org["path"]}
+            if matched_org else None
+        )
+        return result
 
     def update_settings(self):
         admin = self.require_admin()

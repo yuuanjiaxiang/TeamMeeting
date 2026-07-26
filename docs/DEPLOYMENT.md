@@ -133,9 +133,10 @@ python server.py --host 0.0.0.0 --port 8000
 1. 在企业身份平台创建 OAuth2/OIDC Web 应用，启用 Authorization Code 和 PKCE；
 2. 将回调地址登记为 `https://你的域名/api/sso/callback`；
 3. 在 Team Loop“系统管理”中选择配置方式：优先填写 Issuer 自动发现；不支持 Discovery 时填写授权、Token、UserInfo 三个地址；
-4. 填写 Client ID、回调地址、工号字段和姓名字段。工号字段必须与 UserInfo 实际返回字段一致，例如 `employee_id` 或 `employeeNumber`；
+4. 填写 Client ID、回调地址、工号字段和姓名字段。OneAccess 常见 UserInfo 字段为 `userName`、`name` 和 `id`；系统也兼容 `employee_id`、`employeeNumber` 等字段；
 5. 在“用户管理”中提前维护账号工号，可让首次 SSO 登录直接关联现有用户；否则系统自动创建“访客 / 待分类”只读账号，由管理员随后分配正式类型；
 6. 通过服务器环境变量配置 `TEAM_LOOP_SSO_CLIENT_SECRET`，再启用企业 SSO 与首页自动登录；
+7. 点击“保存 SSO 配置”，确认页面显示“已保存并启用”；随后运行“诊断已保存配置”。可临时粘贴 Postman 获取的 Access Token 验证 UserInfo 映射，Token 只用于当前请求，不会落库或写入日志；
 7. 先在灰度环境完成已有工号关联、待分类自动建号、管理员归类、权限、失败回退和退出验证，再提升正式环境。
 
 所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。管理员已知三个地址时，在系统配置中选择“手动 OAuth2”，依次填写“OAuth2 认证地址、Access Token 地址、UserInfo 地址”；界面文案变化不会改变这些环境变量键。
@@ -146,7 +147,7 @@ python server.py --host 0.0.0.0 --port 8000
 
 1. 在 OneAccess“资源 → 应用”中创建自建应用，认证集成选择 OIDC，并启用授权码模式；
 2. Redirect URL 填写 `https://你的域名/api/sso/callback`，在授权管理中授权允许访问的用户；
-3. 从“设置 → 服务配置 → OIDC”取得认证授权、Token 和 UserInfo 地址。若 OneAccess 没有提供可用 Issuer Discovery，在 Team Loop 中选择“手动 OAuth2”并填写这三个地址；
+3. 从“设置 → 服务配置 → OIDC”取得认证授权、Token 和 UserInfo 地址。若 OneAccess 没有提供可用 Issuer Discovery，在 Team Loop 中点击“应用华为云 OneAccess 预设”，再填写这三个地址；预设会使用 OneAccess 要求的 `scope=get_user_info`、工号字段 `userName` 和姓名字段 `name`；
 4. 在 OneAccess“映射配置”中至少返回 `employee_id`、`name`、`groups`：`employee_id` 映射唯一工号，`name` 映射姓名，`groups` 映射组织或账号权限；Team Loop 对应字段分别填这三个属性名；
 5. 已有账号按工号关联并保留管理员设置的团队；未命中账号自动创建为根组织下的“访客 / 待分类”，OneAccess 群组只形成建议团队；管理员在用户管理中确认用户类型和团队后生效。
 

@@ -61,7 +61,7 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
             if self.headers.get("Authorization") != "Bearer smoke-access-token":
                 self.send_json({"error": "invalid_token"}, 401)
                 return
-            self.send_json({"sub": self.subject, "employee_id": self.employee_id, "name": self.display_name, "groups": self.groups})
+            self.send_json({"id": self.subject, "userName": self.employee_id, "name": self.display_name, "groups": self.groups})
             return
         self.send_error(404)
 
@@ -114,7 +114,7 @@ def main():
                     "sso_client_id": "team-loop-smoke",
                     "sso_client_secret": "smoke-secret",
                     "sso_redirect_uri": f"{app_url}/api/sso/callback",
-                    "sso_username_claim": "employee_id",
+                    "sso_username_claim": "preferred_username",
                     "sso_group_claim": "groups",
                     "sso_auto_provision": "1",
                     "sso_default_user_type": app.DEFAULT_USER_TYPE_KEY,
@@ -161,6 +161,20 @@ def main():
             }
             if actual_labels != expected_labels:
                 raise RuntimeError(f"SSO endpoint labels were not migrated: {actual_labels}")
+            diagnostic_request = Request(
+                f"{app_url}/api/sso/diagnose",
+                data=json.dumps({"access_token": "smoke-access-token"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with admin_opener.open(diagnostic_request, timeout=15) as response:
+                diagnostic = json.load(response)
+            if (
+                diagnostic.get("status") != "matched"
+                or diagnostic.get("employee_id") != "E10086"
+                or diagnostic.get("username_claim_used") != "userName"
+            ):
+                raise RuntimeError(f"Huawei-style UserInfo diagnostic failed: {diagnostic}")
 
             with opener.open(f"{app_url}/api/sso/login", timeout=15) as response:
                 if response.status != 200:

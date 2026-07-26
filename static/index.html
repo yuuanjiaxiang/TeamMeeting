@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260725-member-sso-mindmap-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260726-sso-diagnostic-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -98,6 +98,31 @@
           <div id="permissionPreviewBanner" class="permission-preview-banner hidden" role="status">
             <div><strong id="permissionPreviewTitle">权限预览</strong><span id="permissionPreviewSummary"></span></div>
             <button id="exitPermissionPreviewBtn" class="secondary" type="button">退出预览</button>
+          </div>
+          <div id="ssoDiagnosticModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ssoDiagnosticTitle" aria-hidden="true">
+            <div class="modal-card sso-diagnostic-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="ssoDiagnosticTitle">SSO 配置诊断</h2>
+                  <p>检查已保存配置；可粘贴 Postman 获取的 Access Token 验证 UserInfo 字段映射。</p>
+                </div>
+                <button class="modal-close" type="button" data-sso-diagnostic-close aria-label="关闭">×</button>
+              </div>
+              <form id="ssoDiagnosticForm" class="sso-diagnostic-form">
+                <label>
+                  临时 Access Token
+                  <input name="access_token" type="password" autocomplete="off" placeholder="可留空，仅检查已保存配置" />
+                  <small>只用于本次 UserInfo 请求，不保存、不写入审计日志。</small>
+                </label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-sso-diagnostic-close>取消</button>
+                  <button type="submit">运行诊断</button>
+                </div>
+              </form>
+              <div id="ssoDiagnosticResult" class="sso-diagnostic-result" aria-live="polite">
+                <p class="empty-note">正在检查已保存配置…</p>
+              </div>
+            </div>
           </div>
           <div id="passwordModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="passwordModalTitle" aria-hidden="true">
             <div class="modal-card password-modal-card">
@@ -1187,7 +1212,7 @@
                   <p>维护会议、排班、Thank You、备份等全局参数。</p>
                 </div>
               </div>
-              <form id="settingsForm" class="settings-form"></form>
+              <form id="settingsForm" class="settings-form" autocomplete="off" data-form-type="other"></form>
             </section>
 
             <section class="panel admin-only">
@@ -1228,6 +1253,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260725-member-sso-mindmap-v1"></script>
+    <script type="module" src="/app.js?v=20260726-sso-diagnostic-v1"></script>
   </body>
 </html>

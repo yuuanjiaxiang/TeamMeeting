@@ -5621,6 +5621,17 @@ th {
   font-size: 12px;
 }
 
+.sso-provider-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sso-provider-note button {
+  flex: 0 0 auto;
+}
+
 .sso-setup-head,
 .sso-config-section > div:first-child {
   display: flex;
@@ -5713,6 +5724,149 @@ th {
   margin-bottom: 10px;
 }
 
+.sso-save-actions {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.sso-persisted-state {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-left: 3px solid #e5484d;
+  background: #fff7f7;
+}
+
+.sso-persisted-state.is-saved {
+  border-left-color: #0e9f6e;
+  background: #f0fbf7;
+}
+
+.sso-persisted-state strong {
+  color: var(--ink);
+}
+
+.sso-persisted-state span {
+  font-size: 11px;
+}
+
+.sso-diagnostic-modal-card {
+  width: min(720px, 100%);
+}
+
+.sso-diagnostic-form {
+  display: grid;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.sso-diagnostic-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.sso-diagnostic-result {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.sso-diagnostic-status {
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px;
+  border: 1px solid #b7c5db;
+  border-radius: 7px;
+  background: #f6f8fc;
+}
+
+.sso-diagnostic-status strong,
+.sso-diagnostic-status span {
+  color: #23324d;
+}
+
+.sso-diagnostic-matched,
+.sso-diagnostic-will_create,
+.sso-diagnostic-configured {
+  border-color: #8fd3b8;
+  background: #effaf5;
+}
+
+.sso-diagnostic-mapping_failed,
+.sso-diagnostic-incomplete {
+  border-color: #efb1ad;
+  background: #fff5f4;
+}
+
+.sso-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--line);
+}
+
+.sso-diagnostic-grid div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  background: #fff;
+}
+
+.sso-diagnostic-grid dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sso-diagnostic-grid dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.sso-claim-list {
+  display: grid;
+  gap: 7px;
+}
+
+.sso-diagnostic-warnings {
+  display: grid;
+  gap: 6px;
+}
+
+.sso-diagnostic-warnings span {
+  padding: 8px 10px;
+  border-left: 3px solid #d97706;
+  background: #fff8eb;
+  color: #7c4a03;
+  font-size: 12px;
+}
+
+.sso-claim-list > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.sso-claim-list code {
+  padding: 3px 6px;
+  border: 1px solid #dce3ee;
+  border-radius: 4px;
+  background: #f6f8fc;
+  color: #344054;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+}
+
 @media (max-width: 900px) {
   .sso-setup-head {
     align-items: stretch;
@@ -5726,6 +5880,14 @@ th {
   .sso-endpoint-stack {
     grid-template-columns: 1fr;
   }
+
+  .sso-save-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .sso-persisted-state {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 620px) {
@@ -5736,6 +5898,16 @@ th {
   .sso-config-section > div:first-child {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .sso-provider-note {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sso-save-actions,
+  .sso-diagnostic-grid {
+    grid-template-columns: 1fr;
   }
 }
 
