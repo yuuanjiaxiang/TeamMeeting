@@ -131,7 +131,7 @@ python server.py --host 0.0.0.0 --port 8000
 ## 9. 企业 SSO 部署
 
 1. 在企业身份平台创建 OAuth2/OIDC Web 应用，启用 Authorization Code 和 PKCE；
-2. 将回调地址登记为 `https://你的域名/api/sso/callback`；
+2. 将唯一回调地址登记为 `https://你的域名/api/sso/callback`；模块与组织页面不需要分别登记，系统会把原界面作为受控站内目标绑定到 SSO state；
 3. 在 Team Loop“系统管理”中选择配置方式：优先填写 Issuer 自动发现；不支持 Discovery 时填写授权、Token、UserInfo 三个地址；
 4. 填写 Client ID、回调地址、工号字段和姓名字段。OneAccess 常见 UserInfo 字段为 `userName`、`name` 和 `id`；系统也兼容 `employee_id`、`employeeNumber` 等字段；
 5. 在“用户管理”中提前维护账号工号，可让首次 SSO 登录直接关联现有用户；否则系统自动创建“访客 / 待分类”只读账号，由管理员随后分配正式类型；

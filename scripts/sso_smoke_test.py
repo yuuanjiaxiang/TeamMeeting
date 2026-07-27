@@ -176,9 +176,18 @@ def main():
             ):
                 raise RuntimeError(f"Huawei-style UserInfo diagnostic failed: {diagnostic}")
 
-            with opener.open(f"{app_url}/api/sso/login", timeout=15) as response:
+            if app.sanitize_sso_return_to("https://evil.example/phish") or app.sanitize_sso_return_to("//evil.example/phish"):
+                raise RuntimeError("Unsafe SSO return target was accepted")
+            return_to = "/org/ess/mo?view=meetings"
+            login_url = f"{app_url}/api/sso/login?{urlencode({'return_to': return_to})}"
+            with opener.open(login_url, timeout=15) as response:
                 if response.status != 200:
                     raise RuntimeError(f"SSO redirect chain returned HTTP {response.status}")
+                completed_url_raw = response.geturl()
+                completed_url = urlparse(completed_url_raw)
+            completed_query = parse_qs(completed_url.query)
+            if completed_url.path != "/org/ess/mo" or completed_query.get("view") != ["meetings"] or completed_query.get("sso") != ["success"]:
+                raise RuntimeError(f"SSO return target was not preserved: {completed_url_raw}")
             with opener.open(f"{app_url}/api/me", timeout=15) as response:
                 profile = json.load(response)
             user = profile.get("user") or {}

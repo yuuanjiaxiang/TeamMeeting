@@ -1,7 +1,7 @@
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 import argparse
 import base64
@@ -980,6 +980,37 @@ SSO_USERNAME_FALLBACKS = (
     "job_number", "preferred_username", "upn", "email", "id",
 )
 
+SSO_RETURN_VIEWS = {
+    "members", "dashboard", "archive", "morning", "processes", "meetings",
+    "shifts", "rules", "thanks", "links", "users", "system",
+}
+
+
+def sanitize_sso_return_to(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if re.search(r"[\x00-\x1f\x7f\\]", raw):
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
+        return ""
+    path = parsed.path.rstrip("/") or "/"
+    if path != "/" and not re.fullmatch(r"/org/[a-zA-Z0-9._~-]+(?:/[a-zA-Z0-9._~-]+)*", path):
+        return ""
+    view = (parse_qs(parsed.query).get("view") or [""])[0].strip().lower()
+    if view not in SSO_RETURN_VIEWS:
+        return path
+    return f"{path}?{urlencode({'view': view})}"
+
+
+def append_sso_notice(return_to, key, value):
+    target = sanitize_sso_return_to(return_to) or "/"
+    parsed = urlparse(target)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query[key] = [str(value)]
+    return f"{parsed.path}?{urlencode(query, doseq=True)}"
+
 
 def resolve_sso_identity(claims, config):
     employee_id = claim_value(claims, config.get("username_claim"))
@@ -1465,6 +1496,7 @@ def init_db():
                 nonce TEXT NOT NULL,
                 code_verifier TEXT NOT NULL,
                 redirect_uri TEXT NOT NULL,
+                return_to TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 used_at TEXT
@@ -1595,6 +1627,7 @@ def init_db():
         ensure_column(conn, "users", "suggested_org_unit_id", "INTEGER")
         ensure_column(conn, "users", "sso_groups_json", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "users", "sso_last_login_at", "TEXT")
+        ensure_column(conn, "sso_login_states", "return_to", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "user_types", "version", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_members", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "user_types", "include_in_morning", "INTEGER NOT NULL DEFAULT 1")
@@ -1822,18 +1855,20 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
                 ensure_daily_backup()
             if parsed.path in ("/api/sso/login", "/api/sso/callback") and method == "GET":
+                sso_query = parse_qs(parsed.query)
+                return_to = self.sso_return_target(parsed.path, sso_query)
                 try:
                     self.require_https_transport("企业 SSO 登录")
                     if parsed.path == "/api/sso/login":
-                        self.start_sso_login()
+                        self.start_sso_login(sso_query)
                     else:
-                        self.complete_sso_login(parse_qs(parsed.query))
+                        self.complete_sso_login(sso_query)
                 except AppError as exc:
-                    self.send_redirect(f"/?sso_error={quote(exc.message, safe='')}")
+                    self.send_redirect(append_sso_notice(return_to, "sso_error", exc.message))
                 except Exception:
                     traceback.print_exc()
                     message = "企业 SSO 登录处理失败，请联系管理员查看服务日志"
-                    self.send_redirect(f"/?sso_error={quote(message, safe='')}")
+                    self.send_redirect(append_sso_notice(return_to, "sso_error", message))
                 return
             if parsed.path == "/api/backups/download" and method == "GET":
                 self.send_backup_file(parse_qs(parsed.query))
@@ -2534,6 +2569,19 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "正式部署必须在系统配置中填写 OIDC 回调地址")
         return f"http://{host}/api/sso/callback"
 
+    def sso_return_target(self, path, query):
+        if path == "/api/sso/login":
+            return sanitize_sso_return_to((query.get("return_to") or [""])[0])
+        state = (query.get("state") or [""])[0]
+        if not state:
+            return ""
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT return_to FROM sso_login_states WHERE state_hash=?",
+                (token_digest(state),),
+            ).fetchone()
+        return sanitize_sso_return_to(row["return_to"]) if row else ""
+
     def issue_session(self, conn, user, action, summary, metadata=None, secure_cookie=False):
         user_data = dict(user)
         now = dt.datetime.now().replace(microsecond=0)
@@ -2565,7 +2613,8 @@ class Handler(BaseHTTPRequestHandler):
         cookie = f"weekly_session={token}; Path=/; Max-Age={timeout * 60}; HttpOnly; SameSite=Lax{secure}"
         return safe_user, cookie
 
-    def start_sso_login(self):
+    def start_sso_login(self, query=None):
+        return_to = sanitize_sso_return_to(((query or {}).get("return_to") or [""])[0])
         with connect() as conn:
             config = sso_configuration(conn)
             if not config["enabled"]:
@@ -2581,10 +2630,10 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("DELETE FROM sso_login_states WHERE expires_at<? OR used_at IS NOT NULL", ((now - dt.timedelta(minutes=10)).isoformat(),))
             conn.execute(
                 """
-                INSERT INTO sso_login_states(state_hash, nonce, code_verifier, redirect_uri, created_at, expires_at)
-                VALUES(?,?,?,?,?,?)
+                INSERT INTO sso_login_states(state_hash, nonce, code_verifier, redirect_uri, return_to, created_at, expires_at)
+                VALUES(?,?,?,?,?,?,?)
                 """,
-                (token_digest(state), nonce, verifier, redirect_uri, now.isoformat(), (now + dt.timedelta(minutes=10)).isoformat()),
+                (token_digest(state), nonce, verifier, redirect_uri, return_to, now.isoformat(), (now + dt.timedelta(minutes=10)).isoformat()),
             )
         parameters = {
             "response_type": "code",
@@ -2619,6 +2668,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=?", (now.isoformat(), token_digest(state)))
             redirect_uri = row["redirect_uri"]
             verifier = row["code_verifier"]
+            return_to = sanitize_sso_return_to(row["return_to"])
         if not sso_configuration_ready(config):
             raise AppError(400, "企业 SSO 配置已变更，请重新登录")
         discovery = load_oidc_discovery(config)
@@ -2806,7 +2856,7 @@ class Handler(BaseHTTPRequestHandler):
                 provision_org,
             )
         route = redirect_org["route"] if redirect_org else "/"
-        self.send_redirect(f"{route}?sso=success", {"Set-Cookie": cookie})
+        self.send_redirect(append_sso_notice(return_to or route, "sso", "success"), {"Set-Cookie": cookie})
 
     def login(self):
         data = read_json(self)

@@ -112,6 +112,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - Nginx 启动后立即退出：执行 `scripts\nginx_proxy.ps1 -Action Reload` 或直接运行 `nginx.exe -t`，查看 `logs/team-loop-error.log`；
 - 浏览器提示证书不可信：必须使用与公共域名匹配的完整证书链，不能把自签名证书用于普通用户访问；
 - SSO 回调后跳转失败：身份平台和系统配置中的回调必须完全等于 `https://域名/api/sso/callback`；
+- SSO 登录后总是回到首页：确认浏览器发起的是 `/api/sso/login?return_to=...`，数据库 `sso_login_states` 已迁移出 `return_to` 字段，并且静态资源版本已刷新；原组织或模块无权限时回落属于正常保护；
 - 会话 IP 全是 `127.0.0.1`：确认 Team Loop 进程启动前设置了 `TEAM_LOOP_TRUST_PROXY=1`，并确认后端仅监听 `127.0.0.1`；
 - 登录 Cookie 没有 `Secure`：检查 Nginx 是否发送 `X-Forwarded-Proto https`，以及 Team Loop 是否启用了可信代理；
 - 登录或保存返回 HTTP 426：当前请求没有经过可信 HTTPS 代理；请使用正式 HTTPS 域名，不要直接访问生产后端端口；

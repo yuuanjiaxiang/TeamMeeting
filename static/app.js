@@ -178,6 +178,31 @@ function organizationPathFromLocation() {
   return match ? decodeURIComponent(match[1]).replace(/^\/+|\/+$/g, "").toLowerCase() : "";
 }
 
+function pageFromLocation() {
+  const requested = new URL(window.location.href).searchParams.get("view") || "";
+  return pages.some(([id]) => id === requested) ? requested : "";
+}
+
+function updatePageInLocation(id, mode = "replace") {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", id);
+  const target = `${url.pathname}${url.search}${url.hash}`;
+  if (mode === "push") window.history.pushState({}, "", target);
+  else window.history.replaceState({}, "", target);
+}
+
+function currentSsoReturnTo() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("sso");
+  url.searchParams.delete("sso_error");
+  url.searchParams.set("view", pageFromLocation() || state.currentPage || "members");
+  return `${url.pathname}${url.search}`;
+}
+
+function ssoLoginUrl() {
+  return `/api/sso/login?return_to=${encodeURIComponent(currentSsoReturnTo())}`;
+}
+
 function selectedOrganizationPath() {
   return state.organization?.selected?.path || organizationPathFromLocation();
 }
@@ -274,7 +299,10 @@ async function selectOrganizationPath(path) {
     renderOrganizationSwitcher();
     return;
   }
-  window.history.pushState({}, "", unit.route);
+  const url = new URL(window.location.href);
+  url.pathname = unit.route;
+  url.searchParams.set("view", state.currentPage);
+  window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
   state.organization.selected = unit;
   renderOrganizationSwitcher();
   state.thankUsers = [];
@@ -706,7 +734,7 @@ function setSidebarAccountExpanded(expanded) {
   button.textContent = expanded ? "收起" : "账户";
 }
 
-function switchPage(id) {
+function switchPage(id, updateRoute = true) {
   if (!canAccessPage(id)) id = firstAccessiblePage();
   if (isGuest()) {
     state.showLogin = false;
@@ -715,6 +743,7 @@ function switchPage(id) {
     $("#loginEntryBtn")?.classList.remove("hidden");
   }
   state.currentPage = id;
+  if (updateRoute) updatePageInLocation(id);
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
   const meta = pages.find((page) => page[0] === id);
   $("#pageTitle").textContent = meta?.[2] || "团队成员";
@@ -947,7 +976,7 @@ function maybeStartSsoAutoLogin(callbackState = "") {
   if (state.user || !ready || !automatic || callbackState === "error") return false;
   if (safeSessionGet("teamLoopSsoSkip") === "1" || safeSessionGet("teamLoopSsoAttempted") === "1") return false;
   safeSessionSet("teamLoopSsoAttempted", "1");
-  window.location.replace("/api/sso/login");
+  window.location.replace(ssoLoginUrl());
   return true;
 }
 
@@ -5651,6 +5680,7 @@ function bindEvents() {
     if (state.user && event.persisted) syncAuthState(true).catch(() => {});
   });
   window.addEventListener("popstate", () => {
+    switchPage(pageFromLocation() || state.currentPage, false);
     refreshAll().catch((error) => toast(error.message));
   });
   $("#loginForm").addEventListener("submit", async (event) => {
@@ -5665,6 +5695,7 @@ function bindEvents() {
       safeSessionRemove("teamLoopSsoAttempted");
       safeSessionRemove("teamLoopSsoSkip");
       applyAuthView();
+      switchPage(pageFromLocation() || state.currentPage);
       await refreshAll();
     } catch (error) {
       toast(error.message);
@@ -5676,7 +5707,7 @@ function bindEvents() {
     safeSessionSet("teamLoopSsoAttempted", "1");
     event.currentTarget.disabled = true;
     event.currentTarget.textContent = "正在跳转...";
-    window.location.assign("/api/sso/login");
+    window.location.assign(ssoLoginUrl());
   });
 
   $("#logoutBtn").addEventListener("click", async () => {
@@ -7326,7 +7357,7 @@ async function boot() {
     applyAuthView();
     const callbackState = handleSsoCallbackNotice();
     if (maybeStartSsoAutoLogin(callbackState)) return;
-    switchPage("members");
+    switchPage(pageFromLocation() || "members");
     await refreshAll();
   } catch {
     state.user = null;
