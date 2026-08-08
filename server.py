@@ -71,9 +71,18 @@ MONTHLY_RECURRENCE_VALUES = {"first", "second", "third", "fourth", "penultimate"
 TEAM_REACTIONS = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"]
 TEAM_POST_CATEGORIES = {"general", "field", "retrospective", "roast", "announcement"}
 TEAM_POST_STATUSES = {"open", "resolved"}
+TEAM_MOMENT_CATEGORIES = {"milestone", "delivery", "honor", "growth", "team"}
+TEAM_MOMENT_IMAGE_TYPES = {
+    "image/jpeg": (b"\xff\xd8\xff", ".jpg"),
+    "image/png": (b"\x89PNG\r\n\x1a\n", ".png"),
+    "image/webp": (b"RIFF", ".webp"),
+}
+TEAM_MOMENT_MAX_IMAGES = 6
+TEAM_MOMENT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 MODULE_CATALOG = [
     {"key": "members", "name": "团队成员", "description": "成员档案、职责画像和团队对话"},
+    {"key": "moments", "name": "团队时刻", "description": "用图片和事迹沉淀团队关键事件"},
     {"key": "dashboard", "name": "工作台", "description": "团队关键指标概览"},
     {"key": "archive", "name": "搜索归档", "description": "跨年度检索会议、对话和早例会事项"},
     {"key": "morning", "name": "早例会", "description": "按人追踪当日事项、风险和下一步"},
@@ -102,6 +111,7 @@ SYSTEM_USER_TYPES = [
 INITIAL_TYPE_OPERATIONS = {
     DEFAULT_USER_TYPE_KEY: {
         "members": (1, 1, 1, 1),
+        "moments": (1, 1, 1, 1),
         "dashboard": (1, 0, 0, 0),
         "archive": (1, 0, 0, 0),
         "morning": (1, 1, 1, 1),
@@ -269,6 +279,32 @@ def read_json(handler):
         return {}
     raw = handler.rfile.read(length).decode("utf-8")
     return json.loads(raw or "{}")
+
+
+def decode_team_moment_image(value, index=0):
+    if not isinstance(value, dict):
+        raise AppError(400, "图片数据格式不正确")
+    data_url = str(value.get("data_url") or "")
+    match = re.fullmatch(r"data:([^;,]+);base64,(.+)", data_url, re.DOTALL)
+    if not match or match.group(1).lower() not in TEAM_MOMENT_IMAGE_TYPES:
+        raise AppError(400, "团队时刻仅支持 JPG、PNG 或 WebP 图片")
+    mime_type = match.group(1).lower()
+    try:
+        content = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, TypeError) as exc:
+        raise AppError(400, "图片内容不是有效的 Base64 数据") from exc
+    if not content or len(content) > TEAM_MOMENT_MAX_IMAGE_BYTES:
+        raise AppError(400, "单张图片不能超过 5 MB")
+    signature, extension = TEAM_MOMENT_IMAGE_TYPES[mime_type]
+    if not content.startswith(signature) or (mime_type == "image/webp" and content[8:12] != b"WEBP"):
+        raise AppError(400, "图片内容与文件类型不一致")
+    original_name = Path(str(value.get("name") or f"moment-{index + 1}{extension}")).name
+    stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(original_name).stem).strip(".-") or f"moment-{index + 1}"
+    return {
+        "filename": f"{stem[:80]}{extension}",
+        "mime_type": mime_type,
+        "data": content,
+    }
 
 
 def parse_cookies(header):
@@ -594,6 +630,38 @@ def migrate_operation_permissions(conn):
                 """,
                 (type_key, module_key, *actions, now_iso()),
             )
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
+        (migration_key, now_iso()),
+    )
+
+
+def migrate_team_moments_permissions(conn):
+    migration_key = "team_moments_permissions_v1"
+    if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
+        return
+    conn.execute(
+        """
+        INSERT INTO module_permissions(
+            user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+        )
+        SELECT user_type_key, 'moments', can_view, can_create, can_edit, can_delete, ?
+        FROM module_permissions
+        WHERE module_key='members'
+        ON CONFLICT(user_type_key, module_key) DO NOTHING
+        """,
+        (now_iso(),),
+    )
+    conn.execute(
+        """
+        INSERT INTO module_permissions(
+            user_type_key, module_key, can_view, can_create, can_edit, can_delete, updated_at
+        ) VALUES(?, 'moments', 0, 0, 0, 0, ?)
+        ON CONFLICT(user_type_key, module_key) DO UPDATE SET
+            can_view=0, can_create=0, can_edit=0, can_delete=0, updated_at=excluded.updated_at
+        """,
+        (GUEST_USER_TYPE_KEY, now_iso()),
+    )
     conn.execute(
         "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
         (migration_key, now_iso()),
@@ -1304,6 +1372,30 @@ def init_db():
                 UNIQUE(reply_id, user_id, reaction)
             );
 
+            CREATE TABLE IF NOT EXISTS team_moments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                title TEXT NOT NULL,
+                story TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'milestone',
+                event_date TEXT NOT NULL,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by INTEGER REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS team_moment_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                moment_id INTEGER NOT NULL REFERENCES team_moments(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                image_data BLOB NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS red_black_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -1715,6 +1807,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moments_org_date ON team_moments(org_unit_id, deleted_at, event_date DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moment_images_moment ON team_moment_images(moment_id, sort_order, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_org_date ON meetings(org_unit_id, meeting_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_templates_org ON process_templates(org_unit_id, active, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_owner ON process_instances(owner_id, status, active, updated_at)")
@@ -1763,6 +1857,7 @@ def init_db():
         )
         migrate_dynamic_user_types(conn)
         migrate_operation_permissions(conn)
+        migrate_team_moments_permissions(conn)
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             admin_salt, admin_hash = make_hash("admin123")
@@ -1877,6 +1972,10 @@ class Handler(BaseHTTPRequestHandler):
             if len(link_open) == 4 and link_open[:2] == ["api", "links"] and link_open[3] == "open" and method == "GET":
                 self.send_link_redirect(int(link_open[2]))
                 return
+            moment_image = parsed.path.strip("/").split("/")
+            if len(moment_image) == 3 and moment_image[:2] == ["api", "team-moment-images"] and method == "GET":
+                self.send_team_moment_image(int(moment_image[2]))
+                return
             if parsed.path.startswith("/api/"):
                 result = self.route_api(method, parsed.path, parse_qs(parsed.query))
                 self.send_json(result)
@@ -1923,7 +2022,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.close_connection = True
         self.end_headers()
-        self.wfile.write(content)
+        # Large JavaScript bundles can be truncated by the Windows socket stack
+        # when they are written in one send while the browser loads assets in
+        # parallel. Small fixed-size writes keep the response length reliable.
+        for offset in range(0, len(content), 64 * 1024):
+            self.wfile.write(content[offset:offset + 64 * 1024])
         self.wfile.flush()
 
     def organization_context(self, conn, user=None):
@@ -2046,6 +2149,21 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(404, "讨论主题不存在或无权访问")
         return post
 
+    def require_team_moment_access(self, conn, moment_id, user=None, write=False):
+        moment = conn.execute(
+            "SELECT id, org_unit_id, title FROM team_moments WHERE id=? AND deleted_at IS NULL",
+            (moment_id,),
+        ).fetchone()
+        if not moment:
+            raise AppError(404, "团队时刻不存在")
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        allowed_ids = set(context["visible_ids"])
+        if not write:
+            allowed_ids.update(context["ancestor_ids"])
+        if moment["org_unit_id"] not in allowed_ids:
+            raise AppError(404, "团队时刻不存在或无权访问")
+        return moment
+
     def require_meeting_access(self, conn, meeting_id, user=None):
         meeting = conn.execute("SELECT id, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
         if not meeting:
@@ -2126,6 +2244,37 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
         self.wfile.flush()
 
+    def send_team_moment_image(self, image_id):
+        user = self.current_user(required=False)
+        self.require_module(user, "moments", "view")
+        self.api_user = user
+        with connect() as conn:
+            image = conn.execute(
+                """
+                SELECT i.id, i.filename, i.mime_type, i.image_data, i.moment_id
+                FROM team_moment_images i
+                JOIN team_moments m ON m.id=i.moment_id
+                WHERE i.id=? AND m.deleted_at IS NULL
+                """,
+                (image_id,),
+            ).fetchone()
+            if not image:
+                raise AppError(404, "图片不存在")
+            self.require_team_moment_access(conn, image["moment_id"], user)
+            content = bytes(image["image_data"])
+        self.send_response(200)
+        self.send_header("Content-Type", image["mime_type"])
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Disposition", f'inline; filename="moment-{image_id}"')
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        self.wfile.write(content)
+        self.wfile.flush()
+
     def current_user(self, required=True):
         cookies = parse_cookies(self.headers.get("Cookie"))
         token = cookies.get("weekly_session")
@@ -2199,6 +2348,8 @@ class Handler(BaseHTTPRequestHandler):
             return "users"
         if path.startswith("/api/members") or path.startswith("/api/team-posts"):
             return "members"
+        if path.startswith("/api/team-moments") or path.startswith("/api/team-moment-images"):
+            return "moments"
         if path.startswith("/api/archive"):
             return "archive"
         if path.startswith("/api/morning-items"):
@@ -2304,6 +2455,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.toggle_team_reply_reaction(int(parts[2]), user)
         if len(parts) == 3 and parts[:2] == ["api", "team-replies"] and method == "DELETE":
             return self.delete_team_post_reply(int(parts[2]), user)
+
+        if path == "/api/team-moments":
+            if method == "GET":
+                return {"moments": self.list_team_moments(user, query)}
+            if method == "POST":
+                return self.create_team_moment(user)
+        if len(parts) == 3 and parts[:2] == ["api", "team-moments"]:
+            if method == "PATCH":
+                return self.update_team_moment(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_team_moment(int(parts[2]), user)
 
         if path == "/api/me/password" and method == "PATCH":
             return self.change_own_password(user)
@@ -4029,6 +4191,167 @@ class Handler(BaseHTTPRequestHandler):
                 (member_id, user["id"], kind, content, now_iso()),
             )
         return {"message": "已发布", "members": self.list_members()}
+
+    def list_team_moments(self, user=None, query=None):
+        query = query or {}
+        year = (query.get("year") or [""])[0].strip()
+        keyword = (query.get("keyword") or [""])[0].strip()
+        if year and (len(year) != 4 or not year.isdigit()):
+            raise AppError(400, "年份格式不正确")
+        if len(keyword) > 80:
+            raise AppError(400, "搜索关键词最多 80 个字符")
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+            org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", user, inherit_ancestors=True)
+            where = ["m.deleted_at IS NULL", org_where]
+            params = list(org_params)
+            if year:
+                where.append("substr(m.event_date, 1, 4)=?")
+                params.append(year)
+            if keyword:
+                where.append("(m.title LIKE ? OR m.story LIKE ? OR COALESCE(o.name, '') LIKE ? OR u.display_name LIKE ?)")
+                like = f"%{keyword}%"
+                params.extend([like, like, like, like])
+            moments = rows_to_list(conn.execute(
+                f"""
+                SELECT m.id, m.org_unit_id, m.title, m.story, m.category, m.event_date,
+                       m.created_by, m.created_at, m.updated_at,
+                       u.display_name AS created_by_name, o.name AS org_unit_name
+                FROM team_moments m
+                JOIN users u ON u.id=m.created_by
+                LEFT JOIN org_units o ON o.id=m.org_unit_id
+                WHERE {' AND '.join(where)}
+                ORDER BY m.event_date DESC, m.id DESC
+                LIMIT 300
+                """,
+                params,
+            ).fetchall())
+            moment_ids = [item["id"] for item in moments]
+            images_by_moment = {moment_id: [] for moment_id in moment_ids}
+            if moment_ids:
+                placeholders = ",".join("?" for _ in moment_ids)
+                images = rows_to_list(conn.execute(
+                    f"""
+                    SELECT id, moment_id, filename, mime_type, sort_order
+                    FROM team_moment_images
+                    WHERE moment_id IN ({placeholders})
+                    ORDER BY moment_id, sort_order, id
+                    """,
+                    moment_ids,
+                ).fetchall())
+                for image in images:
+                    image["url"] = f"/api/team-moment-images/{image['id']}"
+                    images_by_moment[image["moment_id"]].append(image)
+        inherited_ids = set(context["ancestor_ids"]) - set(context["visible_ids"])
+        for moment in moments:
+            moment["images"] = images_by_moment.get(moment["id"], [])
+            moment["inherited"] = moment["org_unit_id"] in inherited_ids
+            moment["mine"] = bool(user and moment["created_by"] == user["id"])
+        return moments
+
+    def normalize_team_moment_payload(self, data, partial=False):
+        payload = {}
+        if not partial or "title" in data:
+            title = str(data.get("title") or "").strip()
+            if not title or len(title) > 100:
+                raise AppError(400, "标题为必填项，最多 100 个字符")
+            payload["title"] = title
+        if not partial or "story" in data:
+            story = str(data.get("story") or "").strip()
+            if not story or len(story) > 5000:
+                raise AppError(400, "事迹为必填项，最多 5000 个字符")
+            payload["story"] = story
+        if not partial or "event_date" in data:
+            event_date = str(data.get("event_date") or "").strip()
+            try:
+                dt.date.fromisoformat(event_date)
+            except ValueError as exc:
+                raise AppError(400, "事件日期格式不正确") from exc
+            payload["event_date"] = event_date
+        if not partial or "category" in data:
+            category = str(data.get("category") or "milestone").strip().lower()
+            if category not in TEAM_MOMENT_CATEGORIES:
+                raise AppError(400, "团队时刻分类不正确")
+            payload["category"] = category
+        return payload
+
+    def create_team_moment(self, user):
+        data = read_json(self)
+        payload = self.normalize_team_moment_payload(data)
+        raw_images = data.get("images") or []
+        if not isinstance(raw_images, list) or len(raw_images) > TEAM_MOMENT_MAX_IMAGES:
+            raise AppError(400, f"每条团队时刻最多上传 {TEAM_MOMENT_MAX_IMAGES} 张图片")
+        images = [decode_team_moment_image(value, index) for index, value in enumerate(raw_images)]
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+            selected = context.get("selected")
+            if not selected or selected["id"] not in context["visible_ids"]:
+                raise AppError(403, "当前团队不可新增团队时刻")
+            created_at = now_iso()
+            cursor = conn.execute(
+                """
+                INSERT INTO team_moments(org_unit_id, title, story, category, event_date, created_by, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (selected["id"], payload["title"], payload["story"], payload["category"], payload["event_date"], user["id"], created_at, created_at),
+            )
+            moment_id = cursor.lastrowid
+            for index, image in enumerate(images):
+                conn.execute(
+                    """
+                    INSERT INTO team_moment_images(moment_id, filename, mime_type, image_data, sort_order, created_at)
+                    VALUES(?,?,?,?,?,?)
+                    """,
+                    (moment_id, image["filename"], image["mime_type"], image["data"], index, created_at),
+                )
+            write_audit(conn, user, "team_moment.create", "team_moment", moment_id, "团队时刻已发布", {"title": payload["title"], "image_count": len(images)}, self.client_address[0])
+        return {"message": "团队时刻已发布", "moments": self.list_team_moments(user)}
+
+    def update_team_moment(self, moment_id, user):
+        data = read_json(self)
+        payload = self.normalize_team_moment_payload(data, partial=True)
+        raw_images = data.get("new_images") or []
+        remove_ids = data.get("remove_image_ids") or []
+        if not isinstance(raw_images, list) or not isinstance(remove_ids, list):
+            raise AppError(400, "图片更新格式不正确")
+        images = [decode_team_moment_image(value, index) for index, value in enumerate(raw_images)]
+        try:
+            remove_ids = sorted({int(value) for value in remove_ids})
+        except (TypeError, ValueError) as exc:
+            raise AppError(400, "待删除图片标识不正确") from exc
+        with connect() as conn:
+            self.require_team_moment_access(conn, moment_id, user, write=True)
+            existing_images = conn.execute("SELECT id FROM team_moment_images WHERE moment_id=? ORDER BY sort_order, id", (moment_id,)).fetchall()
+            existing_ids = {row["id"] for row in existing_images}
+            if any(image_id not in existing_ids for image_id in remove_ids):
+                raise AppError(400, "待删除图片不属于当前团队时刻")
+            remaining_count = len(existing_ids) - len(remove_ids) + len(images)
+            if remaining_count > TEAM_MOMENT_MAX_IMAGES:
+                raise AppError(400, f"每条团队时刻最多保留 {TEAM_MOMENT_MAX_IMAGES} 张图片")
+            fields = [f"{key}=?" for key in payload]
+            values = list(payload.values())
+            fields.append("updated_at=?")
+            values.extend([now_iso(), moment_id])
+            conn.execute(f"UPDATE team_moments SET {', '.join(fields)} WHERE id=?", values)
+            if remove_ids:
+                placeholders = ",".join("?" for _ in remove_ids)
+                conn.execute(f"DELETE FROM team_moment_images WHERE moment_id=? AND id IN ({placeholders})", [moment_id, *remove_ids])
+            start_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1)+1 FROM team_moment_images WHERE moment_id=?", (moment_id,)).fetchone()[0]
+            for index, image in enumerate(images):
+                conn.execute(
+                    "INSERT INTO team_moment_images(moment_id, filename, mime_type, image_data, sort_order, created_at) VALUES(?,?,?,?,?,?)",
+                    (moment_id, image["filename"], image["mime_type"], image["data"], start_order + index, now_iso()),
+                )
+            write_audit(conn, user, "team_moment.update", "team_moment", moment_id, "团队时刻已更新", {"fields": list(payload), "added_images": len(images), "removed_images": len(remove_ids)}, self.client_address[0])
+        return {"message": "团队时刻已更新", "moments": self.list_team_moments(user)}
+
+    def delete_team_moment(self, moment_id, user):
+        with connect() as conn:
+            moment = self.require_team_moment_access(conn, moment_id, user, write=True)
+            conn.execute("UPDATE team_moments SET deleted_at=?, deleted_by=? WHERE id=?", (now_iso(), user["id"], moment_id))
+            add_recycle_record(conn, "team_moment", moment_id, moment["title"], user)
+            write_audit(conn, user, "team_moment.delete", "team_moment", moment_id, "团队时刻已移入回收站", {}, self.client_address[0])
+        return {"message": "团队时刻已移入回收站", "moments": self.list_team_moments(user)}
 
     def list_team_posts(self, user=None):
         with connect() as conn:
@@ -6968,6 +7291,7 @@ class Handler(BaseHTTPRequestHandler):
             "team_post": "讨论主题",
             "team_reply": "团队回复",
             "meeting_item": "会议议题",
+            "team_moment": "团队时刻",
         }
         for item in items:
             item["entity_label"] = labels.get(item["entity_type"], item["entity_type"])
@@ -7002,6 +7326,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"UPDATE team_post_replies SET deleted_at=NULL, deleted_by=NULL WHERE id IN ({placeholders})",
                     reply_ids,
                 )
+            elif entity_type == "team_moment":
+                conn.execute("UPDATE team_moments SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
             elif entity_type == "user":
                 conn.execute("UPDATE users SET active=1 WHERE id=?", (item["entity_id"],))
                 conn.execute("UPDATE members SET active=1 WHERE user_id=?", (item["entity_id"],))
@@ -7037,6 +7363,8 @@ class Handler(BaseHTTPRequestHandler):
                 placeholders = ",".join("?" for _ in reply_ids)
                 conn.execute(f"DELETE FROM team_reply_reactions WHERE reply_id IN ({placeholders})", reply_ids)
                 conn.execute(f"DELETE FROM team_post_replies WHERE id IN ({placeholders})", reply_ids)
+            elif item["entity_type"] == "team_moment":
+                conn.execute("DELETE FROM team_moments WHERE id=?", (item["entity_id"],))
             else:
                 raise AppError(400, "该类型暂不支持彻底删除")
             conn.execute(
@@ -7059,6 +7387,7 @@ class Handler(BaseHTTPRequestHandler):
             ("meeting_items", "会议议题", "meeting_items", "created_at", "deleted_at IS NULL"),
             ("team_posts", "团队讨论", "team_posts", "created_at", "deleted_at IS NULL"),
             ("team_replies", "团队回复", "team_post_replies", "created_at", "deleted_at IS NULL AND post_id IN (SELECT id FROM team_posts WHERE deleted_at IS NULL)"),
+            ("moments", "团队时刻", "team_moments", "event_date", "deleted_at IS NULL"),
             ("morning", "早例会事项", "morning_items", "item_date", "active=1"),
         ]
         allowed = {
@@ -7066,6 +7395,7 @@ class Handler(BaseHTTPRequestHandler):
             "meeting_items": self.can_view_module(user, "meetings"),
             "team_posts": self.can_view_module(user, "members"),
             "team_replies": self.can_view_module(user, "members"),
+            "moments": self.can_view_module(user, "moments"),
             "morning": self.can_view_module(user, "morning"),
         }
         year_map = {}
@@ -7099,7 +7429,7 @@ class Handler(BaseHTTPRequestHandler):
             raise AppError(400, "搜索关键词最多 80 个字符")
         if year and (not year.isdigit() or len(year) != 4):
             raise AppError(400, "年份格式不正确")
-        allowed_types = {"all", "meetings", "meeting_items", "team_posts", "team_replies", "morning"}
+        allowed_types = {"all", "meetings", "meeting_items", "team_posts", "team_replies", "moments", "morning"}
         if type_filter not in allowed_types:
             type_filter = "all"
         like = f"%{keyword}%"
@@ -7221,6 +7551,30 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchall())
                 for row in rows:
                     add_result("team_replies", "团队回复", row["id"], "回复", row["content"], row["created_at"], row.get("owner"), "members")
+
+            if wants("moments") and self.can_view_module(user, "moments"):
+                org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", user, inherit_ancestors=True)
+                params = list(org_params)
+                where = f"m.deleted_at IS NULL AND {org_where}"
+                if keyword:
+                    where += " AND (m.title LIKE ? OR m.story LIKE ? OR u.display_name LIKE ?)"
+                    params.extend([like, like, like])
+                if year:
+                    where += in_year("m.event_date")
+                    params.append(year)
+                rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT m.id, m.title, m.story, m.event_date, u.display_name AS owner
+                    FROM team_moments m
+                    JOIN users u ON u.id=m.created_by
+                    WHERE {where}
+                    ORDER BY m.event_date DESC, m.id DESC
+                    LIMIT ?
+                    """,
+                    [*params, limit],
+                ).fetchall())
+                for row in rows:
+                    add_result("moments", "团队时刻", row["id"], row["title"], row["story"], row["event_date"], row.get("owner"), "moments")
 
             if wants("morning") and self.can_view_module(user, "morning"):
                 params = []

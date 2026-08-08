@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260728-sso-return-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260808-moments-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -611,12 +611,70 @@
             </div>
           </section>
 
+          <section id="moments" class="page">
+            <section class="panel moments-panel">
+              <div class="moments-head">
+                <div>
+                  <h2>团队关键事件</h2>
+                  <p>用图片和事迹记录里程碑、交付、荣誉与共同成长。</p>
+                </div>
+                <div class="moments-head-actions">
+                  <div class="moment-view-switch" role="group" aria-label="展示方式">
+                    <button type="button" data-moment-view="cards" aria-pressed="true">卡片</button>
+                    <button type="button" data-moment-view="timeline" aria-pressed="false">时间轴</button>
+                  </div>
+                  <button id="momentCreateButton" type="button">＋ 记录时刻</button>
+                </div>
+              </div>
+              <div class="moments-toolbar">
+                <select id="momentYearFilter" aria-label="按年份筛选"><option value="">全部年份</option></select>
+                <label class="moments-search"><span>⌕</span><input id="momentKeywordFilter" type="search" maxlength="80" placeholder="搜索标题、事迹或团队" /></label>
+                <span id="momentResultCount" class="moments-result-count"></span>
+              </div>
+              <div id="momentList" class="moment-card-grid"></div>
+            </section>
+          </section>
+
+          <div id="momentEditModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="momentEditTitle" aria-hidden="true">
+            <div class="modal-card moment-modal-card">
+              <div class="modal-head">
+                <div><h2 id="momentEditTitle">记录团队时刻</h2><p>选择事件日期，写清发生了什么以及它为何重要。</p></div>
+                <button class="modal-close" type="button" data-moment-close aria-label="关闭">×</button>
+              </div>
+              <form id="momentEditForm" class="moment-edit-form">
+                <div class="moment-edit-grid">
+                  <label>事件标题<input name="title" maxlength="100" placeholder="例如：TOPTB 首次连续稳定运行 30 天" required /></label>
+                  <label>事件日期<input name="event_date" type="date" required /></label>
+                  <label>事件类型
+                    <select name="category">
+                      <option value="milestone">里程碑</option>
+                      <option value="delivery">项目交付</option>
+                      <option value="honor">荣誉认可</option>
+                      <option value="growth">团队成长</option>
+                      <option value="team">团队建设</option>
+                    </select>
+                  </label>
+                </div>
+                <label>关键事迹<textarea name="story" maxlength="5000" rows="7" placeholder="记录背景、团队行动、结果和价值，方便以后回看。" required></textarea></label>
+                <label class="moment-image-field">现场图片
+                  <input name="images" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+                  <small>最多 6 张，支持 JPG、PNG、WebP；浏览器会在上传前压缩。</small>
+                </label>
+                <div id="momentImagePreview" class="moment-image-preview"></div>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-moment-close>取消</button>
+                  <button id="momentSubmitButton" type="submit">发布团队时刻</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="archive" class="page">
             <section class="panel archive-panel">
               <div class="panel-title">
                 <div>
                   <h2>年度归档</h2>
-                  <p>按年份汇总会议、团队讨论和早例会事项，数据多起来后先从这里定位时间范围。</p>
+                  <p>按年份汇总会议、团队时刻、讨论和早例会事项，数据多起来后先从这里定位时间范围。</p>
                 </div>
                 <button id="archiveRefreshBtn" class="secondary" type="button">刷新归档</button>
               </div>
@@ -627,7 +685,7 @@
               <div class="panel-title">
                 <div>
                   <h2>全局搜索</h2>
-                  <p>可搜索会议主题/纪要、团队讨论/回复、早例会事项和风险说明。</p>
+                  <p>可搜索会议主题/纪要、团队时刻、团队讨论/回复、早例会事项和风险说明。</p>
                 </div>
               </div>
               <form id="archiveSearchForm" class="archive-search-form">
@@ -641,6 +699,7 @@
                   <option value="meeting_items">会议议题/纪要</option>
                   <option value="team_posts">团队讨论</option>
                   <option value="team_replies">团队回复</option>
+                  <option value="moments">团队时刻</option>
                   <option value="morning">早例会事项</option>
                 </select>
                 <button type="submit">搜索</button>
@@ -1254,6 +1313,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260728-sso-return-v1"></script>
+    <script type="module" src="/app.js?v=20260808-moments-v1"></script>
   </body>
 </html>

@@ -34,6 +34,7 @@
 - Verify attendance opens in a modal and meeting email generation works both with and without Thank You content.
 - Verify the local full Emoji picker loads, searches, sends an arbitrary Emoji, and can remove the reaction without external network access.
 - Run `python scripts\forum_smoke_test.py`; verify author edits, nested replies, arbitrary Emoji, announcement/pin privilege rejection, soft deletion, recycle restore, and preserved replies.
+- Run `python scripts\team_moments_smoke_test.py`; verify guest denial by default, image signature validation, protected image reads, editing, soft deletion, and recycle restore.
 - Toggle black-score summary and detail visibility independently; verify non-admin APIs and UI hide the configured data while administrators still see and can restore it.
 - Verify the score page defaults to the current month, detail rows are newest-first and scroll, and a member click opens only that member's full history.
 - Verify shared date filters default to the first day of the current month through today.

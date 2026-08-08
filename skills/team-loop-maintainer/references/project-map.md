@@ -7,6 +7,7 @@
 | Tables and migrations | `server.py:init_db` | seed functions, backup verification |
 | Authentication and API routing | `server.py:Handler` | `route_module`, current-user helpers |
 | Permissions | `MODULE_CATALOG`, type defaults | `static/app.js` access helpers and navigation |
+| Team moments | `team_moments`, `team_moment_images`, protected image endpoint | `#moments`, card/timeline renderer and edit modal |
 | Organization tree and route scope | `org_units`, `organization_context()` | SSO group mapping, people-centered module queries, sidebar organization switcher |
 | Page markup and dialogs | `static/index.html` | render functions in `static/app.js` |
 | State, rendering, interactions | `static/app.js` | related backend endpoint |

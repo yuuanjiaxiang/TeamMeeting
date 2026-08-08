@@ -63,6 +63,8 @@ TeamMeeting/
 5. 在 `server.py` 的 `MODULE_CATALOG`、初始类型权限和 `module_for_path()` 中注册；
 6. 访客范围由数据库中的 `guest` 权限模板控制，不要另加前端硬编码白名单。
 
+团队时刻是新增模块的完整参考：`team_moments` 与 `team_moment_images` 使用独立表，列表读取允许祖先组织只读透传，写入调用 `require_team_moment_access(..., write=True)` 限制在原组织。图片接口在 JSON 路由前单独输出二进制，但仍必须执行会话、模块和组织权限校验。修改该模块后运行 `python scripts/team_moments_smoke_test.py`。
+
 ### 状态与刷新
 
 全局数据存放在 `state`。切换页面时会重新调用模块 loader，以获取最新数据。写操作完成后优先只刷新受影响模块；跨模块数据同步时使用 `refreshAll()`。
@@ -198,12 +200,13 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\team_moments_smoke_test.py scripts\proxy_smoke_test.py
 node --check static\app.js
 git diff --check
 python scripts\process_flow_smoke_test.py
 python scripts\sso_smoke_test.py
 python scripts\forum_smoke_test.py
+python scripts\team_moments_smoke_test.py
 python scripts\proxy_smoke_test.py
 ```
 

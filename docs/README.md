@@ -7,6 +7,7 @@
 | 普通成员 | [使用手册](USER_GUIDE.md) |
 | 管理员 | [使用手册](USER_GUIDE.md) → [部署与运维](DEPLOYMENT.md) → [数据库与备份](DATABASE.md) |
 | 新开发者 | [二次开发指南](DEVELOPMENT.md) → [API 参考](API.md) → [数据库与备份](DATABASE.md) |
+| 知识库建设者 | [本地业务知识库方案](KNOWLEDGE_BASE.md) → [二次开发指南](DEVELOPMENT.md) → [部署与运维](DEPLOYMENT.md) |
 | AI/Codex 开发者 | [Team Loop 维护 Skill](../skills/team-loop-maintainer/SKILL.md) |
 
 ## 快速判断
@@ -16,6 +17,7 @@
 - 需要增加页面、接口或权限：查 [二次开发指南](DEVELOPMENT.md)。
 - 需要调用接口或排查请求：查 [API 参考](API.md)。
 - 需要备份、恢复或理解表结构：查 [数据库与备份](DATABASE.md)。
+- 需要建设内网 AI 问答与本地知识库：查 [本地业务知识库方案](KNOWLEDGE_BASE.md)。
 - 服务打不开、邮件唤起失败或页面没更新：查 [常见问题](TROUBLESHOOTING.md)。
 
 文档以仓库当前 `main` 分支为准。功能变更时应同步更新相关文档。

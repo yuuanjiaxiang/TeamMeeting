@@ -37,6 +37,7 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 - [HTTP API 参考](docs/API.md)
 - [数据库与备份](docs/DATABASE.md)
 - [常见问题](docs/TROUBLESHOOTING.md)
+- [本地业务知识库与 AI 问答接入](docs/KNOWLEDGE_BASE.md)
 - [Team Loop 维护 Skill](skills/team-loop-maintainer/SKILL.md)
 
 ## 常用命令

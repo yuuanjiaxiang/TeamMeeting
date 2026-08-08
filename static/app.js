@@ -9,6 +9,11 @@ const state = {
   users: [],
   members: [],
   teamPosts: [],
+  moments: [],
+  momentView: safeStorageGet("teamLoopMomentView", "cards"),
+  momentYear: "",
+  momentKeyword: "",
+  editingMomentId: null,
   forumCategory: "all",
   forumSearch: "",
   forumSort: "recent",
@@ -80,6 +85,7 @@ const state = {
 
 const pages = [
   ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队讨论都在这里。"],
+  ["moments", "◈", "团队时刻", "用图片和事迹沉淀团队关键事件。"],
   ["dashboard", "⌂", "工作台", "快速查看团队本周重点数据。"],
   ["archive", "⌕", "搜索归档", "跨年度搜索会议、讨论和早例会事项。"],
   ["morning", "☀", "早例会", "按人追踪当天事项、风险和下一步。"],
@@ -98,6 +104,13 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const dateFilterPages = new Set(["dashboard", "rules"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"];
+const momentCategoryMeta = {
+  milestone: { label: "里程碑", tone: "milestone" },
+  delivery: { label: "项目交付", tone: "delivery" },
+  honor: { label: "荣誉认可", tone: "honor" },
+  growth: { label: "团队成长", tone: "growth" },
+  team: { label: "团队建设", tone: "team" },
+};
 const forumCategoryMeta = {
   general: { label: "普通讨论", tone: "general" },
   field: { label: "现场问题", tone: "field" },
@@ -561,6 +574,40 @@ function fileToDataUrl(file) {
   });
 }
 
+function momentFileToData(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.size) return resolve(null);
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return reject(new Error("仅支持 JPG、PNG 或 WebP 图片"));
+    if (file.size > 12 * 1024 * 1024) return reject(new Error("原始图片不能超过 12 MB"));
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      const maxEdge = 1800;
+      const scale = Math.min(1, maxEdge / Math.max(image.width, image.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve({ name: file.name, data_url: canvas.toDataURL("image/jpeg", 0.86) });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`无法读取图片：${file.name}`));
+    };
+    image.src = url;
+  });
+}
+
+async function momentFilesToData(fileList) {
+  const files = [...(fileList || [])];
+  if (files.length > 6) throw new Error("每条团队时刻最多上传 6 张图片");
+  return (await Promise.all(files.map(momentFileToData))).filter(Boolean);
+}
+
 function toast(message) {
   const el = $("#toast");
   el.textContent = message;
@@ -649,6 +696,7 @@ function applyAuthView() {
   }
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdminView()));
   $("#forumCreateButton")?.classList.toggle("hidden", guest || !canOperate("members", "create"));
+  $("#momentCreateButton")?.classList.toggle("hidden", guest || !canOperate("moments", "create"));
   $$('[data-forum-create-open]').forEach((button) => button.classList.toggle("hidden", guest || !canOperate("members", "create")));
   $("#forumMineButton")?.classList.toggle("hidden", guest);
   $$('[data-admin-category]').forEach((option) => {
@@ -4860,6 +4908,7 @@ async function refreshPageData(id = state.currentPage) {
   if (!canLoadPageData(id)) return;
   const loaders = {
     members: loadMembers,
+    moments: loadMoments,
     dashboard: loadDashboard,
     archive: loadArchive,
     morning: loadMorning,
@@ -4882,6 +4931,7 @@ async function refreshAll() {
   const loaders = [];
   if (canLoadModule("rules")) loaders.push(loadRulesAndScores);
   if (canLoadModule("members")) loaders.push(loadMembers);
+  if (canLoadModule("moments")) loaders.push(loadMoments);
   if (canLoadModule("morning")) loaders.push(loadMorning);
   if (!isGuest() && canLoadModule("processes")) loaders.push(loadProcesses);
   if (canLoadModule("links")) loaders.push(loadLinks);
@@ -5615,6 +5665,172 @@ async function reorderMemberCards(draggedMemberId, targetMemberId, placeAfter) {
   await saveMemberOrder(nextMembers, "拖动排序已保存");
 }
 
+function momentMeta(moment) {
+  return momentCategoryMeta[moment.category] || momentCategoryMeta.milestone;
+}
+
+function momentImagesMarkup(moment) {
+  const images = moment.images || [];
+  if (!images.length) {
+    return `<div class="moment-image-empty" aria-hidden="true"><span>◈</span><strong>${escapeHtml(momentMeta(moment).label)}</strong></div>`;
+  }
+  const visible = images.slice(0, 3);
+  return `<div class="moment-image-stack count-${visible.length}">
+    ${visible.map((image, index) => `<a href="${escapeHtml(image.url)}" target="_blank" rel="noopener" title="查看原图"><img src="${escapeHtml(image.url)}" alt="${escapeHtml(moment.title)} 图片 ${index + 1}" loading="lazy"></a>`).join("")}
+    ${images.length > 3 ? `<span class="moment-image-more">+${images.length - 3}</span>` : ""}
+  </div>`;
+}
+
+function momentActionsMarkup(moment) {
+  if (moment.inherited || isGuest()) return "";
+  const edit = canOperate("moments", "edit") ? `<button class="secondary moment-edit-button" type="button" data-moment-id="${moment.id}">编辑</button>` : "";
+  const remove = canOperate("moments", "delete") ? `<button class="danger moment-delete-button" type="button" data-moment-id="${moment.id}">删除</button>` : "";
+  return edit || remove ? `<div class="moment-actions">${edit}${remove}</div>` : "";
+}
+
+function momentCardMarkup(moment, timeline = false) {
+  const meta = momentMeta(moment);
+  return `<article class="moment-card ${timeline ? "timeline-card" : ""}" data-tone="${meta.tone}">
+    ${momentImagesMarkup(moment)}
+    <div class="moment-card-body">
+      <div class="moment-card-kicker"><span class="moment-category">${escapeHtml(meta.label)}</span><time>${escapeHtml(shortDate(moment.event_date))}</time></div>
+      <h3>${escapeHtml(moment.title)}</h3>
+      <p class="moment-story">${escapeHtml(moment.story)}</p>
+      ${String(moment.story || "").length > 90 ? `<button class="moment-story-toggle" type="button" aria-expanded="false">阅读全文</button>` : ""}
+      <div class="moment-card-footer">
+        <span>${escapeHtml(moment.org_unit_name || "当前团队")} · ${escapeHtml(moment.created_by_name || "")}</span>
+        ${moment.inherited ? `<span class="moment-inherited">来自上级团队</span>` : ""}
+      </div>
+      ${momentActionsMarkup(moment)}
+    </div>
+  </article>`;
+}
+
+function filteredMoments() {
+  const keyword = state.momentKeyword.trim().toLowerCase();
+  return state.moments.filter((moment) => {
+    if (state.momentYear && String(moment.event_date || "").slice(0, 4) !== state.momentYear) return false;
+    if (!keyword) return true;
+    return [moment.title, moment.story, moment.org_unit_name, moment.created_by_name, momentMeta(moment).label]
+      .some((value) => String(value || "").toLowerCase().includes(keyword));
+  });
+}
+
+function renderMomentYearFilter() {
+  const select = $("#momentYearFilter");
+  if (!select) return;
+  const years = [...new Set(state.moments.map((item) => String(item.event_date || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  select.innerHTML = `<option value="">全部年份</option>${years.map((year) => `<option value="${year}" ${state.momentYear === year ? "selected" : ""}>${year} 年</option>`).join("")}`;
+}
+
+function renderMoments() {
+  const list = $("#momentList");
+  if (!list) return;
+  const moments = filteredMoments();
+  $("#momentResultCount").textContent = `共 ${moments.length} 个时刻`;
+  $$('[data-moment-view]').forEach((button) => {
+    const active = button.dataset.momentView === state.momentView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  list.className = state.momentView === "timeline" ? "moment-timeline" : "moment-card-grid";
+  if (!moments.length) {
+    list.innerHTML = `<div class="moment-empty"><span>◈</span><h3>还没有匹配的团队时刻</h3><p>${canOperate("moments", "create") ? "记录一个关键事件，让团队成果被持续看见。" : "可以调整年份或关键词后再查看。"}</p></div>`;
+    return;
+  }
+  if (state.momentView === "timeline") {
+    list.innerHTML = moments.map((moment) => `<div class="moment-timeline-row"><div class="moment-timeline-date"><strong>${escapeHtml(compactDate(moment.event_date))}</strong><span>${escapeHtml(momentMeta(moment).label)}</span></div><span class="moment-timeline-dot" data-tone="${escapeHtml(momentMeta(moment).tone)}"></span>${momentCardMarkup(moment, true)}</div>`).join("");
+    return;
+  }
+  list.innerHTML = moments.map((moment) => momentCardMarkup(moment)).join("");
+}
+
+async function loadMoments() {
+  const data = await api("/api/team-moments");
+  state.moments = data.moments || [];
+  renderMomentYearFilter();
+  renderMoments();
+}
+
+function renderMomentImagePreview(moment = null, files = []) {
+  const preview = $("#momentImagePreview");
+  if (!preview) return;
+  const selectedRemovals = new Set($$('input[name="remove_image_ids"]:checked', preview).map((input) => String(input.value)));
+  const existing = (moment?.images || []).map((image) => `
+    <label class="moment-preview-item existing">
+      <img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.filename || "已上传图片")}">
+      <span><input type="checkbox" name="remove_image_ids" value="${image.id}" ${selectedRemovals.has(String(image.id)) ? "checked" : ""}> 移除</span>
+    </label>`).join("");
+  const incoming = [...files].map((file) => `
+    <div class="moment-preview-item incoming">
+      <img src="${escapeHtml(URL.createObjectURL(file))}" alt="${escapeHtml(file.name)}">
+      <span>${escapeHtml(file.name)}</span>
+    </div>`).join("");
+  preview.innerHTML = existing || incoming ? `${existing}${incoming}` : `<p class="empty-note">可上传现场照片、成果截图或团队合影。</p>`;
+}
+
+function openMomentModal(momentId = null) {
+  if (momentId && !canOperate("moments", "edit")) return;
+  if (!momentId && !canOperate("moments", "create")) return;
+  const modal = $("#momentEditModal");
+  const form = $("#momentEditForm");
+  const moment = state.moments.find((item) => Number(item.id) === Number(momentId));
+  if (!modal || !form || (momentId && !moment)) return;
+  state.editingMomentId = moment ? moment.id : null;
+  form.reset();
+  form.elements.title.value = moment?.title || "";
+  form.elements.event_date.value = moment?.event_date || iso(new Date());
+  form.elements.category.value = moment?.category || "milestone";
+  form.elements.story.value = moment?.story || "";
+  $("#momentEditTitle").textContent = moment ? "编辑团队时刻" : "记录团队时刻";
+  $("#momentSubmitButton").textContent = moment ? "保存修改" : "发布团队时刻";
+  renderMomentImagePreview(moment);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.title.focus();
+}
+
+function closeMomentModal() {
+  const modal = $("#momentEditModal");
+  modal?.classList.add("hidden");
+  modal?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  state.editingMomentId = null;
+}
+
+async function submitMomentForm(form) {
+  const button = $("#momentSubmitButton");
+  const files = [...(form.elements.images.files || [])];
+  const existingCount = state.editingMomentId
+    ? (state.moments.find((item) => Number(item.id) === Number(state.editingMomentId))?.images || []).length
+    : 0;
+  const removeImageIds = new FormData(form).getAll("remove_image_ids").map(Number);
+  if (existingCount - removeImageIds.length + files.length > 6) throw new Error("每条团队时刻最多保留 6 张图片");
+  button.disabled = true;
+  button.textContent = "正在处理图片…";
+  try {
+    const imageData = await momentFilesToData(files);
+    const payload = {
+      title: form.elements.title.value.trim(),
+      event_date: form.elements.event_date.value,
+      category: form.elements.category.value,
+      story: form.elements.story.value.trim(),
+    };
+    const data = state.editingMomentId
+      ? await api(`/api/team-moments/${state.editingMomentId}`, { method: "PATCH", body: JSON.stringify({ ...payload, new_images: imageData, remove_image_ids: removeImageIds }) })
+      : await api("/api/team-moments", { method: "POST", body: JSON.stringify({ ...payload, images: imageData }) });
+    state.moments = data.moments || state.moments;
+    closeMomentModal();
+    renderMomentYearFilter();
+    renderMoments();
+    toast(data.message || "团队时刻已保存");
+  } finally {
+    button.disabled = false;
+    button.textContent = state.editingMomentId ? "保存修改" : "发布团队时刻";
+  }
+}
+
 async function loadMembers() {
   const [membersData, postsData] = await Promise.all([
     api("/api/members"),
@@ -5809,6 +6025,61 @@ function bindEvents() {
   });
 
   $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#momentCreateButton")?.addEventListener("click", () => openMomentModal());
+  $("#momentYearFilter")?.addEventListener("change", (event) => {
+    state.momentYear = event.target.value || "";
+    renderMoments();
+  });
+  $("#momentKeywordFilter")?.addEventListener("input", (event) => {
+    state.momentKeyword = event.target.value || "";
+    renderMoments();
+  });
+  $("#momentEditForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitMomentForm(event.currentTarget).catch((error) => toast(error.message));
+  });
+  $("#momentEditForm")?.elements.images?.addEventListener("change", (event) => {
+    const moment = state.moments.find((item) => Number(item.id) === Number(state.editingMomentId));
+    renderMomentImagePreview(moment, event.target.files || []);
+  });
+  document.addEventListener("click", (event) => {
+    const viewButton = event.target.closest("[data-moment-view]");
+    if (viewButton) {
+      state.momentView = viewButton.dataset.momentView === "timeline" ? "timeline" : "cards";
+      safeStorageSet("teamLoopMomentView", state.momentView);
+      renderMoments();
+      return;
+    }
+    const editButton = event.target.closest(".moment-edit-button");
+    if (editButton) {
+      openMomentModal(editButton.dataset.momentId);
+      return;
+    }
+    const storyButton = event.target.closest(".moment-story-toggle");
+    if (storyButton) {
+      const card = storyButton.closest(".moment-card");
+      const expanded = !card.classList.contains("story-expanded");
+      card.classList.toggle("story-expanded", expanded);
+      storyButton.textContent = expanded ? "收起" : "阅读全文";
+      storyButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+      return;
+    }
+    const deleteButton = event.target.closest(".moment-delete-button");
+    if (deleteButton) {
+      const moment = state.moments.find((item) => Number(item.id) === Number(deleteButton.dataset.momentId));
+      if (!moment || !window.confirm(`确定删除团队时刻“${moment.title}”吗？可在回收站恢复。`)) return;
+      api(`/api/team-moments/${moment.id}`, { method: "DELETE" })
+        .then((data) => {
+          state.moments = data.moments || [];
+          renderMomentYearFilter();
+          renderMoments();
+          toast(data.message || "团队时刻已删除");
+        })
+        .catch((error) => toast(error.message));
+      return;
+    }
+    if (event.target.closest("[data-moment-close]") || event.target === $("#momentEditModal")) closeMomentModal();
+  });
   $("#reminderBtn")?.addEventListener("click", () => {
     loadReminders().then(openReminderModal).catch((error) => toast(error.message));
   });

@@ -50,12 +50,16 @@ data/deploy/runtime/                  # 进程元数据和日志
 | 表 | 用途 |
 | --- | --- |
 | `team_posts` | 团队讨论主题，包含分类、状态、标题、浏览量、置顶和软删除字段 |
+| `team_moments` | 团队关键事件，包含组织、日期、分类、事迹和软删除字段 |
+| `team_moment_images` | 团队时刻图片二进制、类型、文件名与顺序 |
 | `team_post_replies` | 支持父子关系的楼中回复 |
 | `team_post_reactions` | 主消息快捷回应 |
 | `team_reply_reactions` | 回复快捷回应 |
 | `member_posts` | 早期成员评论兼容数据 |
 
 `team_posts.deleted_at` 与 `deleted_by` 用于主题软删除。回收站以 `team_post` 作为实体类型；恢复时只清空主题删除标记，彻底清除时由外键级联删除回复与回应。作者可以维护自己的主题，管理员承担公告、置顶和恢复治理职责。
+
+团队时刻图片保存在 `team_moment_images.image_data`，因此数据库备份会同时包含图片，不会产生文件目录与数据库不一致的问题。`team_moments` 向下级组织只读透传；修改和删除必须在记录原组织的直接可见范围内执行。回收站实体类型为 `team_moment`，彻底删除时图片由外键级联清理。
 
 ### 会议与早例会
 

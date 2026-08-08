@@ -71,6 +71,8 @@ Use these references conditionally:
 - Keep meeting state locks enforced by the server.
 - Keep meeting creation controlled by `meetings.create`, while first-level topic categories and second-level preset maintenance remain administrator-only.
 - Keep the forum-style team discussion area searchable and paginated; enforce author/admin edit, announcement, pin, soft-delete, and restore boundaries in the backend.
+- Keep Team Moments isolated under the `moments` module. Store image bytes in `team_moment_images`, validate MIME signatures and limits, inherit ancestor moments downward as read-only, and cover create/image/update/delete/restore with `scripts/team_moments_smoke_test.py`.
+- Keep local AI knowledge-base dependencies in a separate service boundary. Reuse Team Loop identity and organization claims, enforce vector-store payload filters before retrieval, require source citations, and follow `docs/KNOWLEDGE_BASE.md` before adding model or vector-database dependencies.
 - Keep the full discussion Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
 - Keep Thank You weekly limits and red/black independent scoring semantics.
 - Enforce black-score summary/detail visibility in backend responses; frontend hiding alone is insufficient.

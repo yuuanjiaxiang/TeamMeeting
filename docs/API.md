@@ -99,6 +99,18 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 服务端会校验消息和回复长度，不应依赖前端 `maxlength` 作为唯一限制。
 
+### 团队时刻
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/team-moments` | 查询当前组织与祖先组织的有效团队时刻；可传 `year`、`keyword` |
+| POST | `/api/team-moments` | 发布团队时刻，`images` 最多 6 张 Base64 图片 |
+| PATCH | `/api/team-moments/{id}` | 修改事迹并通过 `new_images`、`remove_image_ids` 调整图片 |
+| DELETE | `/api/team-moments/{id}` | 软删除并进入回收站 |
+| GET | `/api/team-moment-images/{id}` | 在模块与组织权限校验后返回图片二进制 |
+
+团队时刻使用独立 `moments` 模块权限。图片只允许 JPG、PNG、WebP，单张解码后最大 5 MB；浏览器请求不能绕过服务端组织范围。
+
 ## 5. 早例会与归档
 
 | 方法 | 路径 | 说明 |
