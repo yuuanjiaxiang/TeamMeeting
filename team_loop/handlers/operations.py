@@ -1447,10 +1447,12 @@ class OperationsHandlerMixin:
     def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
-            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
-            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", viewer)
-            relation_where = f"({giver_where} AND {receiver_where})"
-            relation_params = [*giver_params, *receiver_params]
+            receiver_descendant_where, receiver_descendant_params = self.organization_descendant_user_filter(
+                conn, "receiver", viewer
+            )
+            giver_ancestor_where, giver_ancestor_params = self.organization_ancestor_user_filter(conn, "giver", viewer)
+            relation_where = f"({giver_ancestor_where} AND {receiver_descendant_where})"
+            relation_params = [*giver_ancestor_params, *receiver_descendant_params]
             votes = rows_to_list(
                 conn.execute(
                     f"""
@@ -1496,13 +1498,14 @@ class OperationsHandlerMixin:
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
-            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+            giver_where, giver_params = self.organization_ancestor_user_filter(conn, "u", user)
             giver = conn.execute(
-                f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
-                [user["id"], *org_params],
+                f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {giver_where}",
+                [user["id"], *giver_params],
             ).fetchone()
             if not giver:
-                raise AppError(403, "只能在本人所属的当前团队送出感谢")
+                raise AppError(403, "只能在本人所属团队或其下级团队范围送出感谢")
+            receiver_where, receiver_params = self.organization_descendant_user_filter(conn, "u", user)
             weekly_limit = get_int_setting(conn, "thank_you_weekly_limit", 3, minimum=1, maximum=20)
             count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
             remaining = weekly_limit - count
@@ -1515,14 +1518,14 @@ class OperationsHandlerMixin:
                     SELECT u.id, u.display_name FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
                     WHERE u.active=1 AND COALESCE(t.include_in_thanks, 1)=1
-                      AND u.id IN ({placeholders}) AND {org_where}
+                      AND u.id IN ({placeholders}) AND {receiver_where}
                     """,
-                    [*receiver_ids, *org_params],
+                    [*receiver_ids, *receiver_params],
                 ).fetchall()
             )
             active_receiver_ids = {row["id"] for row in active_receivers}
             if len(active_receiver_ids) != len(receiver_ids):
-                raise AppError(400, "感谢对象不存在、已停用或不在当前团队")
+                raise AppError(400, "感谢对象不存在、已停用或不在当前团队及下级团队")
             existing = rows_to_list(
                 conn.execute(
                     f"""
@@ -1557,8 +1560,8 @@ class OperationsHandlerMixin:
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
-            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", user)
-            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", user)
+            giver_where, giver_params = self.organization_ancestor_user_filter(conn, "giver", user)
+            receiver_where, receiver_params = self.organization_descendant_user_filter(conn, "receiver", user)
             vote = conn.execute(
                 f"""
                 SELECT v.* FROM thank_you_votes v
@@ -1578,8 +1581,8 @@ class OperationsHandlerMixin:
 
     def delete_thank_you(self, vote_id, user):
         with connect() as conn:
-            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", user)
-            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", user)
+            giver_where, giver_params = self.organization_ancestor_user_filter(conn, "giver", user)
+            receiver_where, receiver_params = self.organization_descendant_user_filter(conn, "receiver", user)
             vote = conn.execute(
                 f"""
                 SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name
@@ -1621,7 +1624,7 @@ class OperationsHandlerMixin:
             if viewer and viewer.get("role") == "admin" and target_user_id not in (None, "", 0, "0"):
                 giver_where, giver_params = "1=1", []
             else:
-                giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
+                giver_where, giver_params = self.organization_ancestor_user_filter(conn, "giver", viewer)
             stars = rows_to_list(
                 conn.execute(
                     f"""

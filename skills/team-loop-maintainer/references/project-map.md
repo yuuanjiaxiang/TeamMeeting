@@ -8,6 +8,7 @@
 | HTTP and API routing | `team_loop/handlers/request.py` | composed `team_loop/handler.py` |
 | Authentication, users and organizations | `team_loop/handlers/accounts.py` | SSO/database helpers, system settings |
 | Collaboration domains | `team_loop/handlers/collaboration.py` | moments, forum, morning and processes |
+| Project follow-up | `team_loop/handlers/followup.py`, `static/morning-followup.js`, `static/morning-followup.css` | morning list integration, cutoff report, optimistic drafts; `docs/PROJECT_FOLLOWUP.md` |
 | Operational domains | `team_loop/handlers/operations.py` | scores, meetings, links, shifts and thanks |
 | System operations | `team_loop/handlers/system.py` | recycle, archive, backups, settings and audit |
 | Permissions | `team_loop/config.py`, `team_loop/permissions.py` | `static/app.js` access helpers and navigation |

@@ -11,6 +11,7 @@ class CollaborationHandlerMixin:
         if len(keyword) > 80:
             raise AppError(400, "搜索关键词最多 80 个字符")
         with connect() as conn:
+            context = self.organization_context(conn, user)
             org_where, org_params = self.organization_current_entity_filter(conn, "m.org_unit_id", user)
             where = ["m.deleted_at IS NULL", org_where]
             params = list(org_params)
@@ -50,7 +51,11 @@ class CollaborationHandlerMixin:
                 ).fetchall())
                 for image in images:
                     cache_version = "".join(character for character in str(image.get("created_at") or "") if character.isdigit())
-                    image["url"] = f"/api/team-moment-images/{image['id']}?v={cache_version or image['id']}"
+                    image_query = urlencode({
+                        "org": context["selected"]["path"],
+                        "v": cache_version or image["id"],
+                    })
+                    image["url"] = f"/api/team-moment-images/{image['id']}?{image_query}"
                     images_by_moment[image["moment_id"]].append(image)
         for moment in moments:
             moment["images"] = images_by_moment.get(moment["id"], [])
@@ -657,6 +662,7 @@ class CollaborationHandlerMixin:
                 ).fetchall()
             )
             version_token = self._morning_version_token(conn, item_date, org_where, org_params)
+            self.annotate_morning_followup(conn, items, item_date, org_where, org_params)
         return {
             "date": item_date,
             "today": today_iso(),
@@ -1017,6 +1023,38 @@ class CollaborationHandlerMixin:
             )
             inserted_ids[item["key"]] = cursor.lastrowid
 
+    def process_template_items_payload(self, conn, template_id):
+        rows = rows_to_list(conn.execute(
+            """
+            SELECT id, parent_item_id, title, description, required, sort_order
+            FROM process_template_items
+            WHERE template_id=?
+            ORDER BY sort_order, id
+            """,
+            (template_id,),
+        ).fetchall())
+        key_by_id = {row["id"]: f"item-{row['id']}" for row in rows}
+        return [
+            {
+                "key": key_by_id[row["id"]],
+                "parent_key": key_by_id.get(row["parent_item_id"]),
+                "title": row["title"],
+                "description": row["description"] or "",
+                "required": bool(row["required"]),
+                "sort_order": row["sort_order"],
+            }
+            for row in rows
+        ]
+
+    def serialize_process_change_request(self, request):
+        result = dict(request)
+        try:
+            result["proposed_items"] = json.loads(result.get("proposed_items") or "[]")
+        except (TypeError, ValueError):
+            result["proposed_items"] = []
+        result["stale"] = int(result.get("base_version") or 0) != int(result.get("current_version") or 0)
+        return result
+
     def list_process_templates(self, user):
         if not user:
             raise AppError(401, "请先登录后使用流程中心")
@@ -1060,6 +1098,25 @@ class CollaborationHandlerMixin:
                 for item in template_items:
                     item["required"] = bool(item["required"])
                     item_map.setdefault(item["template_id"], []).append(item)
+            pending_by_template = {}
+            if template_ids:
+                placeholders = ",".join("?" for _ in template_ids)
+                pending_rows = rows_to_list(conn.execute(
+                    f"""
+                    SELECT id, template_id, requested_by, base_version,
+                           proposed_name, proposed_description, proposed_items,
+                           requested_at, updated_at
+                    FROM process_template_change_requests
+                    WHERE status='pending' AND requested_by=? AND template_id IN ({placeholders})
+                    """,
+                    [user["id"], *template_ids],
+                ).fetchall())
+                for row in pending_rows:
+                    try:
+                        row["proposed_items"] = json.loads(row.get("proposed_items") or "[]")
+                    except (TypeError, ValueError):
+                        row["proposed_items"] = []
+                pending_by_template = {row["template_id"]: row for row in pending_rows}
         visible_ids = set(context["visible_ids"])
         for template in templates:
             template["items"] = item_map.get(template["id"], [])
@@ -1068,7 +1125,42 @@ class CollaborationHandlerMixin:
                 template["org_unit_id"] == context["selected"]["id"]
                 and (user["role"] == "admin" or template["created_by"] == user["id"])
             )
+            template["pending_change"] = pending_by_template.get(template["id"])
         return templates
+
+    def list_process_template_approvals(self, user, query=None):
+        if not user or user["role"] != "admin":
+            raise AppError(403, "只有管理员可以审批流程模板变更")
+        query = query or {}
+        status = str((query.get("status") or ["pending"])[0] or "pending").strip()
+        if status not in {"pending", "approved", "rejected", "all"}:
+            status = "pending"
+        with connect() as conn:
+            context = self.organization_context(conn, user)
+            org_unit_id = context["selected"]["id"]
+            status_where = "" if status == "all" else "AND r.status=?"
+            params = [org_unit_id]
+            if status != "all":
+                params.append(status)
+            rows = rows_to_list(conn.execute(
+                f"""
+                SELECT r.*, t.name AS current_name, t.description AS current_description,
+                       t.version AS current_version, t.active AS template_active,
+                       requester.display_name AS requested_by_name,
+                       reviewer.display_name AS reviewer_name
+                FROM process_template_change_requests r
+                JOIN process_templates t ON t.id=r.template_id
+                JOIN users requester ON requester.id=r.requested_by
+                LEFT JOIN users reviewer ON reviewer.id=r.reviewer_id
+                WHERE r.org_unit_id=? {status_where}
+                ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END, r.updated_at DESC, r.id DESC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall())
+            for row in rows:
+                row["current_items"] = self.process_template_items_payload(conn, row["template_id"])
+        return [self.serialize_process_change_request(row) for row in rows]
 
     def create_process_template(self, user):
         data = read_json(self)
@@ -1146,6 +1238,59 @@ class CollaborationHandlerMixin:
             ).fetchone()
             if duplicate:
                 raise AppError(400, "当前团队已存在同名流程模板")
+            if user["role"] != "admin":
+                if items is None:
+                    items = self.process_template_items_payload(conn, template_id)
+                requested_at = now_iso()
+                existing = conn.execute(
+                    """
+                    SELECT id FROM process_template_change_requests
+                    WHERE template_id=? AND requested_by=? AND status='pending'
+                    """,
+                    (template_id, user["id"]),
+                ).fetchone()
+                proposed_items = json.dumps(items, ensure_ascii=False)
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE process_template_change_requests
+                        SET base_version=?, proposed_name=?, proposed_description=?, proposed_items=?,
+                            requested_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (template["version"], name, description, proposed_items, requested_at, requested_at, existing["id"]),
+                    )
+                    request_id = existing["id"]
+                else:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO process_template_change_requests(
+                            template_id, org_unit_id, requested_by, base_version,
+                            proposed_name, proposed_description, proposed_items,
+                            status, requested_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,'pending',?,?)
+                        """,
+                        (
+                            template_id, template["org_unit_id"], user["id"], template["version"],
+                            name, description, proposed_items, requested_at, requested_at,
+                        ),
+                    )
+                    request_id = cursor.lastrowid
+                write_audit(
+                    conn,
+                    user,
+                    "process_template.change_requested",
+                    "process_template_change_request",
+                    request_id,
+                    "流程模板变更已提交审批",
+                    {"template_id": template_id, "name": name, "checklist_count": len(items)},
+                    self.client_address[0],
+                )
+                return {
+                    "message": "变更已提交管理员审批，正式模板暂未改变",
+                    "approval_required": True,
+                    "request_id": request_id,
+                }
             updated = conn.execute(
                 """
                 UPDATE process_templates
@@ -1169,6 +1314,86 @@ class CollaborationHandlerMixin:
                 self.client_address[0],
             )
         return {"message": "流程模板已更新", "templates": self.list_process_templates(user)}
+
+    def review_process_template_change(self, request_id, user):
+        if not user or user["role"] != "admin":
+            raise AppError(403, "只有管理员可以审批流程模板变更")
+        data = read_json(self)
+        action = str(data.get("action") or "").strip().lower()
+        if action not in {"approve", "reject"}:
+            raise AppError(400, "请选择通过或驳回")
+        review_note = str(data.get("review_note") or "").strip()
+        if len(review_note) > 500:
+            raise AppError(400, "审批意见不能超过 500 字")
+        with connect() as conn:
+            change = conn.execute(
+                "SELECT * FROM process_template_change_requests WHERE id=? AND status='pending'",
+                (request_id,),
+            ).fetchone()
+            if not change:
+                raise AppError(404, "待审批变更不存在或已处理")
+            self.require_current_org_unit_access(conn, change["org_unit_id"], user)
+            template = conn.execute(
+                "SELECT * FROM process_templates WHERE id=? AND active=1",
+                (change["template_id"],),
+            ).fetchone()
+            if not template:
+                raise AppError(404, "对应流程模板不存在或已停用")
+            reviewed_at = now_iso()
+            if action == "approve":
+                if int(template["version"]) != int(change["base_version"]):
+                    raise AppError(409, "正式模板已有新版本，请驳回该申请并让提交人基于最新版重新修改")
+                duplicate = conn.execute(
+                    """
+                    SELECT id FROM process_templates
+                    WHERE org_unit_id=? AND active=1 AND LOWER(name)=LOWER(?) AND id<>?
+                    """,
+                    (template["org_unit_id"], change["proposed_name"], template["id"]),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(409, "当前团队已存在同名流程模板，无法通过")
+                try:
+                    items = self.normalize_process_template_items(json.loads(change["proposed_items"] or "[]"))
+                except (TypeError, ValueError):
+                    raise AppError(400, "待审批 Checklist 数据损坏，无法通过")
+                updated = conn.execute(
+                    """
+                    UPDATE process_templates
+                    SET name=?, description=?, updated_at=?, version=version+1
+                    WHERE id=? AND version=?
+                    """,
+                    (
+                        change["proposed_name"], change["proposed_description"] or "", reviewed_at,
+                        template["id"], template["version"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise AppError(409, "正式模板已被其他人修改，请刷新后重试")
+                self.replace_process_template_items(conn, template["id"], items)
+                next_status = "approved"
+                message = "流程模板变更已通过并生效"
+            else:
+                next_status = "rejected"
+                message = "流程模板变更已驳回"
+            conn.execute(
+                """
+                UPDATE process_template_change_requests
+                SET status=?, reviewer_id=?, review_note=?, reviewed_at=?, updated_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (next_status, user["id"], review_note, reviewed_at, reviewed_at, request_id),
+            )
+            write_audit(
+                conn,
+                user,
+                f"process_template.change_{next_status}",
+                "process_template_change_request",
+                request_id,
+                message,
+                {"template_id": template["id"], "requester_id": change["requested_by"], "review_note": review_note},
+                self.client_address[0],
+            )
+        return {"message": message}
 
     def delete_process_template(self, template_id, user):
         with connect() as conn:

@@ -1,4 +1,5 @@
 from http.server import BaseHTTPRequestHandler
+from .handlers.followup import FollowupHandlerMixin
 
 from .handlers import (
     AccountsHandlerMixin,
@@ -11,6 +12,7 @@ from .handlers import (
 
 class Handler(
     RequestHandlerMixin,
+    FollowupHandlerMixin,
     AccountsHandlerMixin,
     CollaborationHandlerMixin,
     OperationsHandlerMixin,

@@ -1123,7 +1123,10 @@ body.modal-open {
 
 nav {
   display: flex;
+  min-height: 0;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   gap: 3px;
 }
 
@@ -1160,6 +1163,7 @@ nav {
 }
 
 .user-box {
+  flex: 0 0 auto;
   margin-top: auto;
   padding: 12px 2px 0;
   border-top: 1px solid var(--line);
@@ -10254,6 +10258,7 @@ body[data-theme] .org-tree-node.active .org-tree-select {
 }
 
 .process-origin-badge,
+.process-pending-badge,
 .process-required-badge,
 .process-overdue-badge {
   flex: 0 0 auto;
@@ -10264,6 +10269,44 @@ body[data-theme] .org-tree-node.active .org-tree-select {
   color: #475569;
   font-size: 10px;
   font-weight: 700;
+}
+
+.process-pending-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid #f2c46d;
+  border-radius: 5px;
+  background: #fff8e7;
+  color: #8a5700;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+#openProcessApprovalBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#openProcessApprovalBtn span {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 10px;
+  background: #e9eef7;
+  color: #475569;
+  font-size: 11px;
+}
+
+#openProcessApprovalBtn.has-pending {
+  border-color: #e2a52b;
+  color: #8a5700;
+}
+
+#openProcessApprovalBtn.has-pending span {
+  background: #f5b82e;
+  color: #3d2900;
 }
 
 .process-card-menu,
@@ -10631,6 +10674,138 @@ body[data-theme] .org-tree-node.active .org-tree-select {
 
 .process-template-modal-card {
   width: min(1040px, calc(100vw - 24px));
+}
+
+.process-approval-modal-card {
+  width: min(1120px, calc(100vw - 24px));
+}
+
+.process-approval-list {
+  display: grid;
+  max-height: min(72vh, 760px);
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.process-approval-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d5dce8;
+  border-left: 4px solid #5875f5;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.process-approval-card.is-stale {
+  border-left-color: #dc4c45;
+  background: #fffafa;
+}
+
+.process-approval-head,
+.process-approval-title-line,
+.process-approval-change-tags,
+.process-approval-actions {
+  display: flex;
+  align-items: center;
+}
+
+.process-approval-head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.process-approval-head h3,
+.process-approval-compare h4 {
+  margin: 0;
+}
+
+.process-approval-head p,
+.process-approval-compare p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.process-approval-title-line,
+.process-approval-change-tags {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.process-approval-title-line span,
+.process-approval-change-tags span {
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #eef2ff;
+  color: #3956c4;
+  font-size: 11px;
+}
+
+.process-approval-title-line strong {
+  color: #c23d37;
+  font-size: 11px;
+}
+
+.process-approval-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.process-approval-compare > section {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid #dce2eb;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.process-approval-compare > section > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.process-approval-compare .process-flow-scroll {
+  margin-top: 10px;
+  background: #fff;
+}
+
+.process-approval-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.process-approval-actions input {
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+@media (max-width: 900px) {
+  .process-approval-compare {
+    grid-template-columns: 1fr;
+  }
+
+  .process-approval-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 720px) {
+  .process-approval-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .process-approval-actions input {
+    width: 100%;
+    flex-basis: auto;
+  }
 }
 
 .process-template-form,

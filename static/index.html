@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
     <link rel="stylesheet" href="/style.css?v=20260817-team-scope-v1" />
+    <link rel="stylesheet" href="/morning-followup.css?v=20260907" />
+    <link rel="stylesheet" href="/meeting-workspace.css?v=20260907" />
   </head>
   <body>
     <div class="app-shell">
@@ -306,14 +308,15 @@
                   </select></label>
                   <label>到期时间<input name="due_date" type="date" /></label>
                 </div>
-                <div class="meeting-prep-fields">
+                <details class="mw-minute-preparation"><summary>会前信息与时间安排</summary><div class="meeting-prep-fields">
                   <label>预计时长（分钟）<input name="duration_minutes" type="number" min="1" max="180" value="10" /></label>
                   <label>期望产出<input name="expected_output" placeholder="例如：形成结论、确认方案" /></label>
                   <label>会前材料<input name="materials" placeholder="文档、链接或数据准备情况" /></label>
                 </div>
-                <label>会议纪要<textarea name="minutes" placeholder="记录本议题结论、确认事项或关键讨论过程"></textarea></label>
-                <label>遗留问题<textarea name="open_issues" placeholder="还有哪些未解决问题、风险或待确认信息"></textarea></label>
-                <label>下一步<textarea name="next_steps" placeholder="下一步行动、负责人协同事项或处理计划"></textarea></label>
+                </details>
+                <label class="mw-decision-field">讨论结论<textarea name="minutes" placeholder="明确本次讨论形成的决定、结论或共识"></textarea></label>
+                <div class="mw-minute-secondary"><label>下一步安排<textarea name="next_steps" placeholder="具体行动及验收标准"></textarea></label>
+                <label>风险 / 待确认<textarea name="open_issues" placeholder="记录需要补充确认的信息，可留空"></textarea></label></div>
                 <div class="modal-actions">
                   <button class="secondary" type="button" data-meeting-minute-close>取消</button>
                   <button type="submit">保存纪要</button>
@@ -742,7 +745,10 @@
                   <h2>早例会看板</h2>
                   <p>每天开会前先看每个人手里的事情：做什么、风险是什么、下一步是什么。</p>
                 </div>
-                <label class="date-chip">日期<input id="morningDate" type="date" /></label>
+                <div class="morning-header-actions">
+                  <button id="openMorningReport" class="secondary" type="button">进展汇总</button>
+                  <label class="date-chip">日期<input id="morningDate" type="date" /></label>
+                </div>
               </div>
               <div id="morningStats" class="morning-stats"></div>
               <div id="morningFocusList" class="morning-focus-list"></div>
@@ -792,16 +798,20 @@
                   <p>未完成事项会自动带到新一天；历史日期只读，用来复盘当时状态和风险。</p>
                 </div>
                 <div class="morning-list-tools">
-                  <select id="morningOwnerFilter"></select>
-                  <select id="morningStatusFilter">
+                  <input id="morningKeyword" type="search" placeholder="搜索事项、进展、风险或成员" aria-label="搜索早例会事项" />
+                  <select id="morningOwnerFilter" aria-label="筛选负责人"></select>
+                  <select id="morningPriorityFilter" aria-label="筛选优先级"><option value="">全部优先级</option><option value="high">高</option><option value="normal">中</option><option value="low">低</option></select>
+                  <select id="morningStatusFilter" aria-label="筛选事项状态">
                     <option value="">全部状态</option>
                     <option value="todo">待处理</option>
                     <option value="doing">进行中</option>
                     <option value="risk">有风险</option>
                     <option value="done">已完成</option>
                   </select>
+                  <button id="morningClearFilters" class="secondary" type="button">清除筛选</button>
                 </div>
               </div>
+              <div class="morning-results-bar"><span id="morningResultCount" role="status"></span><span id="morningDraftStatus" role="status"></span></div>
               <div class="morning-board-layout">
                 <div id="morningBoard" class="morning-list"></div>
                 <aside id="morningNavigator" class="morning-navigator" aria-label="早例会成员导航">
@@ -812,11 +822,25 @@
                     </div>
                     <button id="morningRefreshBtn" class="icon-button" type="button" title="刷新早例会" aria-label="刷新早例会">↻</button>
                   </div>
+                  <input id="morningNavigatorSearch" type="search" placeholder="查找成员" aria-label="查找导航成员" />
                   <div id="morningNavigatorList" class="morning-navigator-list"></div>
                 </aside>
               </div>
             </section>
           </section>
+
+          <dialog id="morningReportModal" class="progress-report-dialog" aria-labelledby="morningReportTitle">
+            <div class="progress-report-shell">
+              <header><div><h2 id="morningReportTitle">项目进展汇总</h2><p>当前团队 · 按事项合并跨日记录</p></div><button id="closeMorningReport" class="secondary" type="button" aria-label="关闭进展汇总">关闭</button></header>
+              <form id="morningReportForm">
+                <div class="report-periods" role="group" aria-label="汇总周期"><button class="secondary" type="button" data-report-period="week">本周</button><button class="secondary" type="button" data-report-period="last">上周</button><button class="secondary" type="button" data-report-period="month">本月</button></div>
+                <label>开始日期<input type="date" name="from" required /></label><label>结束日期<input type="date" name="to" required /></label><button type="submit">生成汇总</button>
+              </form>
+              <p id="morningReportSummary" role="status"></p>
+              <div id="morningReportContent" class="progress-report-content" tabindex="0" aria-label="进展汇总内容"></div>
+              <footer><small>截止日状态 · 未完成 + 期间完成 · 待跟进指 3 个工作日未手动更新</small><div><button id="copyMorningReport" class="secondary" type="button" disabled>复制汇总</button><button id="downloadMorningReport" type="button" disabled>下载 Markdown</button></div></footer>
+            </div>
+          </dialog>
 
           <section id="processes" class="page">
             <section class="panel process-hero">
@@ -836,6 +860,9 @@
                   <h2>流程模板</h2>
                   <p>支持并行起点和树形分支；模板更新不影响已经生成的个人流程。</p>
                 </div>
+                <button id="openProcessApprovalBtn" class="secondary admin-only hidden" type="button">
+                  变更审批 <span id="processApprovalCount">0</span>
+                </button>
               </div>
               <div id="processTemplateGraph" class="process-template-graph hidden"></div>
               <div id="processTemplateList" class="process-template-list"></div>
@@ -903,6 +930,22 @@
             </div>
           </div>
 
+          <div id="processApprovalModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="processApprovalModalTitle" aria-hidden="true">
+            <div class="modal-card process-approval-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="processApprovalModalTitle">流程模板变更审批</h2>
+                  <p>正式模板在审批通过前保持不变；如版本已更新，请驳回并要求提交人重新修改。</p>
+                </div>
+                <button class="modal-close" type="button" data-process-approval-close aria-label="关闭">×</button>
+              </div>
+              <div id="processApprovalList" class="process-approval-list"></div>
+              <div class="modal-actions">
+                <button class="secondary" type="button" data-process-approval-close>关闭</button>
+              </div>
+            </div>
+          </div>
+
           <div id="processStartModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="processStartModalTitle" aria-hidden="true">
             <div class="modal-card process-start-modal-card">
               <div class="modal-head">
@@ -930,50 +973,45 @@
           </div>
 
           <section id="meetings" class="page">
-            <section class="panel meeting-calendar-panel">
-              <div class="panel-title">
-                <div>
-                  <h2>例会议题沙盘</h2>
-                  <p>先选会议，再处理议题、纪要、签到和邮件。</p>
-                </div>
-                <div class="meeting-calendar-actions">
-                  <button id="openMeetingCreateBtn" type="button">创建会议</button>
+            <header class="mw-workspace-toolbar">
                   <div class="month-switch">
-                    <button id="prevMeetingMonthBtn" class="secondary" type="button">上月</button>
+                    <button id="prevMeetingMonthBtn" class="secondary" type="button" title="上个月" aria-label="上个月">←</button>
                     <strong id="meetingMonthTitle"></strong>
-                    <button id="nextMeetingMonthBtn" class="secondary" type="button">下月</button>
+                    <button id="nextMeetingMonthBtn" class="secondary" type="button" title="下个月" aria-label="下个月">→</button>
                   </div>
-                </div>
-              </div>
+                  <div class="mw-workspace-actions"><button id="openMeetingManagement" class="secondary admin-only" type="button">议题库与批量安排</button><button id="openMeetingCreateBtn" type="button">创建会议</button></div>
+            </header>
+            <details class="meeting-calendar-panel mw-calendar-disclosure"><summary>月历</summary>
               <div id="meetingCalendar" class="calendar meeting-calendar"></div>
-            </section>
+            </details>
 
             <section class="meeting-workbench">
-              <aside class="panel meeting-list-panel">
+              <aside class="meeting-list-panel">
                 <div class="panel-title">
                   <div>
-                    <h2 id="meetingListTitle">本周会议</h2>
-                    <p id="meetingListHint">只显示未过期会议，点击会议查看详情。</p>
+                    <h2 id="meetingListTitle">月度会议</h2>
+                    <p id="meetingListHint"></p>
                   </div>
                   <div class="meeting-scope-toggle" role="group" aria-label="会议列表范围">
-                    <button class="active" type="button" data-meeting-list-scope="week">本周</button>
-                    <button type="button" data-meeting-list-scope="month">本月</button>
+                    <button type="button" data-meeting-list-scope="week">本周</button>
+                    <button class="active" type="button" data-meeting-list-scope="month">整月</button>
                   </div>
                 </div>
-                <div id="meetingList" class="meeting-list"></div>
+                <div class="mw-list-filters"><input id="meetingSearch" type="search" aria-label="搜索会议或议题" placeholder="搜索会议或议题" /><div><select id="meetingStatusFilter" aria-label="会议状态筛选"><option value="">全部状态</option><option value="draft">草稿</option><option value="scheduled">待召开</option><option value="in_progress">进行中</option><option value="completed">已结束</option><option value="archived">已归档</option></select><button id="meetingClearSearch" class="secondary" type="button">清除</button></div></div>
+                <div id="meetingList" class="meeting-list" aria-label="会议列表"></div>
               </aside>
 
-              <section class="panel meeting-detail-panel">
+              <section class="meeting-detail-panel">
                 <div id="meetingDetail" class="meeting-detail"></div>
               </section>
             </section>
 
-            <section class="panel admin-only meeting-admin-panel">
+            <dialog id="meetingManagementModal" class="mw-management-dialog" aria-labelledby="meetingManagementTitle">
               <div class="panel-title">
                 <div>
-                  <h2>会议管理</h2>
-                  <p>管理员维护会议生成规则和预设议题；日常参会人员不需要进入这里。</p>
+                  <h2 id="meetingManagementTitle">议题库与批量安排</h2>
                 </div>
+                <button class="secondary" type="button" data-mw-close aria-label="关闭议题库">关闭</button>
               </div>
               <div class="meeting-admin-grid">
                 <div class="admin-block">
@@ -1038,7 +1076,8 @@
               </div>
               <h3>两级议题库</h3>
               <div id="topicPresetList" class="table"></div>
-            </section>
+            </dialog>
+            <dialog id="meetingCustomAgendaModal" class="mw-custom-dialog" aria-labelledby="meetingCustomTitle"><header><h2 id="meetingCustomTitle">添加自定义议题</h2><button class="secondary" type="button" data-mw-close aria-label="关闭自定义议题">关闭</button></header><div id="meetingCustomAgendaContent"></div></dialog>
           </section>
 
           <section id="shifts" class="page">

@@ -90,10 +90,10 @@ def main():
             rs_user_id = rs_cursor.lastrowid
             app.sync_member_for_user(conn, rs_user_id)
             user_id = conn.execute("SELECT id FROM users WHERE username='user'").fetchone()[0]
-            conn.execute(
+            parent_vote_id = conn.execute(
                 "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
                 (user_id, ws_user_id, app.week_start(app.today_iso()), "跨层级协作支持", app.now_iso()),
-            )
+            ).lastrowid
             cross_vote_id = conn.execute(
                 "INSERT INTO thank_you_votes(voter_id, receiver_id, week_start, evidence, created_at) VALUES(?,?,?,?,?)",
                 (ws_user_id, rs_user_id, app.week_start(app.today_iso()), "跨团队协作支持", app.now_iso()),
@@ -155,8 +155,9 @@ def main():
                 f"/api/dashboards/thank-you?from={app.week_start(app.today_iso())}&to={app.week_start(app.today_iso())}",
                 org_path="ess/mo/ws",
             )
-            if dashboard.get("stars") or dashboard.get("weekly"):
-                raise RuntimeError(f"Cross-level Thank You leaked into current-level ranking: {dashboard}")
+            ws_stars = {item["id"]: item["thanks"] for item in dashboard.get("stars") or []}
+            if ws_stars != {ws_user_id: 1}:
+                raise RuntimeError(f"Incoming parent Thank You was not counted for the child member: {dashboard}")
             mo_posts = request_json(opener, base_url, "/api/team-posts", org_path="ess/mo").get("posts") or []
             inherited_announcement = next((item for item in mo_posts if item["id"] == root_announcement_id), None)
             if not inherited_announcement or not inherited_announcement.get("inherited"):
@@ -204,6 +205,36 @@ def main():
             )
             if {item["id"] for item in mo_rule_dashboard.get("annual") or []} != {user_id}:
                 raise RuntimeError(f"MO red-black list leaked another organization level: {mo_rule_dashboard.get('annual')}")
+            mo_thanks = request_json(
+                opener,
+                base_url,
+                f"/api/thank-you?from={app.week_start(app.today_iso())}&to={app.week_start(app.today_iso())}",
+                org_path="ess/mo",
+            )
+            mo_thank_user_ids = {item["id"] for item in mo_thanks.get("users") or []}
+            if not {user_id, ws_user_id, rs_user_id}.issubset(mo_thank_user_ids):
+                raise RuntimeError(f"Parent Thank You picker missed descendants: {mo_thanks.get('users')}")
+            if parent_vote_id not in {item["id"] for item in mo_thanks.get("votes") or []}:
+                raise RuntimeError(f"Parent-to-child Thank You was not visible to the sender team: {mo_thanks}")
+            created_thanks = request_json(
+                opener,
+                base_url,
+                "/api/thank-you",
+                "POST",
+                {
+                    "receiver_ids": [rs_user_id],
+                    "week_start": app.week_start(app.today_iso()),
+                    "evidence": "上层团队感谢下级团队完成跨层协作验证",
+                },
+                "ess/mo",
+            )
+            parent_rs_vote = next(
+                (item for item in created_thanks.get("votes") or [] if item["receiver_id"] == rs_user_id),
+                None,
+            )
+            if not parent_rs_vote:
+                raise RuntimeError(f"Parent team could not create Thank You for a descendant: {created_thanks}")
+            parent_rs_vote_id = parent_rs_vote["id"]
             for path in (
                 f"/api/scores?from={app.today_iso()}&to={app.today_iso()}",
                 f"/api/dashboards/shifts?from={app.today_iso()}&to={app.today_iso()}",
@@ -285,11 +316,30 @@ def main():
             )
             if cross_vote_id in {item["id"] for item in rs_thanks.get("votes") or []}:
                 raise RuntimeError(f"Cross-team Thank You leaked into receiver team: {rs_thanks}")
+            if parent_rs_vote_id not in {item["id"] for item in rs_thanks.get("votes") or []}:
+                raise RuntimeError(f"Parent Thank You was not visible in the descendant receiver team: {rs_thanks}")
             with opener.open(f"{base_url}/org/ess/mo/ws", timeout=15) as response:
                 if b'id="appView"' not in response.read():
                     raise RuntimeError("Organization route did not serve the SPA")
             admin_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             request_json(admin_opener, base_url, "/api/login", "POST", {"username": "admin", "password": "admin123"})
+            admin_parent_thanks = request_json(
+                admin_opener,
+                base_url,
+                "/api/thank-you",
+                "POST",
+                {
+                    "receiver_ids": [ws_user_id],
+                    "week_start": app.week_start(app.today_iso()),
+                    "evidence": "根组织管理员在上层分支感谢下级成员",
+                },
+                "ess/mo",
+            )
+            if not any(
+                item["voter_id"] == admin_id and item["receiver_id"] == ws_user_id
+                for item in admin_parent_thanks.get("votes") or []
+            ):
+                raise RuntimeError(f"Ancestor administrator could not thank a descendant branch: {admin_parent_thanks}")
             sortable_members = request_json(
                 admin_opener,
                 base_url,

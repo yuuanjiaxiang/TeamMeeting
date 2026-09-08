@@ -29,12 +29,15 @@ TeamMeeting/
 │     ├─ request.py             # HTTP 协议、静态资源、路由与组织访问基础
 │     ├─ accounts.py            # 登录、SSO、用户类型、组织、用户和成员
 │     ├─ collaboration.py       # 团队时刻、讨论区、早例会和流程中心
+│     ├─ followup.py            # 早例会跟进标志、只读项目进展汇总
 │     ├─ operations.py          # 红黑榜、会议、链接、排班和 Thank You
 │     └─ system.py              # 回收站、归档、备份、配置和审计
 ├─ static/
 │  ├─ index.html                # 页面骨架、表单、弹窗
 │  ├─ app.js                    # 前端状态、渲染、接口调用、交互绑定
 │  ├─ style.css                 # 基础样式、主题和响应式规则
+│  ├─ morning-followup.js       # 早例会筛选、草稿、进展汇总交互
+│  ├─ morning-followup.css      # 跟进面板、汇总弹窗和导航避让样式
 │  └─ vendor/                   # 本地化第三方静态资源
 ├─ scripts/
 │  ├─ dev_server.py             # 文件监视与开发热更新
@@ -77,7 +80,7 @@ TeamMeeting/
 5. 在 `team_loop/config.py` 的 `MODULE_CATALOG`、初始类型权限，以及 `team_loop/handlers/request.py` 的 `module_for_path()` 中注册；
 6. 访客范围由数据库中的 `guest` 权限模板控制，不要另加前端硬编码白名单。
 
-团队时刻是新增模块的完整参考：`team_moments` 与 `team_moment_images` 使用独立表，读取、写入和图片访问都通过当前选中组织精确过滤，不允许祖先记录向下透传。图片接口在 JSON 路由前单独输出二进制，但仍必须执行会话、模块和组织权限校验。修改该模块后运行 `python scripts/team_moments_smoke_test.py` 和组织范围测试。
+团队时刻是新增模块的完整参考：`team_moments` 与 `team_moment_images` 使用独立表，读取、写入和图片访问都通过当前选中组织精确过滤，不允许祖先记录向下透传。图片接口在 JSON 路由前单独输出二进制，但仍必须执行会话、模块和组织权限校验。由于原生 `<img>` 请求不会携带 `X-Team-Org-Path`，列表接口生成图片 URL 时必须附带已校验的组织路径，图片接口再按当前会话重新校验该路径；不要直接信任查询参数。修改该模块后运行 `python scripts/team_moments_smoke_test.py` 和组织范围测试。
 
 ### 状态与刷新
 
@@ -141,22 +144,28 @@ if path == "/api/example":
 
 企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。手动配置页按 OAuth2 认证地址、Access Token 地址、UserInfo 地址和应用凭据分组，但存储键继续使用 `sso_authorization_url/sso_token_url/sso_userinfo_url`，避免仅因文案调整破坏环境变量和既有数据库。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。`team_loop/sso_http.py` 按身份平台 Origin 维护有界 HTTP/1.1 Keep-Alive 连接池，Discovery 使用短缓存和单飞锁避免登录高峰重复握手；跨域重定向与 Token POST 重定向必须拒绝，不能把 Bearer Token 或 Client Secret 转发到未配置域名。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中；密码型设置留空表示保留旧值。前端发起 SSO 时把当前 `/org/...` 路径和 `view` 模块放入 `return_to`，后端必须经过 `sanitize_sso_return_to()` 后绑定到 `sso_login_states`，回调不得直接信任浏览器或身份平台传回的跳转地址。登录成功和失败都通过已保存目标返回；用户无权访问原组织或模块时由现有组织与模块权限逻辑自动降级。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py` 和 `python scripts\sso_pool_smoke_test.py`，验证业务映射、安全边界、连接复用和 Discovery 缓存。
 
-组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。人员型业务要区分“账号允许切换的组织”和“当前层级直接成员”：早例会、排班、签到、红黑榜与 Thank You 统一使用 `organization_current_user_filter()`；成员页等确需子树视图的功能才使用 `organization_user_filter()`。管理员虽可切换全部组织，业务页面仍应按所选层级过滤。
+组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。人员型业务要区分“账号允许切换的组织”和“当前层级直接成员”：早例会、排班、签到与红黑榜统一使用 `organization_current_user_filter()`；Thank You 额外使用 `organization_descendant_user_filter()` 约束向下候选、使用 `organization_ancestor_user_filter()` 统计接收方获得的上层感谢；成员页等确需子树视图的功能才使用 `organization_user_filter()`。
 
 成员拖动排序提交的必须是当前组织路由完整可见成员集合。`update_member_order()` 应复用 `organization_user_filter()` 校验，而不是拿全库有效成员作比较；响应也必须带当前组织上下文重新查询，保证拖动后前端不会突然混入其他团队。桌面拖动之外保留上移/下移操作，作为触屏与键盘回退。
 
 组织数据必须先声明归属和传播方式，不能用一个“可见组织集合”同时决定读写：
 
-- `selected.id`：当前选中组织；早例会、排班、签到、红黑榜和 Thank You 通过 `organization_current_user_filter()` 只匹配该组织的直接成员；
+- `selected.id`：当前选中组织；早例会、排班、签到和红黑榜通过 `organization_current_user_filter()` 只匹配该组织的直接成员；
 - `visible_ids`：当前账号在所选路由下可查看的组织集合，只用于明确需要子树聚合的页面；
 - `ancestor_ids/inherited_ids`：只用于明确允许向下透传的上级记录；当前仅会议和 `announcement` 团队公告；
 - `collaboration_ids`：保留给明确声明的跨团队协作功能，不得默认用于人员名单；
 - 上级会议和公告在下级只读，原记录的编辑、删除、置顶、签到和议题修改仍必须通过直接组织访问校验；公告回复和表情可在下级参与；
 - 议题库、机台档案和团队时刻是团队自有资产，统一使用 `organization_current_entity_filter()`，不向祖先、后代或兄弟团队透传；
 - 上层会议的议题责任人和管理员工作台检查属于协调操作，可使用 `organization_user_filter()` 覆盖当前可访问子树；签到、排班、积分、感谢和早例会名单不得因此扩大；
-- Thank You 候选人、动态和排名都要求发送人与接收人属于当前选中组织，跨团队记录不在任一层级自动汇总。
+- Thank You 只允许从当前层级向当前或下级层级发送；发送方动态覆盖向下记录，接收方动态与排名覆盖来自本层及祖先层级的记录，兄弟组织必须保持隔离。
 
 早例会多人协作采用轻量版本轮询，不轮询完整事项列表。`GET /api/morning-items/version` 由当天及上个工作日相关事项版本和当前人员顺序生成令牌；前端仅在令牌变化且没有活跃输入时刷新完整数据。编辑中只标记待刷新，防止定时更新覆盖未提交内容。管理员排序通过 `PATCH /api/morning-items/order` 提交当前层级完整早例会人员集合，服务端必须验证无遗漏、无越层账号。
+
+早例会跟进功能放在独立的 `FollowupHandlerMixin` 和 `static/morning-followup.js`，通过注入现有 `state/api/render` 复用页面；不要为报表改写认证模块。`annotate_morning_followup()` 一次批量聚合根事项的手动更新日，避免逐事项查询。`morning_progress_report()` 用窗口查询获取截止日状态，先排序再排除最新已删除的记录，避免旧事项复活。当前没有新增表或权限键。
+
+自动继承记录的创建时间、更新时间相同且初始版本为 1；手动更新使版本递增。跟进统计兼容旧记录中更新时间发生变化的情况，但不能把自动继承的时间当成人工更新。工作日只计算周一至周五；同一每日记录内的多次保存只计一条更新记录。清单草稿保留原 `expected_version`，版本冲突需由原写接口返回 409，禁止为了保存草稿强制更新版本。日期或组织变化后的迟到汇总响应必须丢弃。
+
+部署端可能存在定制 SSO 适配。业务优化应保持 `handlers/accounts.py`、`sso_http.py`、认证设置和登录前端函数不变；共享文件只合并对应业务差异，不整文件覆盖远端。具体功能范围及合并清单见 [项目跟进说明](PROJECT_FOLLOWUP.md)。修改跟进功能后运行 `python scripts/morning_followup_smoke_test.py`，并验证筛选、草稿冲突和宽窄屏弹窗。
 
 SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只返回明确匹配且最深的组织。匹配结果只能作为管理员建议，不允许在登录回调里迁移已有账号或历史记录；自动创建的新账号回落到根组织。登录完成后优先返回发起认证时保存的站内组织路径和模块；若账号无权访问，`organization_context()` 与 `switchPage()` 分别回落到账号正式组织和第一个可用模块。历史 `team_posts/meetings` 迁移必须使用 `scripts/migrate_org_data.py` 先预览、自动备份并输出回滚清单。修改组织范围或 SSO 群组映射后运行 `python scripts\organization_scope_smoke_test.py`、`python scripts\sso_smoke_test.py` 和 `python scripts\org_data_migration_test.py`。
 
@@ -168,7 +177,7 @@ SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只�
 
 会议创建遵循 `meetings.create` 操作权限，不应写死为管理员；一级议题分类和二级预设议题按当前团队隔离，维护仍是管理员能力。创建会议后通过 `/api/meetings/{id}/agenda-options` 批量加入当前会议所属团队的预设议题并指定当前子树责任人。`link_meeting_topic()` 也必须校验会议与议题类型的 `org_unit_id` 相同，不能只依赖前端选项。`meetings.start_time` 使用 `HH:MM`，为空表示未指定开始时间。
 
-流程中心的模板属于组织，当前团队可以读取祖先模板。所有已登录且拥有流程查看权限的成员都能在当前团队创建模板；非管理员只管理自己创建的模板，管理员管理当前团队全部模板，祖先模板始终只读。模板节点只允许引用排在自己之前的父节点；空父节点表示并行起点，同父节点的多个子节点表示树形分支。脑图编辑器不保存布局坐标，只是有序节点与 `parent_key` 的即时投影；选中节点后只显示该节点属性，添加子步骤继承选中节点，添加并行线创建空父节点。必做节点不能依赖可选节点。用户从模板生成流程时必须复制节点及父子关系快照，不能在查询时动态引用模板项，否则模板调整会改写历史执行事实。子节点完成前必须验证父节点已完成；取消父节点时应在同一事务递归撤销下游节点、重算流程状态并写审计日志。修改该模块后运行 `python scripts\process_flow_smoke_test.py`。
+流程中心的模板属于组织，当前团队可以读取祖先模板。所有已登录且拥有流程查看权限的成员都能在当前团队创建模板；非管理员只管理自己创建的模板，管理员管理当前团队全部模板，祖先模板始终只读。非管理员编辑模板时写入 `process_template_change_requests`，不得直接更新正式模板；管理员审批通过时必须在同一事务校验基线版本、替换正式节点、升级版本并关闭申请，版本不一致返回 `409`。管理员直接修改可立即生效。模板节点只允许引用排在自己之前的父节点；空父节点表示并行起点，同父节点的多个子节点表示树形分支。脑图编辑器不保存布局坐标，只是有序节点与 `parent_key` 的即时投影；选中节点后只显示该节点属性，添加子步骤继承选中节点，添加并行线创建空父节点。必做节点不能依赖可选节点。用户从模板生成流程时必须复制节点及父子关系快照，不能在查询时动态引用模板项，否则模板调整会改写历史执行事实。子节点完成前必须验证父节点已完成；取消父节点时应在同一事务递归撤销下游节点、重算流程状态并写审计日志。修改该模块后运行 `python scripts\process_flow_smoke_test.py`。
 
 红黑榜黑榜可见性必须在服务端和前端同时执行。普通用户调用 `/api/scores` 或 `/api/dashboards/red-black` 时，服务端根据两个 `red_black_show_black_*` 配置裁剪结果；前端隐藏只用于管理员切换用户视图时保持一致体验，不能替代接口过滤。
 

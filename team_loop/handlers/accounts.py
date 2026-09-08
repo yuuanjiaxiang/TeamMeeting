@@ -984,12 +984,14 @@ class AccountsHandlerMixin:
             user.pop("sso_groups_json", None)
         return users
 
-    def list_participating_users(self, scope, viewer=None, collaboration=False):
+    def list_participating_users(self, scope, viewer=None, collaboration=False, descendants=False):
         if scope not in PARTICIPATION_SCOPES:
             raise AppError(400, "参与范围不正确")
         column = PARTICIPATION_SCOPES[scope][0]
         with connect() as conn:
-            if collaboration:
+            if descendants:
+                org_where, org_params = self.organization_descendant_user_filter(conn, "u", viewer)
+            elif collaboration:
                 org_where, org_params = self.organization_collaboration_user_filter(conn, "u", viewer)
             else:
                 org_where, org_params = self.organization_current_user_filter(conn, "u", viewer)

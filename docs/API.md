@@ -76,7 +76,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 `PATCH /api/members/order` 的 `member_ids` 必须恰好覆盖当前组织路由中有效且参与成员展示的全部成员，不能提交其他组织的成员或遗漏当前成员。服务端按组织上下文重新计算集合后再写入顺序，避免管理员在下级团队排序时误改其他团队。
 
-用户同时归属一个组织层级。组织的 `visibility_mode` 支持：`all`（可切换全组织）、`subtree`（可切换本层及全部下级）、`unit`（只能切换本层）。成员页仍可按授权范围查看组织树；早例会、排班、签到、红黑榜和 Thank You 的人员名单与业务记录只取当前选中组织的直接成员，不自动混入下级、上级或兄弟团队。上级会议和公告额外向下级只读透传。管理员可以访问全部组织，但切换组织后业务名单仍按所选层级重新过滤。
+用户同时归属一个组织层级。组织的 `visibility_mode` 支持：`all`（可切换全组织）、`subtree`（可切换本层及全部下级）、`unit`（只能切换本层）。成员页仍可按授权范围查看组织树；早例会、排班、签到和红黑榜的人员名单与业务记录只取当前选中组织的直接成员。Thank You 的接收人候选可向当前组织的可访问下级扩展，上级会议和公告则向下级只读透传。管理员可以访问全部组织，但切换组织后仍按所选层级的业务规则重新过滤。
 
 用户类型的 `participation` 与模块权限互相独立，包含 `members`、`morning`、`rules`、`thanks` 四个布尔值。例如拥有红黑榜查看权限，并不代表账号必须进入积分名单。类型更新和早例会编辑使用版本号防止覆盖其他管理员或成员刚提交的修改。
 
@@ -111,7 +111,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 团队时刻使用独立 `moments` 模块权限。图片只允许 JPG、PNG、WebP，单张解码后最大 5 MB；浏览器请求不能绕过服务端组织范围。
 
-图片 URL 带有基于创建时间的版本参数，并返回禁止缓存响应头，避免灰度/正式数据库切换或恢复备份后复用相同图片 ID 时显示旧图。
+图片 URL 带有服务端校验后的当前组织路径和基于创建时间的版本参数，并返回禁止缓存响应头。原生 `<img>` 请求不会携带 `X-Team-Org-Path`，因此图片接口会重新校验 URL 中的 `org` 参数是否属于当前用户可访问范围；该参数不能用于越权访问。版本参数用于避免灰度/正式数据库切换或恢复备份后复用相同图片 ID 时显示旧图。
 
 ## 5. 早例会与归档
 
@@ -121,6 +121,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | --- | --- | --- |
 | GET/POST | `/api/morning-items` | 按日期查询或新增事项；管理员 GET 可传当前可访问子树中的 `user_id` 只读查看工作台 |
 | GET | `/api/morning-items/version` | 返回当天早例会轻量版本号，供前端轮询是否有他人更新 |
+| GET | `/api/morning-items/report?from=YYYY-MM-DD&to=YYYY-MM-DD` | 只读进展汇总；沿用早例会查看权限和当前层级参与名单，范围 1 至 93 天，不允许未来截止日 |
 | PATCH | `/api/morning-items/order` | 管理员提交当前层级完整参会人员 ID，保存早例会显示顺序 |
 | PATCH/DELETE | `/api/morning-items/{id}` | 更新或删除可编辑事项 |
 | GET | `/api/morning-items/{id}/history` | 获取事项跨日进展 |
@@ -129,12 +130,18 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 历史日期只读。未完成事项由服务端按日继承，客户端不应自行复制。更新或删除时传入查询结果中的 `version` 作为 `expected_version`，收到 409 后应重新加载数据。前端每 12 秒查询轻量版本号；没有正在编辑时自动刷新，有未保存输入时只显示“有更新”并由用户手动刷新，避免覆盖输入。管理员排序必须恰好提交当前层级中纳入早例会的全部有效账号。
 
+每日事项新增只读字段：`last_progress_date`（最近手动更新记录日）、`idle_workdays`（至查看日经过的周一至周五天数）、`needs_attention`、`is_overdue`、`due_today`、`is_stale`。自动继承不算手动更新；有风险、逾期、今日到期和待跟进标志均排除已完成事项。原有字段和写接口不变。
+
+进展汇总响应为 `{from, to, organization, items, summary}`。`summary` 包含 `total/completed/active/risk/overdue/stale/members`；`items` 含事项标题、当前负责人姓名和账号、进展、状态、优先级、风险、到期日、`chain_id`、`start_date`、`period_updates` 及上述跟进标志。按根事项链合并截至 `to` 的最后一条记录，包含未完成事项与期间完成事项，排除最新快照已删除的链。`period_updates` 为期间发生手动更新的每日记录条数，并非点击保存次数。接口不调用跨日继承，不生成任何业务记录；读取历史范围也遵守当前组织、账号有效性和参与资格，不是历史组织结构的审计快照。
+
 ## 6. 流程中心
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET/POST | `/api/process-templates` | 查询可用模板；所有已登录且可查看流程中心的成员可在当前团队创建模板 |
-| PATCH/DELETE | `/api/process-templates/{id}` | 创建人维护自己的当前团队模板；管理员可维护当前团队全部模板 |
+| PATCH/DELETE | `/api/process-templates/{id}` | 创建人修改自己的模板时提交审批；管理员修改可直接生效；停用规则保持不变 |
+| GET | `/api/process-template-approvals?status=pending` | 管理员查询当前团队模板变更申请，返回正式版、拟修改版和版本冲突状态 |
+| PATCH | `/api/process-template-approvals/{id}` | 管理员通过或驳回变更，正文为 `action=approve|reject` 与可选 `review_note` |
 | GET/POST | `/api/process-instances` | 查询个人/团队流程，或从模板生成个人流程 |
 | PATCH/DELETE | `/api/process-instances/{id}` | 修改名称、截止日期，或取消允许操作的个人流程 |
 | PATCH | `/api/process-instance-items/{id}` | 勾选或取消单个流程节点 |
@@ -146,6 +153,8 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 模板查询会返回当前团队与祖先团队启用的模板；祖先模板标记为 `inherited=true`，在下级只读。生成个人流程时，服务端复制节点及其父子关系形成快照，之后修改或停用模板不会改变历史流程。
 
 `GET /api/process-instances` 支持 `scope=mine|team` 和 `status=active|completed|all`。普通用户始终只能查询自己的流程；管理员可在当前组织范围查看团队流程。进度由必做节点计算。子节点只能在父节点完成后勾选；取消父节点会递归撤销已完成的下游节点，并通过 `reset_descendants` 返回撤销数量。
+
+普通成员 `PATCH /api/process-templates/{id}` 成功后返回 `approval_required=true`，但不会更新正式模板；同一成员对同一模板重复提交时会更新原待审申请。管理员通过时要求申请的 `base_version` 仍等于正式模板版本，否则返回 `409`，避免旧申请覆盖新版本。
 
 ## 7. 会议沙盘
 
@@ -204,11 +213,11 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | PATCH/DELETE | `/api/thank-you/{id}` | 修改或删除允许操作的感谢 |
 | GET | `/api/dashboards/thank-you` | 月度/年度 Thank You 排名 |
 
-批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。排班、签到、红黑榜和 Thank You 的查询与写入都会在服务端校验相关账号属于当前选中组织的直接成员，并继续校验对应业务参与开关。
+批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。排班、签到和红黑榜的查询与写入都会在服务端校验相关账号属于当前选中组织的直接成员。Thank You 发送人可属于当前组织或其祖先组织，接收人可属于当前组织或其可访问下级；两者均继续校验对应业务参与开关。
 
 管理员可在个人工作台调用三个 `/api/dashboards/*` 接口并追加 `user_id`，目标必须位于当前选中团队的可访问子树；普通用户传入该参数不会扩大范围。`GET /api/users/coordination` 返回管理员可用于工作台检查和上层会议责任人协调的当前子树账号。
 
-`GET /api/thank-you` 的候选人只返回当前层级中纳入 Thank You 名单的账号。感谢记录只有发送人和接收人都属于当前层级时才在动态与排名中出现；切换到上级或兄弟团队不会汇总下级感谢。
+`GET /api/thank-you` 的候选人返回当前层级及其可访问下级中纳入 Thank You 名单的账号。上层向下层送出的记录会同时出现在发送方当前层级和接收方直接层级；接收方排名会计入本层及祖先层级送入的感谢。兄弟团队不会进入候选列表，也不会互相展示或汇总。
 
 `GET /api/scores` 支持 `from`、`to` 和 `user_id`。`red_black_show_black_points` 与 `red_black_show_black_details` 为管理员维护的布尔系统配置；普通用户的年度汇总和明细会在服务端按配置裁剪，管理员始终获得完整数据。
 

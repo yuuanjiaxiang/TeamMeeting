@@ -73,7 +73,7 @@ class RequestHandlerMixin:
                 return
             moment_image = parsed.path.strip("/").split("/")
             if len(moment_image) == 3 and moment_image[:2] == ["api", "team-moment-images"] and method == "GET":
-                self.send_team_moment_image(int(moment_image[2]))
+                self.send_team_moment_image(int(moment_image[2]), parse_qs(parsed.query))
                 return
             if parsed.path.startswith("/api/"):
                 result = self.route_api(method, parsed.path, parse_qs(parsed.query))
@@ -115,7 +115,7 @@ class RequestHandlerMixin:
             self.wfile.write(content[offset:offset + 64 * 1024])
         self.wfile.flush()
 
-    def organization_context(self, conn, user=None):
+    def organization_context(self, conn, user=None, requested_path=None):
         units = organization_rows(conn)
         if not units:
             return {
@@ -161,7 +161,11 @@ class RequestHandlerMixin:
         else:
             accessible_ids = {user_unit["id"]}
 
-        requested = (self.headers.get("X-Team-Org-Path") or "").strip().strip("/").lower()
+        requested = (
+            requested_path
+            if requested_path is not None
+            else (self.headers.get("X-Team-Org-Path") or "")
+        ).strip().strip("/").lower()
         if requested.startswith("org/"):
             requested = requested[4:]
         selected = by_path.get(requested) if requested else user_unit
@@ -204,6 +208,32 @@ class RequestHandlerMixin:
         if not selected_id:
             return "1=0", []
         return f"{user_alias}.org_unit_id=?", [selected_id]
+
+    def organization_descendant_user_filter(self, conn, user_alias="u", user=None):
+        """Limit candidates to the selected unit and its accessible descendants."""
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        selected_path = str((context.get("selected") or {}).get("path") or "").strip("/").lower()
+        if not selected_path:
+            return "1=0", []
+        unit_ids = [
+            unit["id"]
+            for unit in context.get("accessible") or []
+            if str(unit.get("path") or "").strip("/").lower() == selected_path
+            or str(unit.get("path") or "").strip("/").lower().startswith(f"{selected_path}/")
+        ]
+        if not unit_ids:
+            return "1=0", []
+        placeholders = ",".join("?" for _ in unit_ids)
+        return f"{user_alias}.org_unit_id IN ({placeholders})", unit_ids
+
+    def organization_ancestor_user_filter(self, conn, user_alias="u", user=None):
+        """Limit candidates to the selected unit and its ancestors."""
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        unit_ids = context.get("ancestor_ids") or []
+        if not unit_ids:
+            return "1=0", []
+        placeholders = ",".join("?" for _ in unit_ids)
+        return f"{user_alias}.org_unit_id IN ({placeholders})", unit_ids
 
     def organization_workbench_user_filter(self, conn, user_alias="u", user=None, raw_user_id=None):
         """Allow an admin to inspect one accessible descendant without widening normal team lists."""
@@ -277,14 +307,18 @@ class RequestHandlerMixin:
             raise AppError(404, "讨论主题不存在或无权访问")
         return post
 
-    def require_team_moment_access(self, conn, moment_id, user=None, write=False):
+    def require_team_moment_access(self, conn, moment_id, user=None, write=False, requested_path=None):
         moment = conn.execute(
             "SELECT id, org_unit_id, title FROM team_moments WHERE id=? AND deleted_at IS NULL",
             (moment_id,),
         ).fetchone()
         if not moment:
             raise AppError(404, "团队时刻不存在")
-        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        context = self.organization_context(
+            conn,
+            user if user is not None else getattr(self, "api_user", None),
+            requested_path=requested_path,
+        )
         selected_id = (context.get("selected") or {}).get("id")
         if moment["org_unit_id"] != selected_id:
             raise AppError(404, "团队时刻不存在或无权访问")
@@ -370,10 +404,11 @@ class RequestHandlerMixin:
         self.wfile.write(content)
         self.wfile.flush()
 
-    def send_team_moment_image(self, image_id):
+    def send_team_moment_image(self, image_id, query=None):
         user = self.current_user(required=False)
         self.require_module(user, "moments", "view")
         self.api_user = user
+        requested_path = str(((query or {}).get("org") or [""])[0] or "").strip()
         with connect() as conn:
             image = conn.execute(
                 """
@@ -386,7 +421,12 @@ class RequestHandlerMixin:
             ).fetchone()
             if not image:
                 raise AppError(404, "图片不存在")
-            self.require_team_moment_access(conn, image["moment_id"], user)
+            self.require_team_moment_access(
+                conn,
+                image["moment_id"],
+                user,
+                requested_path=requested_path or None,
+            )
             content = bytes(image["image_data"])
         self.send_response(200)
         self.send_header("Content-Type", image["mime_type"])
@@ -684,6 +724,8 @@ class RequestHandlerMixin:
                 return self.create_morning_item(user)
         if path == "/api/morning-items/version" and method == "GET":
             return self.morning_items_version(query)
+        if path == "/api/morning-items/report" and method == "GET":
+            return self.morning_progress_report(query, user)
         if path == "/api/morning-items/order" and method == "PATCH":
             return self.update_morning_order(user)
         if len(parts) == 4 and parts[:2] == ["api", "morning-items"] and parts[3] == "history" and method == "GET":
@@ -703,6 +745,10 @@ class RequestHandlerMixin:
                 return self.update_process_template(int(parts[2]), user)
             if method == "DELETE":
                 return self.delete_process_template(int(parts[2]), user)
+        if path == "/api/process-template-approvals" and method == "GET":
+            return {"approvals": self.list_process_template_approvals(user, query)}
+        if len(parts) == 3 and parts[:2] == ["api", "process-template-approvals"] and method == "PATCH":
+            return self.review_process_template_change(int(parts[2]), user)
         if path == "/api/process-instances":
             if method == "GET":
                 return {"instances": self.list_process_instances(user, query)}
@@ -817,7 +863,10 @@ class RequestHandlerMixin:
 
         if path == "/api/thank-you":
             if method == "GET":
-                return {"votes": self.list_thank_you(query, user), "users": self.list_participating_users("thanks", user)}
+                return {
+                    "votes": self.list_thank_you(query, user),
+                    "users": self.list_participating_users("thanks", user, descendants=True),
+                }
             if method == "POST":
                 return self.create_thank_you(user)
         if len(parts) == 3 and parts[:2] == ["api", "thank-you"]:

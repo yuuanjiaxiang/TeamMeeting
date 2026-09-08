@@ -25,12 +25,15 @@ def start_server(handler):
     return server, thread
 
 
-def request_json(opener, url, method="GET", payload=None, expected=200):
+def request_json(opener, url, method="GET", payload=None, expected=200, org_path=""):
     body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Connection": "close", **({"Content-Type": "application/json"} if body is not None else {})}
+    if org_path:
+        headers["X-Team-Org-Path"] = org_path
     request = Request(
         url,
         data=body,
-        headers={"Connection": "close", **({"Content-Type": "application/json"} if body is not None else {})},
+        headers=headers,
         method=method,
     )
     try:
@@ -107,13 +110,37 @@ def main():
                 raise RuntimeError(f"Team moment creation failed: {moment}")
             moment_id = moment["id"]
             image_url = moment["images"][0]["url"]
-            if "?v=" not in image_url:
+            if "v=" not in image_url:
                 raise RuntimeError(f"Team-moment image URL is missing a cache version: {image_url}")
             content_type, cache_control, image_data = request_bytes(user, f"{base_url}{image_url}")
             if content_type != "image/png" or not image_data.startswith(b"\x89PNG"):
                 raise RuntimeError("Protected team-moment image response is invalid")
             if "no-store" not in cache_control:
                 raise RuntimeError(f"Protected team-moment image must not be cached: {cache_control}")
+
+            child_created = request_json(
+                admin,
+                f"{base_url}/api/team-moments",
+                "POST",
+                {
+                    "title": "MO 团队图片路径验证",
+                    "story": "验证上层管理员浏览下层组织时，原生图片请求仍能通过组织校验。",
+                    "category": "milestone",
+                    "event_date": "2026-08-09",
+                    "images": [{"name": "mo.png", "data_url": f"data:image/png;base64,{PIXEL_PNG}"}],
+                },
+                org_path="ess/mo",
+            )
+            child_moment = next(
+                (item for item in child_created.get("moments") or [] if item.get("title") == "MO 团队图片路径验证"),
+                None,
+            )
+            child_image_url = (child_moment.get("images") or [{}])[0].get("url") if child_moment else ""
+            if "org=ess%2Fmo" not in child_image_url:
+                raise RuntimeError(f"Child-team image URL is missing its validated organization path: {child_image_url}")
+            child_type, _, child_data = request_bytes(admin, f"{base_url}{child_image_url}")
+            if child_type != "image/png" or not child_data.startswith(b"\x89PNG"):
+                raise RuntimeError("Parent administrator could not load the selected child-team image")
 
             updated = request_json(
                 user,
@@ -142,7 +169,7 @@ def main():
             if not any(item.get("id") == moment_id for item in restored):
                 raise RuntimeError("Team moment restore failed")
 
-            print(json.dumps({"status": "ok", "moment_id": moment_id, "six_images": True, "image_protected": True, "recycle_restore": True}, ensure_ascii=False))
+            print(json.dumps({"status": "ok", "moment_id": moment_id, "six_images": True, "image_protected": True, "child_team_image": True, "recycle_restore": True}, ensure_ascii=False))
         finally:
             server.shutdown()
             thread.join(timeout=5)

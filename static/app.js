@@ -1,5 +1,8 @@
 import "./vendor/emoji-picker-element/index.js";
 import zhCnEmojiI18n from "./vendor/emoji-picker-element/i18n/zh_CN.js";
+import { createMorningFollowup } from "./morning-followup.js";
+import { createMeetingWorkspace } from "./meeting-workspace.js";
+import { buildMinutesDocument } from "./meeting-minutes.js";
 
 const uiThemeVersion = "miro-v1";
 
@@ -38,6 +41,7 @@ const state = {
   morningLoading: false,
   morningLoadId: 0,
   processTemplates: [],
+  processApprovals: [],
   processInstances: [],
   processScope: "mine",
   processStatus: "active",
@@ -82,7 +86,7 @@ const state = {
   selectedShiftDate: iso(new Date()),
   selectedShiftEndDate: iso(new Date()),
   meetingMonth: new Date(),
-  meetingListScope: "week",
+  meetingListScope: "month",
   selectedMeetingDate: iso(new Date()),
   selectedMeetingId: null,
   thankYear: new Date().getFullYear(),
@@ -94,6 +98,11 @@ const state = {
     ? safeStorageGet("teamLoopUiTheme", "miro")
     : "miro",
 };
+
+const morningFollowup = createMorningFollowup({
+  state, api, escapeHtml, toast, organizationPath: selectedOrganizationPath,
+  render: () => { renderMorningSummary(); renderMorningBoard(); renderMorningNavigator(); },
+});
 
 const pages = [
   ["members", "👥", "团队成员", "先看人，再看事。成员档案、职责和团队讨论都在这里。"],
@@ -670,8 +679,8 @@ function shiftPeriodQuery() {
 }
 
 function meetingPeriodQuery() {
-  const start = monthStart(state.meetingMonth);
-  const end = monthEnd(state.meetingMonth);
+  const start = state.meetingListScope === "week" ? new Date(`${mondayOf(iso(new Date()))}T00:00:00`) : monthStart(state.meetingMonth);
+  const end = state.meetingListScope === "week" ? addDays(start, 6) : monthEnd(state.meetingMonth);
   return `from=${iso(start)}&to=${iso(end)}`;
 }
 
@@ -729,7 +738,7 @@ function applyAuthView() {
   const cannotJoinMorning = !isAdminView() && state.user?.eligible_morning !== undefined && !Boolean(state.user.eligible_morning);
   $("#morningCreatePanel")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
   $("#personalMorningCreateForm")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
-  if (!canAccessPage(state.currentPage)) {
+  if (!showLogin && !canAccessPage(state.currentPage)) {
     switchPage(firstAccessiblePage());
   } else {
     renderPageToolbar();
@@ -1473,6 +1482,27 @@ function meetingIsLocked(meeting) {
   return ["completed", "archived"].includes(normalizedMeetingStatus(meeting?.status));
 }
 
+const meetingWorkspace = createMeetingWorkspace({
+  state, api, escapeHtml, toast, organizationPath: selectedOrganizationPath,
+  canOperate, isAdminView, meetingIsLocked, statusMeta: meetingStatusMeta,
+  normalizeStatus: normalizedMeetingStatus, renderAttendanceSummary: renderMeetingAttendanceSummary,
+  renderAttendanceDashboard, renderCustomTopicForm, copyMinutes: copyMeetingMinutes,
+  openMailDraft, mondayOf, refreshSelection: refreshMeetingWorkspace,
+});
+let meetingLoadSequence = 0;
+
+function refreshMeetingWorkspace() {
+  const visible = upcomingMeetings();
+  if (!visible.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId))) {
+    state.selectedMeetingId = visible.find((meeting) => meeting.meeting_date >= iso(new Date()))?.id || visible.at(-1)?.id || null;
+  }
+  const meeting = state.meetings.find((item) => Number(item.id) === Number(state.selectedMeetingId));
+  if (meeting) state.selectedMeetingDate = meeting.meeting_date;
+  renderMeetingCalendar(state.meetings);
+  renderMeetingList(state.meetings);
+  renderMeetingDetail(meeting);
+}
+
 function renderMorningStatusOptions(selected) {
   return Object.entries(morningStatusMeta)
     .map(([value, meta]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${meta[0]}</option>`)
@@ -1537,7 +1567,7 @@ function isMorningDue(item) {
 
 function morningRiskItems(items = state.morningItems) {
   return items
-    .filter((item) => item.status === "risk" || item.blocker || item.priority === "high" || isMorningDue(item))
+    .filter((item) => item.status !== "done" && (item.status === "risk" || item.blocker || item.priority === "high" || isMorningDue(item)))
     .sort((a, b) => {
       const score = (item) => (item.status === "risk" ? 4 : 0) + (item.blocker ? 3 : 0) + (isMorningDue(item) ? 2 : 0) + (item.priority === "high" ? 1 : 0);
       return score(b) - score(a);
@@ -1559,32 +1589,7 @@ function renderMorningFocus() {
 }
 
 function renderMorningSummary() {
-  const totals = { todo: 0, doing: 0, risk: 0, done: 0 };
-  state.morningItems.forEach((item) => { totals[item.status] = (totals[item.status] || 0) + 1; });
-  const total = state.morningItems.length;
-  const activeTotal = state.morningItems.filter((item) => item.status !== "done").length;
-  const dueTotal = state.morningItems.filter(isMorningDue).length;
-  $("#morningStats").innerHTML = `
-    <div class="morning-stat status-total">
-      <span>总事项</span>
-      <strong>${total}</strong>
-    </div>
-    <div class="morning-stat status-active">
-      <span>未完成</span>
-      <strong>${activeTotal}</strong>
-    </div>
-    <div class="morning-stat status-risk">
-      <span>风险</span>
-      <strong>${totals.risk || 0}</strong>
-    </div>
-    <div class="morning-stat status-due">
-      <span>到期/逾期</span>
-      <strong>${dueTotal}</strong>
-    </div>
-    <div class="morning-stat status-carried">
-      <span>自动带入</span>
-      <strong>${state.morningCarriedCount || 0}</strong>
-    </div>`;
+  morningFollowup.renderSummary();
   renderMorningFocus();
 }
 
@@ -1594,6 +1599,7 @@ function renderMorningBoard() {
   const users = state.morningUsers;
   if (!users.length) {
     board.innerHTML = "<p>暂无成员数据</p>";
+    $("#morningResultCount").textContent = "0 人 · 0 项";
     return;
   }
   let ownerFilter = $("#morningOwnerFilter")?.value || "";
@@ -1610,18 +1616,20 @@ function renderMorningBoard() {
   const filteredItems = state.morningItems.filter((item) => {
     if (ownerFilter && String(item.owner_id) !== String(ownerFilter)) return false;
     if (statusFilter && item.status !== statusFilter) return false;
-    return true;
+    return morningFollowup.matches(item);
   });
   filteredItems.forEach((item) => {
     byOwner[item.owner_id] = byOwner[item.owner_id] || [];
     byOwner[item.owner_id].push(item);
   });
-  const visibleUsers = users.filter((user) => !ownerFilter || String(user.id) === String(ownerFilter));
+  const isFiltered = morningFollowup.hasFilters() || Boolean(statusFilter);
+  const visibleUsers = users.filter((user) => (!ownerFilter || String(user.id) === String(ownerFilter)) && (!isFiltered || byOwner[user.id]?.length));
+  $("#morningResultCount").textContent = `${visibleUsers.length} 人 · ${filteredItems.length} / ${state.morningItems.length} 项`;
   board.innerHTML = visibleUsers.map((user) => {
     const items = byOwner[user.id] || [];
     const personSummary = {
       active: items.filter((item) => item.status !== "done").length,
-      risk: items.filter((item) => item.status === "risk" || item.blocker).length,
+      risk: items.filter((item) => item.needs_attention).length,
       done: items.filter((item) => item.status === "done").length,
     };
     return `
@@ -1650,7 +1658,8 @@ function renderMorningBoard() {
         </div>
       </section>
     `;
-  }).join("");
+  }).join("") || '<p class="empty-note">没有符合当前条件的事项，可清除筛选查看全部。</p>';
+  morningFollowup.restoreDrafts();
 }
 
 function renderMorningNavigator() {
@@ -1660,7 +1669,9 @@ function renderMorningNavigator() {
   const users = state.morningUsers;
   const counts = new Map();
   state.morningItems.forEach((item) => counts.set(Number(item.owner_id), (counts.get(Number(item.owner_id)) || 0) + 1));
-  list.innerHTML = users.map((user, index) => `
+  const search = ($("#morningNavigatorSearch")?.value || "").trim().toLocaleLowerCase();
+  const visibleIds = new Set($$("#morningBoard [data-morning-owner-id]").map((node) => node.dataset.morningOwnerId));
+  list.innerHTML = users.map((user, index) => ({ user, index })).filter(({ user }) => visibleIds.has(String(user.id)) && `${user.display_name} ${user.username}`.toLocaleLowerCase().includes(search)).map(({ user, index }) => `
     <div class="morning-navigator-item ${ownerFilter && String(user.id) !== String(ownerFilter) ? "is-filtered" : ""} ${ownerFilter && String(user.id) === String(ownerFilter) ? "is-current" : ""}"
          draggable="${isAdminView()}" data-morning-nav-user-id="${user.id}">
       ${isAdminView() ? `<span class="morning-nav-drag" title="拖动调整顺序" aria-hidden="true">⋮⋮</span>` : ""}
@@ -1682,7 +1693,7 @@ function renderMorningNavigator() {
 
 function morningEditorIsActive() {
   const active = document.activeElement;
-  return Boolean(active?.closest?.("#morningCreatePanel, .morning-item-form"));
+  return morningFollowup.hasDrafts() || Boolean(active?.closest?.("#morningCreatePanel, .morning-item-form"));
 }
 
 async function saveMorningOrder(userIds) {
@@ -1783,7 +1794,7 @@ function renderMorningItem(item) {
         </div>
         <div class="morning-title-cell">
           <strong>${escapeHtml(item.title)}</strong>
-          <small>更新 ${escapeHtml(shortDateTime(item.updated_at || item.created_at))}</small>
+          <small>更新 ${escapeHtml(item.last_progress_date ? shortDate(item.last_progress_date) : shortDateTime(item.updated_at || item.created_at))}${item.is_stale ? ` · ${Number(item.idle_workdays)}工作日未更新` : ""}</small>
         </div>
         <p class="morning-detail-cell">${escapeHtml(item.detail || "暂无进展说明")}</p>
         <div class="morning-risk-cell">
@@ -2074,22 +2085,116 @@ function closeProcessTemplateModal() {
   document.body.classList.remove("modal-open");
 }
 
+function closeProcessApprovalModal() {
+  $("#processApprovalModal")?.classList.add("hidden");
+  $("#processApprovalModal")?.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function approvalFlowItems(items = []) {
+  const idByKey = new Map(items.map((item, index) => [item.key || `step-${index + 1}`, index + 1]));
+  return items.map((item, index) => ({
+    ...item,
+    id: index + 1,
+    parent_item_id: idByKey.get(item.parent_key) || null,
+    required: item.required !== false,
+    sort_order: Number(item.sort_order || index + 1),
+  }));
+}
+
+function renderProcessApprovals() {
+  const target = $("#processApprovalList");
+  if (!target) return;
+  const approvals = state.processApprovals || [];
+  if (!approvals.length) {
+    target.innerHTML = `
+      <div class="process-empty">
+        <strong>当前没有待审批变更</strong>
+        <span>成员提交模板修改后，会集中显示在这里。</span>
+      </div>`;
+    return;
+  }
+  target.innerHTML = approvals.map((approval) => {
+    const currentItems = approvalFlowItems(approval.current_items || []);
+    const proposedItems = approvalFlowItems(approval.proposed_items || []);
+    const nameChanged = approval.current_name !== approval.proposed_name;
+    const descriptionChanged = (approval.current_description || "") !== (approval.proposed_description || "");
+    return `
+      <article class="process-approval-card ${approval.stale ? "is-stale" : ""}" data-process-approval-card="${approval.id}">
+        <div class="process-approval-head">
+          <div>
+            <div class="process-approval-title-line">
+              <h3>${escapeHtml(approval.current_name)}</h3>
+              <span>v${approval.base_version} → v${Number(approval.base_version || 0) + 1}</span>
+              ${approval.stale ? '<strong>版本已过期</strong>' : ""}
+            </div>
+            <p>${escapeHtml(approval.requested_by_name)} · ${escapeHtml(shortDateTime(approval.requested_at))}</p>
+          </div>
+          <div class="process-approval-change-tags">
+            ${nameChanged ? "<span>名称有变化</span>" : ""}
+            ${descriptionChanged ? "<span>说明有变化</span>" : ""}
+            <span>${currentItems.length} → ${proposedItems.length} 个节点</span>
+          </div>
+        </div>
+        <div class="process-approval-compare">
+          <section>
+            <div><strong>当前正式版</strong><span>v${approval.current_version}</span></div>
+            <h4>${escapeHtml(approval.current_name)}</h4>
+            <p>${escapeHtml(approval.current_description || "未填写模板说明")}</p>
+            ${processFlowTreeMarkup(currentItems, { compact: true })}
+          </section>
+          <section>
+            <div><strong>拟修改版</strong><span>待审批</span></div>
+            <h4>${escapeHtml(approval.proposed_name)}</h4>
+            <p>${escapeHtml(approval.proposed_description || "未填写模板说明")}</p>
+            ${processFlowTreeMarkup(proposedItems, { compact: true })}
+          </section>
+        </div>
+        <div class="process-approval-actions">
+          <input data-process-review-note maxlength="500" placeholder="审批意见（驳回时建议填写原因）" />
+          <button class="secondary danger" type="button" data-process-review="reject" data-process-request-id="${approval.id}">驳回</button>
+          <button type="button" data-process-review="approve" data-process-request-id="${approval.id}" ${approval.stale ? "disabled" : ""}>通过并生效</button>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function openProcessApprovalModal() {
+  const modal = $("#processApprovalModal");
+  if (!modal || !isAdminView()) return;
+  renderProcessApprovals();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
 function openProcessTemplateModal(templateId = null) {
   const template = state.processTemplates.find((item) => Number(item.id) === Number(templateId));
   const modal = $("#processTemplateModal");
   const form = $("#processTemplateForm");
   if (!modal || !form) return;
+  const pending = template?.pending_change;
   state.editingProcessTemplateId = template?.id || null;
   $("#processTemplateModalTitle").textContent = template ? "编辑流程模板" : "新建流程模板";
   $("#processTemplateModalHint").textContent = template
-    ? "修改只影响以后生成的流程，已经生成的个人流程保持原样。"
+    ? pending
+      ? "正在修改已提交的待审版本；再次保存会更新原审批申请，正式模板仍保持不变。"
+      : isAdminAccount()
+        ? "管理员修改将直接生效，只影响以后生成的流程。"
+        : "保存后提交管理员审批，审批通过前正式模板保持不变。"
     : "设置每个步骤的上一步；多个起点会形成并行线路。";
   form.reset();
-  form.elements.name.value = template?.name || "";
-  form.elements.description.value = template?.description || "";
+  form.elements.name.value = pending?.proposed_name || template?.name || "";
+  form.elements.description.value = pending?.proposed_description || template?.description || "";
   form.elements.expected_version.value = template?.version || "";
   const keyById = new Map((template?.items || []).map((item) => [Number(item.id), `item-${item.id}`]));
-  const items = template?.items?.length
+  const items = pending?.proposed_items?.length
+    ? pending.proposed_items.map((item, index) => ({
+        ...item,
+        _key: item.key || `pending-${index + 1}`,
+        _parentKey: item.parent_key || "",
+      }))
+    : template?.items?.length
     ? template.items.map((item) => ({
         ...item,
         _key: keyById.get(Number(item.id)),
@@ -2280,6 +2385,7 @@ function renderProcessTemplates() {
           <div class="process-template-title-line">
             <h3>${escapeHtml(template.name)}</h3>
             ${template.inherited ? `<span class="process-origin-badge">上级 · ${escapeHtml(template.org_unit_name)}</span>` : ""}
+            ${template.pending_change ? '<span class="process-pending-badge">待审批</span>' : ""}
           </div>
           <p>${escapeHtml(template.description || "按顺序完成以下标准步骤。")}</p>
         </div>
@@ -2392,6 +2498,12 @@ function renderProcesses() {
     `;
   }
   $("#openProcessTemplateBtn")?.classList.toggle("hidden", !state.user || !canOperate("processes", "create"));
+  const approvalButton = $("#openProcessApprovalBtn");
+  if (approvalButton) {
+    approvalButton.classList.toggle("hidden", !isAdminView());
+    approvalButton.classList.toggle("has-pending", state.processApprovals.length > 0);
+  }
+  if ($("#processApprovalCount")) $("#processApprovalCount").textContent = String(state.processApprovals.length);
   $$("[data-process-scope]").forEach((button) => {
     button.classList.toggle("active", button.dataset.processScope === state.processScope);
     button.classList.toggle("hidden", button.dataset.processScope === "team" && !isAdminView());
@@ -2410,12 +2522,14 @@ async function loadProcesses() {
     scope: state.processScope,
     status: state.processStatus,
   });
-  const [templates, instances] = await Promise.all([
+  const [templates, instances, approvals] = await Promise.all([
     api("/api/process-templates"),
     api(`/api/process-instances?${query}`),
+    isAdminView() ? api("/api/process-template-approvals?status=pending") : Promise.resolve({ approvals: [] }),
   ]);
   state.processTemplates = templates.templates || [];
   state.processInstances = instances.instances || [];
+  state.processApprovals = approvals.approvals || [];
   renderProcesses();
 }
 
@@ -3544,11 +3658,11 @@ function renderPresetTopicForm(meeting) {
 
 function renderCustomTopicForm(meeting) {
   if (!canOperate("meetings", "create")) return '<p class="empty-note">当前用户类型仅可查看会议议题。</p>';
-  const topics = meetingTopicTypes(meeting);
-  if (!topics.length) return "<p>本场会议尚未设置主题，暂不能添加议题。</p>";
+  const topics = state.topics;
+  if (!topics.length) return "<p>当前团队尚无议题分类，请联系管理员创建后再添加。</p>";
   return `
     <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meeting.id}">
-      <select name="type_id" required>${topicOptionsForMeeting(meeting)}</select>
+      <label>议题分类<select name="type_id" required>${renderPresetTypeOptions(null)}</select></label>
       <input name="title" placeholder="自定义议题标题" required />
       <select name="owner_id">${renderUserOptions(null, "负责人", state.coordinationUsers)}</select>
       <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
@@ -3575,45 +3689,7 @@ function renderMeetingMinuteSummary(item) {
 }
 
 function renderMeetingItem(item, meeting) {
-  const meta = [
-    item.owner_name || "",
-    item.created_by_name ? `提交：${item.created_by_name}` : "",
-    item.due_date ? `截止：${item.due_date}` : "",
-  ].filter(Boolean).join(" · ");
-  const thankYouTopic = isThankYouTopic(item);
-  const inherited = Boolean(meeting.inherited);
-  const locked = meetingIsLocked(meeting) || inherited;
-  const prepared = Boolean(item.materials);
-  return `<article class="topic-item meeting-agenda-item ${locked ? "is-locked" : ""}" style="--agenda-color:${escapeHtml(item.type_color || "#64748b")}" data-meeting-item-id="${item.id}" draggable="${!locked && canOperate("meetings", "edit") ? "true" : "false"}">
-    <div class="agenda-item-head">
-      <span class="agenda-drag-handle" title="拖动调整顺序" aria-hidden="true">⋮⋮</span>
-      <div class="agenda-item-title">
-        <span class="agenda-type-badge" style="--agenda-color:${escapeHtml(item.type_color || "#64748b")}">${escapeHtml(item.type_name || item.section || "议题")}</span>
-        <strong>${escapeHtml(item.title)}</strong>${item.carried_from_id ? `<span class="agenda-source-badge">上场顺延</span>` : ""}
-      </div>
-      <span class="agenda-duration">${Number(item.duration_minutes || 10)} 分钟</span>
-    </div>
-    ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
-    ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
-    <div class="agenda-prep-grid">
-      <div><span>期望产出</span><strong>${escapeHtml(item.expected_output || "待补充")}</strong></div>
-      <div class="${prepared ? "is-ready" : "is-missing"}"><span>会前材料</span><strong>${escapeHtml(item.materials || "待准备")}</strong></div>
-    </div>
-    ${thankYouTopic ? `
-      <div class="topic-auto-summary">
-        Thank You 议题将由系统自动汇总本周点赞记录，无需单独填写会议纪要。
-      </div>` : renderMeetingMinuteSummary(item)}
-    ${locked ? `<div class="agenda-locked-note">${inherited ? `上级团队 ${escapeHtml(meeting.org_unit_name || "")} 安排，当前团队只读` : "会议已结束，内容只读"}</div>` : (canOperate("meetings", "edit") || canOperate("meetings", "delete")) ? `
-      <div class="topic-item-actions agenda-actions">
-        ${!thankYouTopic && canOperate("meetings", "edit") ? `
-          <button class="meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="decision">记结论</button>
-          <button class="secondary meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="risk">记风险</button>
-          <button class="secondary meeting-quick-note-btn" type="button" data-item-id="${item.id}" data-note-mode="confirm">待确认</button>
-          <button class="secondary meeting-minute-btn" type="button" data-item-id="${item.id}">${item.minutes || item.open_issues || item.next_steps ? "完整编辑" : "记录纪要"}</button>
-          <button class="secondary meeting-carry-btn" type="button" data-item-id="${item.id}">顺延</button>` : ""}
-        ${canOperate("meetings", "delete") ? `<button class="danger meeting-item-delete-btn" type="button" data-item-id="${item.id}" data-item-title="${escapeHtml(item.title)}">删除</button>` : ""}
-      </div>` : ""}
-  </article>`;
+  return meetingWorkspace.renderAgendaItem(item, meeting);
 }
 
 function findMeetingItemContext(itemId) {
@@ -3785,6 +3861,11 @@ async function createMeetingFromForm(form) {
   state.selectedMeetingId = response.meeting_id;
   const created = state.meetings.find((meeting) => Number(meeting.id) === Number(response.meeting_id));
   if (created) state.selectedMeetingDate = created.meeting_date;
+  if (created) state.meetingMonth = new Date(`${created.meeting_date}T00:00:00`);
+  state.meetingListScope = "month";
+  $("#meetingSearch").value = "";
+  $("#meetingStatusFilter").value = "";
+  $("#meetingManagementModal")?.close();
   form.reset();
   setDefaultDates();
   closeMeetingCreateModal();
@@ -4136,44 +4217,7 @@ function meetingTopicTableRows(row) {
 }
 
 function buildMeetingMinutesText(meeting, thankData = null) {
-  const attendance = groupAttendance(meeting);
-  const rows = meetingMinuteRows(meeting, thankData);
-  const pendingCount = meetingPendingCount(rows);
-  const attendeeCount = meetingAttendanceCount(meeting);
-  const lines = [
-    meetingMinutesSubject(meeting),
-    "",
-    "战情概览",
-    "",
-    markdownTable([
-      ["会议时间", meetingScheduleLabel(meeting)],
-      ["与会人数", `${attendeeCount} 人`],
-      ["待闭环", `${pendingCount} 项`],
-      ["与会人", attendance.present],
-      ["请假/缺席/迟到", attendance.exceptions],
-      ["主持人", meeting.creator || "未记录"],
-      ...(hasMeetingMinuteValue(meeting.summary) ? [["会议摘要", meeting.summary]] : []),
-    ]),
-    "",
-    "一、按议题维度纪要与行动闭环",
-    "",
-  ];
-  if (!rows.length) {
-    lines.push("暂无议题。");
-    return lines.join("\r\n");
-  }
-  rows.forEach((row) => {
-    lines.push(`议题 ${row[0]}：${row[2]}`);
-    lines.push("");
-    lines.push(markdownTable(meetingTopicTableRows(row)));
-    lines.push("");
-  });
-  lines.push("二、会后跟踪要求");
-  lines.push("");
-  lines.push("1. 请各责任人按完成时间推进闭环，逾期事项需在下次例会说明原因和调整计划。");
-  lines.push("2. 遗留问题默认进入下次会议跟踪，已关闭事项需补充结论或证据。");
-  lines.push("3. 本纪要以行动闭环为准，如内容有误请在当日内反馈修订。");
-  return lines.join("\r\n");
+  return buildMinutesDocument(meeting, thankData).text;
 }
 
 function htmlCell(value, fallback = "无") {
@@ -4231,42 +4275,7 @@ function htmlTopicSections(rows) {
 }
 
 function buildMeetingMinutesHtml(meeting, thankData = null) {
-  const attendance = groupAttendance(meeting);
-  const rows = meetingMinuteRows(meeting, thankData);
-  const pendingCount = meetingPendingCount(rows);
-  const attendeeCount = meetingAttendanceCount(meeting);
-  return `<article style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#172033;line-height:1.6;">
-    <h1 style="margin:0 0 18px;font-size:22px;background:#fff7f7;border-top:4px solid #c7000b;padding:16px;">${htmlCell(meetingMinutesSubject(meeting))}</h1>
-    ${hasMeetingMinuteValue(attendance.present) ? `<p style="margin:0 0 12px;color:#445066;">与会人：${htmlCell(attendance.present)}</p>` : ""}
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:12px 0 18px;">
-      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
-        <span style="display:block;color:#6b7280;font-size:12px;">会议时间</span>
-        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${htmlCell(meetingScheduleLabel(meeting, true))}</strong>
-      </div>
-      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
-        <span style="display:block;color:#6b7280;font-size:12px;">与会人</span>
-        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${attendeeCount} 人</strong>
-      </div>
-      <div style="border:1px solid #d9dfe7;background:#f8fafc;padding:14px;">
-        <span style="display:block;color:#6b7280;font-size:12px;">待闭环</span>
-        <strong style="display:block;margin-top:4px;color:#c7000b;font-size:23px;">${pendingCount} 项</strong>
-      </div>
-    </div>
-    ${attendance.exceptions !== "无" || hasMeetingMinuteValue(meeting.summary) ? `
-      <div style="border:1px solid #d9dfe7;background:#fff;padding:12px;margin:0 0 16px;">
-        ${attendance.exceptions !== "无" ? `<p style="margin:0 0 6px;"><strong>请假/缺席/迟到：</strong>${htmlCell(attendance.exceptions)}</p>` : ""}
-        ${hasMeetingMinuteValue(meeting.summary) ? `<p style="margin:0;"><strong>会议摘要：</strong>${htmlCell(meeting.summary)}</p>` : ""}
-      </div>
-    ` : ""}
-    <h2 style="margin:18px 0 8px;font-size:17px;">一、按议题维度纪要与行动闭环</h2>
-    ${rows.length ? htmlTopicSections(rows) : "<p>暂无议题。</p>"}
-    <h2 style="margin:18px 0 8px;font-size:17px;">二、会后跟踪要求</h2>
-    <ol style="margin-top:8px;padding-left:22px;">
-      <li>请各责任人按完成时间推进闭环，逾期事项需在下次例会说明原因和调整计划。</li>
-      <li>遗留问题默认进入下次会议跟踪，已关闭事项需补充结论或证据。</li>
-      <li>本纪要以行动闭环为准，如内容有误请在当日内反馈修订。</li>
-    </ol>
-  </article>`;
+  return buildMinutesDocument(meeting, thankData).html;
 }
 
 function errorReason(error) {
@@ -4415,7 +4424,7 @@ function renderMeetingCalendar(meetings) {
     const hasSelected = dayMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
     cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${hasSelected ? "active-meeting-day" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${dayMeetings.map((meeting) => `<div class="meeting-line">${meeting.start_time ? `${escapeHtml(meeting.start_time)} · ` : ""}${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</div>`).join("")}
+      ${dayMeetings.map((meeting) => `<button type="button" class="meeting-line meeting-select-btn" data-meeting-id="${meeting.id}">${meeting.start_time ? `${escapeHtml(meeting.start_time)} · ` : ""}${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</button>`).join("")}
     </div>`);
   }
   $("#meetingCalendar").innerHTML = weekdays + cells.join("");
@@ -4427,7 +4436,7 @@ function meetingListRange() {
     const monthFrom = iso(monthStart(state.meetingMonth));
     const monthTo = iso(monthEnd(state.meetingMonth));
     return {
-      from: monthFrom > today ? monthFrom : today,
+      from: monthFrom,
       to: monthTo,
       label: "本月",
     };
@@ -4435,7 +4444,7 @@ function meetingListRange() {
   const weekFrom = mondayOf(today);
   const weekTo = iso(addDays(`${weekFrom}T00:00:00`, 6));
   return {
-    from: today > weekFrom ? today : weekFrom,
+    from: weekFrom,
     to: weekTo,
     label: "本周",
   };
@@ -4445,27 +4454,12 @@ function upcomingMeetings(meetings = state.meetings) {
   const range = meetingListRange();
   return meetings
     .filter((meeting) => meeting.meeting_date >= range.from && meeting.meeting_date <= range.to)
-    .sort((a, b) => String(a.meeting_date).localeCompare(String(b.meeting_date)) || Number(a.id) - Number(b.id));
+    .filter(meetingWorkspace.matchesMeeting)
+    .sort((a, b) => String(a.meeting_date).localeCompare(String(b.meeting_date)) || String(a.start_time || "").localeCompare(String(b.start_time || "")) || Number(a.id) - Number(b.id));
 }
 
 function renderMeetingList(meetings) {
-  const list = $("#meetingList");
-  if (!list) return;
-  const range = meetingListRange();
-  const visibleMeetings = upcomingMeetings(meetings);
-  const title = $("#meetingListTitle");
-  const hint = $("#meetingListHint");
-  if (title) title.textContent = `${range.label}会议`;
-  if (hint) hint.textContent = `${shortDate(range.from)} 至 ${shortDate(range.to)}，只显示未过期会议。`;
-  $$("[data-meeting-list-scope]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.meetingListScope === state.meetingListScope);
-  });
-  list.innerHTML = visibleMeetings.length ? visibleMeetings.map((meeting) => `
-    <button type="button" class="meeting-list-item meeting-select-btn ${Number(meeting.id) === Number(state.selectedMeetingId) ? "active" : ""}" data-meeting-id="${meeting.id}">
-      <span class="meeting-list-meta"><span>${escapeHtml(meetingScheduleLabel(meeting, true))}</span><em class="meeting-status-dot ${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][2]}">${meetingStatusMeta[normalizedMeetingStatus(meeting.status)][0]}</em></span>
-      <strong>${escapeHtml(meeting.title)}${meeting.inherited ? `<em class="meeting-source-badge">上级 · ${escapeHtml(meeting.org_unit_name || "")}</em>` : ""}</strong>
-      <small>${meetingTopicTypes(meeting).length} 个主题 · ${meeting.items.length} 个议题 · ${(meeting.attendance || []).length} 条签到</small>
-    </button>`).join("") : `<p>${range.label}暂无后续会议。</p>`;
+  meetingWorkspace.renderList(upcomingMeetings(meetings), meetingListRange());
 }
 
 function renderMeetingTopicScopeForm(meeting) {
@@ -4525,69 +4519,15 @@ function renderMeetingReadiness(meeting) {
 }
 
 function renderMeetingDetail(meeting) {
-  const detail = $("#meetingDetail");
-  if (!detail) return;
-  if (!meeting) {
-    detail.innerHTML = `
-      <div class="meeting-empty">
-        <h2>选择一场会议</h2>
-        <p>从左侧列表或上方月历选择会议后，这里会显示议题、纪要、签到和邮件入口。</p>
-      </div>`;
-    return;
-  }
-  const status = meetingStatusMeta[normalizedMeetingStatus(meeting.status)];
-  const inherited = Boolean(meeting.inherited);
-  const locked = meetingIsLocked(meeting) || inherited;
-  detail.innerHTML = `
-    <div class="meeting-detail-head">
-      <div>
-        <div class="meeting-title-line"><h2>${escapeHtml(meeting.title)}</h2><span class="meeting-status-badge ${status[2]}">${status[0]}</span>${inherited ? `<span class="meeting-source-badge">上级安排 · ${escapeHtml(meeting.org_unit_name || "")}</span>` : ""}</div>
-        <p>${escapeHtml(meetingScheduleLabel(meeting))} · ${escapeHtml(meeting.summary || "无会议摘要")}</p>
-      </div>
-      <div class="meeting-meta-actions">
-        <span class="pill">${escapeHtml(meeting.creator || "")}</span>
-        ${isAdminView() && !locked ? `<button class="secondary meeting-copy-agenda-btn" type="button" data-meeting-id="${meeting.id}">沿用上场议题</button>` : ""}
-        ${canOperate("meetings", "create") && !locked ? `<button class="secondary meeting-agenda-picker-btn" type="button" data-meeting-id="${meeting.id}">选择预设议题</button>` : ""}
-        <button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">参会签到</button>
-        <button class="button-link meeting-email-btn" type="button" data-meeting-id="${meeting.id}">生成会议邮件</button>
-      </div>
-    </div>
-
-    ${renderMeetingFlow(meeting)}
-    ${renderMeetingReadiness(meeting)}
-
-    <section class="detail-section">
-      <h3>本场会议主题</h3>
-      <p>主题会随所选预设议题自动加入，不需要单独维护。</p>
-      ${meetingTopicTypes(meeting).length ? `<div class="chip-list">${meetingTopicTypes(meeting).map((topic) => `<span class="chip"><span class="topic-dot" style="background:${escapeHtml(topic.color)}"></span>${escapeHtml(topic.name)}</span>`).join("")}</div>` : `<p class="empty-note">尚未加入主题，点击“选择预设议题”开始组会议程。</p>`}
-    </section>
-
-    <section class="detail-section">
-      <div class="section-headline"><div><h3>议程与纪要</h3><p>按讨论顺序排列；管理员可直接拖动议题调整顺序。</p></div><span>${meeting.items.length} 个议题</span></div>
-      ${renderTopicBoard(meeting)}
-    </section>
-
-    <div class="meeting-detail-grid meeting-detail-actions ${locked ? "is-locked" : ""}">
-      <section class="detail-card">
-        <h3>成员自定义议题</h3>
-        ${locked ? `<p class="agenda-locked-note">${inherited ? "上级团队会议在当前团队中只读。" : "会议已结束，不能继续添加议题。"}</p>` : renderCustomTopicForm(meeting)}
-      </section>
-      <section class="detail-card attendance-summary-card">
-        <div class="section-headline"><div><h3>参会签到</h3><p>详情收进弹窗，主页面只看签到概况。</p></div><button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${isAdminView() && !inherited ? "打开签到" : "查看签到"}</button></div>
-        ${renderMeetingAttendanceSummary(meeting)}
-      </section>
-    </div>
-
-    <details class="detail-section meeting-secondary-section">
-      <summary>查看本月参会看板</summary>
-      <div class="section-headline"><h3>本月参会看板</h3><span>${state.meetings.length} 场会议</span></div>
-      ${renderAttendanceDashboard(state.meetings)}
-    </details>`;
-  $$(".admin-only", detail).forEach((el) => el.classList.toggle("hidden", !isAdminView()));
+  meetingWorkspace.renderDetail(meeting);
 }
 
 async function loadMeetings() {
+  const sequence = ++meetingLoadSequence;
+  const orgPath = selectedOrganizationPath();
+  meetingWorkspace.syncScope();
   const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
+  if (sequence !== meetingLoadSequence || orgPath !== selectedOrganizationPath()) return;
   state.meetings = data.meetings;
   state.meetingUsers = data.attendance_users || [];
   state.coordinationUsers = data.coordination_users || state.meetingUsers;
@@ -4596,7 +4536,7 @@ async function loadMeetings() {
   const selectedStillVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
   if (!selectedStillVisible) {
     const sameDate = visibleMeetings.find((meeting) => meeting.meeting_date === state.selectedMeetingDate);
-    state.selectedMeetingId = sameDate?.id || visibleMeetings[0]?.id || null;
+    state.selectedMeetingId = sameDate?.id || visibleMeetings.find((meeting) => meeting.meeting_date >= iso(new Date()))?.id || visibleMeetings.at(-1)?.id || null;
   }
   const selectedMeeting = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
   if (selectedMeeting) state.selectedMeetingDate = selectedMeeting.meeting_date;
@@ -4615,19 +4555,11 @@ async function loadMeetings() {
   populateSelects();
 }
 
-function setMeetingListScope(scope) {
+async function setMeetingListScope(scope) {
   if (!["week", "month"].includes(scope)) return;
   state.meetingListScope = scope;
-  const visibleMeetings = upcomingMeetings(state.meetings);
-  const selectedVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
-  if (!selectedVisible) {
-    state.selectedMeetingId = visibleMeetings[0]?.id || null;
-    if (visibleMeetings[0]) state.selectedMeetingDate = visibleMeetings[0].meeting_date;
-  }
-  const selectedMeeting = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
-  renderMeetingCalendar(state.meetings);
-  renderMeetingList(state.meetings);
-  renderMeetingDetail(selectedMeeting || null);
+  if (scope === "week") state.meetingMonth = new Date();
+  await loadMeetings();
 }
 
 async function updateMeetingStatus(meetingId, status) {
@@ -6414,6 +6346,8 @@ function bindEvents() {
     if (!isAdminView()) delete payload.owner_id;
     return api("/api/morning-items", { method: "POST", body: JSON.stringify(payload) });
   });
+  morningFollowup.install();
+  meetingWorkspace.install({ reorder: reorderMeetingAgenda });
   bindForm("#personalMorningCreateForm", (data) => {
     const payload = {
       ...data,
@@ -6429,13 +6363,13 @@ function bindEvents() {
     if (submit) submit.disabled = true;
     try {
       const templateId = state.editingProcessTemplateId;
-      await api(templateId ? `/api/process-templates/${templateId}` : "/api/process-templates", {
+      const result = await api(templateId ? `/api/process-templates/${templateId}` : "/api/process-templates", {
         method: templateId ? "PATCH" : "POST",
         body: JSON.stringify(processTemplatePayload(form)),
       });
       closeProcessTemplateModal();
       await loadProcesses();
-      toast(templateId ? "流程模板已更新" : "流程模板已创建");
+      toast(result.message || (templateId ? "流程模板已更新" : "流程模板已创建"));
     } catch (error) {
       toast(error.message);
     } finally {
@@ -6801,6 +6735,34 @@ function bindEvents() {
     }
     if (event.target.closest("#openProcessTemplateBtn")) {
       openProcessTemplateModal();
+      return;
+    }
+    if (event.target.closest("#openProcessApprovalBtn")) {
+      openProcessApprovalModal();
+      return;
+    }
+    if (event.target.closest("[data-process-approval-close]") || event.target === $("#processApprovalModal")) {
+      closeProcessApprovalModal();
+      return;
+    }
+    const processReview = event.target.closest("[data-process-review]");
+    if (processReview) {
+      const card = processReview.closest("[data-process-approval-card]");
+      const reviewNote = $("[data-process-review-note]", card)?.value.trim() || "";
+      const action = processReview.dataset.processReview;
+      if (action === "reject" && !reviewNote && !window.confirm("未填写驳回原因，仍要继续吗？")) return;
+      processReview.disabled = true;
+      api(`/api/process-template-approvals/${processReview.dataset.processRequestId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action, review_note: reviewNote }),
+      })
+        .then(async (result) => {
+          await loadProcesses();
+          renderProcessApprovals();
+          toast(result.message || "审批已处理");
+        })
+        .catch((error) => toast(error.message))
+        .finally(() => { processReview.disabled = false; });
       return;
     }
     if (event.target.closest("[data-process-template-close]") || event.target === $("#processTemplateModal")) {
@@ -7434,7 +7396,7 @@ function bindEvents() {
     }
     const meetingListScope = event.target.closest("[data-meeting-list-scope]");
     if (meetingListScope) {
-      setMeetingListScope(meetingListScope.dataset.meetingListScope);
+      setMeetingListScope(meetingListScope.dataset.meetingListScope).catch((error) => toast(error.message));
       return;
     }
     if (event.target.closest(".clear-score-rule-btn")) {
@@ -7455,6 +7417,7 @@ function bindEvents() {
         body: JSON.stringify({ expected_version: Number(morningDelete.dataset.itemVersion || 1) }),
       })
         .then((data) => {
+          morningFollowup.dropDraft(morningDelete.dataset.itemId);
           state.morningItems = data.items || state.morningItems;
           state.morningUsers = data.users || state.morningUsers;
           state.morningVersionToken = data.version_token || state.morningVersionToken;
@@ -7879,6 +7842,7 @@ function bindEvents() {
           method: "PATCH",
           body: JSON.stringify(fullFormData(morningItemForm)),
         });
+        morningFollowup.dropDraft(morningItemForm.dataset.itemId);
         state.morningItems = data.items || state.morningItems;
         state.morningUsers = data.users || state.morningUsers;
         state.morningVersionToken = data.version_token || state.morningVersionToken;
@@ -7921,6 +7885,7 @@ function bindEvents() {
       }
       if (topicForm) {
         await api(`/api/meetings/${topicForm.dataset.meetingId}/items`, { method: "POST", body: JSON.stringify(formData(topicForm)) });
+        $("#meetingCustomAgendaModal")?.close();
       }
       if (meetingTopicScopeForm) {
         const topicTypeIds = new FormData(meetingTopicScopeForm).getAll("topic_type_ids");

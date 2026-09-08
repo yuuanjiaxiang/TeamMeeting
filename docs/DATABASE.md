@@ -47,7 +47,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 `users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`suggested_org_unit_id` 保存最近一次 SSO 群组匹配出的建议组织，`sso_groups_json` 和 `sso_last_login_at` 用于管理员核对映射来源；登录本身不会修改现有 `org_unit_id`。管理员确认所属团队后清空建议字段。`sso_login_states.return_to` 只接受 `/` 或 `/org/...` 路径和白名单 `view` 参数，并与一次性 state 一起保存，防止开放重定向；登录成功或失败均使用该目标返回。登录事务成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
 
-`users.org_unit_id` 指向账号所属组织。`users.morning_sort_order` 保存账号在所属组织早例会中的显示顺序，索引 `idx_users_morning_order` 支持按组织稳定读取。`org_units.parent_id` 构成树，兄弟节点的 `slug` 唯一，完整路由由祖先 slug 组合生成。`visibility_mode` 为 `all/subtree/unit`；`sso_groups` 保存 JSON 数组。`team_posts.org_unit_id` 和 `meetings.org_unit_id` 记录内容创建时的组织上下文：会议和公告可向后代组织只读透传，写入仍以原组织为准。早例会、排班、签到、红黑榜和 Thank You 通过关联用户的 `org_unit_id` 只匹配当前选中组织；Thank You 记录要求发送人和接收人同时属于该组织。
+`users.org_unit_id` 指向账号所属组织。`users.morning_sort_order` 保存账号在所属组织早例会中的显示顺序，索引 `idx_users_morning_order` 支持按组织稳定读取。`org_units.parent_id` 构成树，兄弟节点的 `slug` 唯一，完整路由由祖先 slug 组合生成。`visibility_mode` 为 `all/subtree/unit`；`sso_groups` 保存 JSON 数组。`team_posts.org_unit_id` 和 `meetings.org_unit_id` 记录内容创建时的组织上下文：会议和公告可向后代组织只读透传，写入仍以原组织为准。早例会、排班、签到和红黑榜通过关联用户的 `org_unit_id` 只匹配当前选中组织；Thank You 允许发送人的组织是接收人组织的祖先或同一组织，兄弟组织保持隔离。
 
 组织调整不会隐式修改历史事实。需要将旧组织下的讨论或会议迁入新组织时，使用 `scripts/migrate_org_data.py`；脚本默认只预览，执行前创建 SQLite 备份，并记录逐行迁移清单供回滚。
 
@@ -87,8 +87,11 @@ data/deploy/runtime/                  # 进程元数据和日志
 | --- | --- |
 | `process_templates` | 团队流程模板、说明、版本和停用状态 |
 | `process_template_items` | 模板节点、父节点、必做标记和顺序 |
+| `process_template_change_requests` | 成员模板修改申请、拟修改节点 JSON、基线版本、审批状态与意见 |
 | `process_instances` | 用户从模板生成的个人流程、状态和截止日期 |
 | `process_instance_items` | 个人流程的节点关系快照、勾选状态和完成人 |
+
+`process_template_change_requests` 对同一模板、同一提交人只允许一条 `pending` 记录。通过审批时在同一事务中校验 `base_version`、更新模板、替换节点并关闭申请；驳回不会改动正式模板。历史审批记录保留用于审计。
 
 `parent_item_id` 将流程组织为一棵树或由多棵树组成的森林：空值是并行起点，同一父节点的多个子节点是并行分支。生成个人流程时会复制模板项的标题、说明、必做标记、顺序和父子关系。`template_item_id` 只用于追溯来源并允许模板项删除后置空，流程执行不依赖模板当前内容。模板编辑只影响以后生成的流程；历史流程必须保持原快照。流程完成状态由必做项计算，写入节点、级联撤销下游节点和重算流程状态应在同一事务中完成。
 

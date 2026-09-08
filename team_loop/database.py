@@ -1443,6 +1443,23 @@ def init_db():
                 sort_order INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS process_template_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL REFERENCES process_templates(id) ON DELETE CASCADE,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                requested_by INTEGER NOT NULL REFERENCES users(id),
+                base_version INTEGER NOT NULL,
+                proposed_name TEXT NOT NULL,
+                proposed_description TEXT,
+                proposed_items TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+                reviewer_id INTEGER REFERENCES users(id),
+                review_note TEXT,
+                requested_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS process_instances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 template_id INTEGER REFERENCES process_templates(id),
@@ -1610,6 +1627,9 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moment_images_moment ON team_moment_images(moment_id, sort_order, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_org_date ON meetings(org_unit_id, meeting_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_templates_org ON process_templates(org_unit_id, active, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_template_changes_org_status ON process_template_change_requests(org_unit_id, status, requested_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_template_changes_requester ON process_template_change_requests(requested_by, status, updated_at DESC)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_process_template_changes_pending ON process_template_change_requests(template_id, requested_by) WHERE status='pending'")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_owner ON process_instances(owner_id, status, active, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_org ON process_instances(org_unit_id, status, active, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instance_items ON process_instance_items(instance_id, sort_order)")

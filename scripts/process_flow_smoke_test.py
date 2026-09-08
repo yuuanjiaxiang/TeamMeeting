@@ -110,6 +110,13 @@ def main():
 
             user = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             request_json(user, base_url, "/api/login", "POST", {"username": "user", "password": "user123"})
+            expect_status(
+                user,
+                base_url,
+                "/api/process-template-approvals?status=pending",
+                403,
+                org_path="ess/mo",
+            )
             templates = request_json(user, base_url, "/api/process-templates", org_path="ess/mo")["templates"]
             inherited = next((item for item in templates if item["id"] == template["id"]), None)
             if not inherited or not inherited["inherited"]:
@@ -131,6 +138,65 @@ def main():
             )
             if not member_template.get("can_manage") or member_template.get("inherited"):
                 raise RuntimeError(f"Member-created template ownership is invalid: {member_template}")
+
+            change_result = request_json(
+                user,
+                base_url,
+                f"/api/process-templates/{member_template['id']}",
+                "PATCH",
+                {
+                    "name": "成员自建复盘流程（优化版）",
+                    "description": "该修改需要管理员审批后才进入正式模板",
+                    "expected_version": member_template["version"],
+                    "items": [
+                        {"key": "review", "title": "完成复盘记录", "required": True},
+                        {
+                            "key": "share",
+                            "parent_key": "review",
+                            "title": "分享复盘结论",
+                            "required": True,
+                        },
+                    ],
+                },
+                "ess/mo",
+            )
+            if not change_result.get("approval_required"):
+                raise RuntimeError(f"Member template edit bypassed approval: {change_result}")
+            pending_templates = request_json(
+                user,
+                base_url,
+                "/api/process-templates",
+                org_path="ess/mo",
+            )["templates"]
+            pending_template = next(item for item in pending_templates if item["id"] == member_template["id"])
+            if pending_template["name"] != "成员自建复盘流程" or not pending_template.get("pending_change"):
+                raise RuntimeError(f"Pending change modified the live template: {pending_template}")
+            approvals = request_json(
+                admin,
+                base_url,
+                "/api/process-template-approvals?status=pending",
+                org_path="ess/mo",
+            )["approvals"]
+            approval = next((item for item in approvals if item["template_id"] == member_template["id"]), None)
+            if not approval or len(approval["current_items"]) != 1 or len(approval["proposed_items"]) != 2:
+                raise RuntimeError(f"Approval comparison payload is invalid: {approvals}")
+            request_json(
+                admin,
+                base_url,
+                f"/api/process-template-approvals/{approval['id']}",
+                "PATCH",
+                {"action": "approve", "review_note": "节点结构清晰，同意发布"},
+                "ess/mo",
+            )
+            approved_templates = request_json(
+                user,
+                base_url,
+                "/api/process-templates",
+                org_path="ess/mo",
+            )["templates"]
+            approved_template = next(item for item in approved_templates if item["id"] == member_template["id"])
+            if approved_template["name"] != "成员自建复盘流程（优化版）" or len(approved_template["items"]) != 2:
+                raise RuntimeError(f"Approved change did not become active: {approved_template}")
 
             generated = request_json(
                 user,
@@ -319,6 +385,7 @@ def main():
                 "parent_reset_cascades": True,
                 "optional_item_blocks_completion": False,
                 "member_template_creation": True,
+                "member_template_edit_requires_approval": True,
                 "team_visible": True,
             }, ensure_ascii=False))
         finally:

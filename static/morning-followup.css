@@ -1,0 +1,123 @@
+/* Scoped follow-up surfaces stay readable under every theme. */
+body[data-theme] #morningStats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+body[data-theme] .followup-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 76px;
+  padding: 12px 14px;
+  gap: 7px;
+  border: 1px solid #dce2ea;
+  border-radius: 6px;
+  background: #fff;
+  color: #3d4859;
+  box-shadow: none;
+  text-align: left;
+  transform: none;
+}
+body[data-theme] .followup-metric span { font-size: 13px; }
+body[data-theme] .followup-metric strong { font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums; }
+body[data-theme] .followup-metric.tone-risk strong,
+body[data-theme] .followup-metric.tone-overdue strong { color: #b42332; }
+body[data-theme] .followup-metric.tone-stale strong { color: #936014; }
+body[data-theme] .followup-metric.is-active { border-color: #3267d5; background: #f0f5ff; box-shadow: inset 0 -3px #3267d5; }
+body[data-theme] .followup-metric:hover { border-color: #8daade; }
+.morning-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+body[data-theme] #morning .morning-list-panel > .panel-title { align-items: flex-start; flex-direction: column; gap: 12px; }
+body[data-theme] #morning .morning-list-tools { display: flex; flex-wrap: wrap; width: 100%; gap: 8px; min-width: 0; }
+body[data-theme] #morningKeyword { flex: 1 1 240px; min-width: 180px; width: auto; }
+body[data-theme] #morning .morning-list-tools select { flex: 0 1 140px; width: auto; min-width: 120px; }
+body[data-theme] #morningClearFilters { width: auto; white-space: nowrap; flex-shrink: 0; }
+.morning-results-bar { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #637083; font-size: 12px; padding: 0 0 12px; }
+#morningDraftStatus { color: #936014; }
+body[data-theme] #morningNavigatorSearch { min-width: 0; width: 100%; background: #fff; color: #27364b; margin-bottom: 8px; font-size: 13px; }
+@media (min-width: 1281px) {
+  body[data-theme] #morning { padding-right: 238px; }
+  body[data-theme] #morning .morning-board-layout { padding-right: 0; }
+  body[data-theme] #morningNavigator { display: flex; flex-direction: column; max-height: calc(100dvh - 166px); }
+  #morningNavigator .morning-navigator-head, #morningNavigatorSearch { flex-shrink: 0; }
+  #morningNavigatorList { min-height: 0; max-height: none; flex: 1; }
+}
+@media (min-width: 721px) {
+  body[data-theme] #morningItemForm {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas: "owner title" "status priority" "detail blocker" "due submit";
+  }
+  #morningItemForm > #morningOwnerField { grid-area: owner; }
+  #morningItemForm > input[name="title"] { grid-area: title; }
+  #morningItemForm:has(#morningOwnerField.hidden) > input[name="title"] { grid-column: 1 / -1; }
+  #morningItemForm > .morning-choice-field:has([name="status"]) { grid-area: status; }
+  #morningItemForm > .morning-choice-field:has([name="priority"]) { grid-area: priority; }
+  #morningItemForm > textarea[name="detail"] { grid-area: detail; }
+  #morningItemForm > textarea[name="blocker"] { grid-area: blocker; }
+  #morningItemForm > input[name="due_date"] { grid-area: due; }
+  body[data-theme] #morningItemForm > button { grid-area: submit; min-height: 42px; }
+}
+@media (min-width: 1501px) and (max-width: 1750px) {
+  body[data-theme] #morning .morning-list-head { display: none; }
+  body[data-theme] #morning .morning-list-item,
+  body[data-theme] #morning .morning-list-item-form { grid-template-columns: 132px minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; }
+  #morning .morning-status-cell { grid-column: 1; grid-row: 1 / span 2; }
+  #morning .morning-title-cell { grid-column: 2; grid-row: 1; }
+  #morning .morning-detail-cell { grid-column: 3; grid-row: 1; }
+  #morning .morning-risk-cell { grid-column: 2; grid-row: 2; }
+  #morning .morning-item-actions { grid-column: 3; grid-row: 2; align-self: end; }
+}
+.morning-draft-note { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #936014; background: #fff9eb; padding: 6px 10px; font-size: 12px; border-radius: 4px; }
+.morning-draft-note.has-conflict { color: #a0212e; background: #fff0f1; }
+body[data-theme] .morning-draft-note button { width: auto; color: inherit; background: #fff; border: 1px solid #d9dfe9; white-space: nowrap; padding: 5px 8px; }
+body[data-theme] .progress-report-dialog { width: min(920px, calc(100% - 32px)); max-width: 920px; max-height: calc(100dvh - 40px); margin: auto; padding: 0; border: 1px solid #d9dfe9; border-radius: 8px; color: #233044; background: #fff; box-shadow: 0 16px 60px #15223833; }
+.progress-report-dialog::backdrop { background: #18263866; }
+body:has(#morningReportModal[open]) { overflow: hidden; }
+.progress-report-shell { display: flex; flex-direction: column; max-height: calc(100dvh - 44px); min-height: 380px; }
+.progress-report-shell > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; flex-shrink: 0; }
+body[data-theme] .progress-report-shell h2 { font-size: 20px; margin: 0; color: #1f2c40; }
+.progress-report-shell > header p { color: #637083; font-size: 13px; margin: 6px 0 0; }
+body[data-theme] #morningReportForm { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 0 24px 14px; border-bottom: 1px solid #e4e8ee; flex-shrink: 0; }
+#morningReportForm label { display: grid; gap: 5px; font-size: 12px; color: #546074; }
+.report-periods { display: flex; gap: 4px; }
+body[data-theme] .progress-report-dialog button { width: auto; min-height: 36px; background: #3267d5; color: white; border: 1px solid #3267d5; border-radius: 5px; padding: 7px 12px; box-shadow: none; white-space: nowrap; transform: none; }
+body[data-theme] .progress-report-dialog button.secondary { background: white; color: #334158; border-color: #d9dfe9; }
+body[data-theme] .progress-report-dialog input { color: #233044; background: #fff; border: 1px solid #d9dfe9; min-height: 36px; }
+.progress-report-dialog button:disabled { opacity: .5; cursor: not-allowed; }
+#morningReportSummary { padding: 12px 24px; margin: 0; font-size: 13px; color: #546074; flex-shrink: 0; }
+.progress-report-content { overflow: auto; overscroll-behavior: contain; padding: 0 24px 20px; flex: 1 1 auto; min-height: 0; }
+.progress-report-person + .progress-report-person { margin-top: 24px; }
+body[data-theme] .progress-report-person h3 { font-size: 16px; color: #233044; padding: 8px 0; margin: 0; border-bottom: 2px solid #e3eaf5; }
+.progress-report-person h3 small { font-size: 12px; color: #637083; font-weight: normal; margin-left: 8px; }
+.progress-report-item { padding: 14px 0; border-bottom: 1px solid #e4e8ee; overflow-wrap: anywhere; }
+.progress-report-item > div { display: flex; align-items: start; gap: 12px; justify-content: space-between; }
+.progress-report-item p { white-space: pre-wrap; font-size: 14px; line-height: 1.6; margin: 8px 0; }
+.progress-report-item small { color: #637083; font-size: 12px; }
+.progress-report-status { flex-shrink: 0; font-size: 12px; color: #48556b; background: #f2f4f8; padding: 3px 7px; border-radius: 4px; }
+.progress-report-status.is-done { color: #11694d; background: #ecf8f1; }
+.progress-report-item .report-risk { color: #a0212e; }
+.progress-report-shell > footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 24px; border-top: 1px solid #e4e8ee; flex-shrink: 0; }
+.progress-report-shell > footer > div { display: flex; gap: 8px; }
+.progress-report-shell > footer small { color: #637083; font-size: 12px; }
+@media (max-width: 1100px) {
+  body[data-theme] #morningStats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  body[data-theme] #morningStats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body[data-theme] #morningKeyword { flex-basis: 100%; }
+  body[data-theme] #morning .morning-list-tools select { flex: 1 1 110px; }
+  body[data-theme] .progress-report-dialog { width: calc(100% - 16px); max-height: calc(100dvh - 16px); }
+  .progress-report-shell { max-height: calc(100dvh - 20px); }
+  .progress-report-shell > header, .progress-report-shell > footer { padding: 12px; }
+  body[data-theme] #morningReportForm { padding: 0 12px 12px; }
+  #morningReportSummary { padding: 10px 12px; }
+  .progress-report-content { padding: 0 12px 12px; }
+  body[data-theme] #morning input, body[data-theme] #morning select, body[data-theme] .progress-report-dialog input { font-size: 16px; }
+  .report-periods { width: 100%; }
+  #morningReportForm label { flex: 1 1 140px; min-width: 0; }
+  #morningReportForm input { width: 100%; min-width: 0; }
+  body[data-theme] #morningReportForm button[type="submit"] { width: 100%; }
+  .progress-report-shell > footer > div { margin-left: auto; }
+}
