@@ -34,6 +34,7 @@ Use these references conditionally:
 - Use event delegation for dynamically rendered controls.
 - Escape every user-controlled value before injecting HTML.
 - Preserve independent scrolling for long lists and stable calendar/table dimensions.
+- Keep dashboard metric details in `static/dashboard-details.js` and `dashboard-details.css`; read `docs/DASHBOARD_SCOPE.md` before changing rollups. Reuse metric query filters, enforce self/admin target access and independent black-score visibility, and invalidate snapshots on auth/member/organization/period changes. Run `scripts/dashboard_details_test.mjs` and `scripts/organization_scope_smoke_test.py`.
 - Keep the sidebar organization switcher hierarchical and collapsible; expand only the selected path by default, keep deep trees internally scrollable, and verify desktop, medium, and mobile layouts.
 - Verify Miro theme first, then check theme overrides and responsive breakpoints.
 - Make each page reload its latest data when opened.

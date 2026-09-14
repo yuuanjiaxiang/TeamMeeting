@@ -146,11 +146,34 @@ class OperationsHandlerMixin:
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
+            if query.get("include_details") == ["1"]:
+                conn.execute("BEGIN")  # Keep totals and details on one WAL read snapshot.
             target_user_id = (query.get("user_id") or [None])[0]
             org_where, org_params = self.organization_workbench_user_filter(conn, "u", user, target_user_id)
             show_black_points = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_points", "1"
             ) == "1"
+            show_black_details = bool(user and user.get("role") == "admin") or get_setting_value(
+                conn, "red_black_show_black_details", "1"
+            ) == "1"
+            details = []
+            if user and query.get("include_details") == ["1"]:
+                detail_user_id = target_user_id if user.get("role") == "admin" and target_user_id else user["id"]
+                details = rows_to_list(conn.execute(
+                    f"""SELECT s.id, s.user_id, s.score_date, s.kind, s.points, s.reason AS evidence, r.title AS rule_title
+                    FROM red_black_scores s JOIN users u ON u.id=s.user_id
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    LEFT JOIN red_black_rules r ON r.id=s.rule_id
+                    WHERE {where} AND {org_where} AND s.user_id=?
+                      AND u.active=1 AND COALESCE(t.include_in_rules,1)=1
+                      AND (s.kind='red' OR ?)
+                    ORDER BY s.score_date DESC, s.created_at DESC, s.id DESC""",
+                    [*params, *org_params, detail_user_id, show_black_details],
+                ).fetchall())
+                if not show_black_points:
+                    for detail in details:
+                        if detail["kind"] == "black":
+                            detail["points"] = None
             users = rows_to_list(
                 conn.execute(
                     f"""
@@ -249,6 +272,8 @@ class OperationsHandlerMixin:
             "timeline": timeline,
             "annual": annual,
             "show_black_points": show_black_points,
+            "show_black_details": show_black_details,
+            "details": details,
         }
 
     def list_meetings(self, query):
@@ -1412,9 +1437,22 @@ class OperationsHandlerMixin:
     def shift_dashboard(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
+            if query.get("include_details") == ["1"]:
+                conn.execute("BEGIN")
             actor = self.current_user(required=False)
             target_user_id = (query.get("user_id") or [None])[0]
             org_where, org_params = self.organization_workbench_user_filter(conn, "u", actor, target_user_id)
+            details = []
+            if actor and query.get("include_details") == ["1"]:
+                detail_user_id = target_user_id if actor.get("role") == "admin" and target_user_id else actor["id"]
+                details = rows_to_list(conn.execute(
+                    f"""SELECT s.id, s.user_id, s.shift_date, s.shift_type, s.hours, s.note, m.name AS machine_name
+                    FROM shifts s JOIN users u ON u.id=s.user_id
+                    LEFT JOIN machines m ON m.id=s.machine_id
+                    WHERE {where} AND {org_where} AND s.user_id=?
+                    ORDER BY s.shift_date DESC, s.id DESC""",
+                    [*params, *org_params, detail_user_id],
+                ).fetchall())
             by_user = rows_to_list(
                 conn.execute(
                     f"""
@@ -1442,7 +1480,7 @@ class OperationsHandlerMixin:
                     [*params, *org_params],
                 ).fetchall()
             )
-        return {"by_user": by_user, "by_machine": by_machine}
+        return {"by_user": by_user, "by_machine": by_machine, "details": details}
 
     def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
@@ -1619,12 +1657,28 @@ class OperationsHandlerMixin:
     def thank_you_dashboard(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
+            if query.get("include_details") == ["1"]:
+                conn.execute("BEGIN")
             target_user_id = (query.get("user_id") or [None])[0]
             org_where, org_params = self.organization_workbench_user_filter(conn, "receiver", viewer, target_user_id)
             if viewer and viewer.get("role") == "admin" and target_user_id not in (None, "", 0, "0"):
                 giver_where, giver_params = "1=1", []
             else:
                 giver_where, giver_params = self.organization_ancestor_user_filter(conn, "giver", viewer)
+            details = []
+            if viewer and query.get("include_details") == ["1"]:
+                detail_user_id = target_user_id if viewer.get("role") == "admin" and target_user_id else viewer["id"]
+                details = rows_to_list(conn.execute(
+                    f"""SELECT v.id, v.receiver_id, v.week_start, v.evidence, v.created_at,
+                        giver.display_name AS giver_name
+                    FROM thank_you_votes v JOIN users receiver ON receiver.id=v.receiver_id
+                    JOIN users giver ON giver.id=v.voter_id
+                    LEFT JOIN user_types t ON t.key=receiver.user_type
+                    WHERE {where} AND {org_where} AND {giver_where} AND receiver.id=?
+                      AND receiver.active=1 AND COALESCE(t.include_in_thanks,1)=1
+                    ORDER BY v.week_start DESC, v.created_at DESC, v.id DESC""",
+                    [*params, *org_params, *giver_params, detail_user_id],
+                ).fetchall())
             stars = rows_to_list(
                 conn.execute(
                     f"""
@@ -1657,7 +1711,7 @@ class OperationsHandlerMixin:
                     [*params, *org_params, *giver_params],
                 ).fetchall()
             )
-        return {"stars": stars, "weekly": weekly}
+        return {"stars": stars, "weekly": weekly, "details": details}
 
     def list_reminders(self, user):
         if not user:

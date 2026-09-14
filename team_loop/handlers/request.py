@@ -412,7 +412,7 @@ class RequestHandlerMixin:
         with connect() as conn:
             image = conn.execute(
                 """
-                SELECT i.id, i.filename, i.mime_type, i.image_data, i.moment_id
+                SELECT i.id, i.filename, i.mime_type, i.image_data, i.moment_id, m.org_unit_id
                 FROM team_moment_images i
                 JOIN team_moments m ON m.id=i.moment_id
                 WHERE i.id=? AND m.deleted_at IS NULL
@@ -421,6 +421,13 @@ class RequestHandlerMixin:
             ).fetchone()
             if not image:
                 raise AppError(404, "图片不存在")
+            # Legacy image URLs have no organization header/query. Revalidate the
+            # image's team against the same accessible scope as the moment list.
+            if not requested_path:
+                requested_path = self.headers.get("X-Team-Org-Path") or next(
+                    (unit["path"] for unit in organization_rows(conn) if unit["id"] == image["org_unit_id"]),
+                    "",
+                )
             self.require_team_moment_access(
                 conn,
                 image["moment_id"],

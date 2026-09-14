@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="/style.css?v=20260817-team-scope-v1" />
     <link rel="stylesheet" href="/morning-followup.css?v=20260907" />
     <link rel="stylesheet" href="/meeting-workspace.css?v=20260907" />
+    <link rel="stylesheet" href="/links-workspace.css?v=20260908" />
+    <link rel="stylesheet" href="/dashboard-details.css?v=20260915" />
   </head>
   <body>
     <div class="app-shell">
@@ -554,10 +556,10 @@
 
           <section id="dashboard" class="page">
             <div class="metrics">
-              <div><span id="metricScoreLabel">我的红榜 / 黑榜积分</span><strong id="metricScore">红 0 / 黑 0</strong></div>
-              <div><span id="metricThanksLabel">我收到的 Thank You</span><strong id="metricThanks">0</strong></div>
-              <div><span id="metricHoursLabel">我的已排工时</span><strong id="metricHours">0</strong></div>
-              <div><span id="metricMeetingsLabel">我的早例会事项</span><strong id="metricMeetings">0</strong></div>
+              <div><button type="button" class="dashboard-metric" data-dashboard-detail="scores" aria-haspopup="dialog" disabled><span id="metricScoreLabel">我的红榜 / 黑榜积分</span><strong id="metricScore">红 0 / 黑 0</strong></button></div>
+              <div><button type="button" class="dashboard-metric" data-dashboard-detail="thanks" aria-haspopup="dialog" disabled><span id="metricThanksLabel">我收到的 Thank You</span><strong id="metricThanks">0</strong></button></div>
+              <div><button type="button" class="dashboard-metric" data-dashboard-detail="shifts" aria-haspopup="dialog" disabled><span id="metricHoursLabel">我的已排工时</span><strong id="metricHours">0</strong></button></div>
+              <div><button type="button" class="dashboard-metric" data-dashboard-detail="morning" aria-haspopup="dialog" disabled><span id="metricMeetingsLabel">我的早例会事项</span><strong id="metricMeetings">0</strong></button></div>
             </div>
             <section class="panel personal-workbench-panel">
               <div class="panel-title">
@@ -1216,7 +1218,7 @@
 
           <section id="links" class="page">
             <section class="panel">
-              <h2>归档常用链接</h2>
+              <details class="link-maintenance"><summary>新增链接</summary>
               <form id="linkForm" class="form-row">
                 <input name="title" placeholder="名称" required />
                 <input name="url" placeholder="https://..." required />
@@ -1227,30 +1229,34 @@
                 <button id="inferLinkScopeBtn" class="secondary" type="button">自动提炼</button>
                 <button>保存链接</button>
               </form>
+              </details>
             </section>
             <section class="panel admin-only">
-              <h2>维护链接分类</h2>
+              <details class="link-maintenance"><summary>管理分类</summary>
               <form id="linkCategoryForm" class="form-row slim">
                 <input name="name" placeholder="分类名称" required />
                 <input name="sort_order" type="number" placeholder="排序" />
                 <button>保存分类</button>
               </form>
               <div id="linkCategoryList" class="chip-list"></div>
+              </details>
             </section>
-            <section class="panel">
+            <section class="panel link-library-panel">
               <div class="panel-title">
                 <div>
                   <h2>链接库</h2>
+                  <span id="linkResultCount" role="status" aria-live="polite"></span>
                 </div>
                 <div class="link-toolbar">
-                  <select id="linkCategoryFilter"></select>
-                  <select id="linkStatusFilter">
+                  <select id="linkCategoryFilter" aria-label="链接分类"></select>
+                  <select id="linkStatusFilter" aria-label="链接状态">
                     <option value="">全部状态</option>
                     <option value="valid">可用链接</option>
                     <option value="pinned">置顶链接</option>
                     <option value="invalid">失效链接</option>
                   </select>
-                  <input id="linkKeywordSearch" placeholder="搜索名称、地址、说明、机台、流程" />
+                  <input id="linkKeywordSearch" type="search" aria-label="搜索链接" placeholder="搜索名称、说明或标签" />
+                  <button id="linkClearFilters" type="button" class="secondary">重置筛选</button>
                 </div>
               </div>
               <div id="linkList" class="table"></div>

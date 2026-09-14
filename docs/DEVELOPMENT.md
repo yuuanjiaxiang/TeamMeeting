@@ -1,5 +1,7 @@
 # Team Loop 二次开发指南
 
+工作台统计与详情模块见 [DASHBOARD_SCOPE.md](DASHBOARD_SCOPE.md)。详情为原统计接口的可选字段，前端独立在 `static/dashboard-details.js`，不得用下级协调名单替换本级统计范围。
+
 ## 1. 技术栈与设计目标
 
 Team Loop 是无构建步骤的模块化单体应用：

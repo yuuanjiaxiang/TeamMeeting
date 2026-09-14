@@ -1,0 +1,34 @@
+body[data-theme] #dashboard .metrics > div { padding: 0; }
+body[data-theme] #dashboard .dashboard-metric {
+  display: block; width: 100%; height: 100%; min-height: 90px;
+  padding: 14px 34px 14px 14px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; box-shadow: none;
+  text-align: left; white-space: normal; overflow-wrap: anywhere;
+}
+body[data-theme] #dashboard .dashboard-metric::after {
+  content: "\203A"; position: absolute; right: 14px; top: 50%;
+  transform: translateY(-50%); font-size: 24px; color: inherit;
+}
+body[data-theme] #dashboard .dashboard-metric:hover:not(:disabled) { background: #ffffff40; }
+body[data-theme] #dashboard .dashboard-metric:focus-visible { outline: 3px solid #2459c4; outline-offset: -3px; }
+body[data-theme] #dashboard .dashboard-metric:disabled { opacity: .65; cursor: default; }
+#dashboardDetailsDialog {
+  width: min(760px, calc(100vw - 24px)); max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 32px); padding: 0; border: 1px solid #cbd2dd;
+  border-radius: 8px; background: #fff; color: #202938;
+  box-shadow: 0 16px 64px #10182833; overflow: hidden;
+}
+#dashboardDetailsDialog[open] { display: flex; flex-direction: column; }
+#dashboardDetailsDialog::backdrop { background: #10182866; }
+#dashboardDetailsDialog header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid #e1e5eb; flex-shrink: 0; }
+#dashboardDetailsDialog h2 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+#dashboardDetailsDialog header p { margin: 8px 0 0; font-size: 13px; color: #526074; white-space: pre-line; }
+body[data-theme] #dashboardDetailsDialog .detail-close { width: 32px; height: 32px; flex: 0 0 32px; padding: 0; background: #f1f4f8; color: #243247; border: 1px solid #d4dbe5; box-shadow: none; }
+.dashboard-details-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 0 20px 16px; }
+.dashboard-details-list article { padding: 16px 0; border-bottom: 1px solid #e1e5eb; overflow-wrap: anywhere; }
+.dashboard-details-list article:last-child { border-bottom: 0; }
+.dashboard-details-list h3 { font-size: 15px; margin: 0 0 8px; }
+.dashboard-details-list p { margin: 6px 0; white-space: pre-wrap; font-size: 14px; }
+.dashboard-details-list small { color: #526074; }
+.dashboard-details-list .detail-red { color: #b42332; }
+.dashboard-details-list .detail-black { color: #283445; }

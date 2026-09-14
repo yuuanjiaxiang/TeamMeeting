@@ -3,6 +3,7 @@ import zhCnEmojiI18n from "./vendor/emoji-picker-element/i18n/zh_CN.js";
 import { createMorningFollowup } from "./morning-followup.js";
 import { createMeetingWorkspace } from "./meeting-workspace.js";
 import { buildMinutesDocument } from "./meeting-minutes.js";
+import { createDashboardDetails } from "./dashboard-details.js";
 
 const uiThemeVersion = "miro-v1";
 
@@ -165,6 +166,10 @@ let activeReactionTarget = null;
 let pendingLinkDeleteId = null;
 let activePageRefreshId = 0;
 let authSyncInFlight = false;
+let authGeneration = 0;
+let dashboardRequestId = 0;
+const dashboardContext = () => JSON.stringify([authGeneration, state.user?.id, state.organization?.selected?.path, state.dashboardUserId, periodQuery(), isAdminView()]);
+const dashboardDetails = createDashboardDetails((context) => context === dashboardContext());
 let lastAuthSyncAt = 0;
 
 function safeStorageGet(key, fallback) {
@@ -547,6 +552,7 @@ function setDefaultDates() {
 }
 
 async function api(path, options = {}) {
+  const generation = authGeneration;
   const orgPath = selectedOrganizationPath();
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -558,7 +564,7 @@ async function api(path, options = {}) {
     const error = new Error(data.error || "请求失败");
     error.status = response.status;
     error.data = data;
-    if (response.status === 401 && state.user && path !== "/api/login") {
+    if (response.status === 401 && generation === authGeneration && state.user && path !== "/api/login") {
       transitionToLoggedOut(true, true).catch(() => {});
     }
     throw error;
@@ -747,6 +753,14 @@ function applyAuthView() {
 }
 
 async function transitionToLoggedOut(showLogin = true, refresh = true) {
+  const generation = ++authGeneration;
+  dashboardDetails.clear();
+  document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
+  document.querySelectorAll('.modal').forEach((modal) => {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  });
+  document.body.style.overflow = '';
   closeUserTypePermissionModal();
   closeUserAccountModal();
   state.user = null;
@@ -754,9 +768,22 @@ async function transitionToLoggedOut(showLogin = true, refresh = true) {
   state.permissionPreview = null;
   state.sessions = [];
   state.thankUsers = [];
+  state.moments = [];
+  renderMoments();
   state.showLogin = showLogin;
   applyBranding();
   applyAuthView();
+  try {
+    const data = await api('/api/me');
+    if (generation !== authGeneration || state.user) return;
+    state.permissions = data.permissions || {};
+    state.publicSettings = data.settings || state.publicSettings;
+    applyOrganizationData(data.organization);
+    applyBranding();
+    applyAuthView();
+  } catch (error) {
+    toast(`访客权限加载失败：${error.message}`);
+  }
   if (showLogin && maybeStartSsoAutoLogin()) return;
   if (refresh) await refreshAll();
 }
@@ -766,9 +793,11 @@ async function syncAuthState(force = false) {
   const now = Date.now();
   if (!force && now - lastAuthSyncAt < 15000) return;
   authSyncInFlight = true;
+  const generation = authGeneration;
   lastAuthSyncAt = now;
   try {
     const data = await api("/api/me");
+    if (generation !== authGeneration) return;
     if (state.user && !data.user) {
       await transitionToLoggedOut(true, true);
       toast("登录状态已结束，请重新登录");
@@ -1345,11 +1374,11 @@ function findMyDashboardRow(items = []) {
   return items.find((item) => Number(item.id) === Number(state.dashboardUserId || state.user?.id)) || null;
 }
 
-function renderOwnScoreSummary(score) {
+function renderOwnScoreSummary(score, showBlack = true) {
   if (!score) return `<p class="empty-note">当前周期暂无你的红黑榜积分。</p>`;
   return `
     <div class="rank-row"><span class="rank-no">红</span><strong>红榜加分</strong><span>${Number(score.red_points || 0)} 分</span></div>
-    <div class="rank-row"><span class="rank-no">黑</span><strong>黑榜记录</strong><span>${Number(score.black_points || 0)} 分</span></div>
+    ${showBlack ? `<div class="rank-row"><span class="rank-no">黑</span><strong>黑榜记录</strong><span>${Number(score.black_points || 0)} 分</span></div>` : ""}
   `;
 }
 
@@ -1374,12 +1403,16 @@ async function loadPersonalMorningMonth(userId = null) {
 }
 
 async function loadDashboard() {
-  const emptyScores = { totals: [], timeline: [] };
-  const emptyThanks = { stars: [] };
-  const emptyShifts = { by_user: [], by_machine: [] };
-  const emptyMorning = { today: { items: [] }, monthItems: [] };
+  const requestId = ++dashboardRequestId;
+  const initialContext = dashboardContext();
+  dashboardDetails.clear();
+  const emptyScores = { totals: [], timeline: [], unavailable: true };
+  const emptyThanks = { stars: [], unavailable: true };
+  const emptyShifts = { by_user: [], by_machine: [], unavailable: true };
+  const emptyMorning = { today: { items: [] }, monthItems: [], unavailable: true };
   if (isAdminView()) {
     const response = await api("/api/users/coordination").catch(() => ({ users: [] }));
+    if (requestId !== dashboardRequestId || initialContext !== dashboardContext()) return;
     state.dashboardUsers = response.users || [];
   } else {
     state.dashboardUsers = state.user ? [state.user] : [];
@@ -1393,26 +1426,39 @@ async function loadDashboard() {
   }
   const selectedUser = state.dashboardUsers.find((user) => Number(user.id) === Number(state.dashboardUserId));
   const metricOwner = selectedUser?.display_name || "我";
+  const context = dashboardContext();
+  const range = `${$("#fromDate").value} 至 ${$("#toDate").value}`;
   const targetQuery = isAdminView() && state.dashboardUserId ? `&user_id=${encodeURIComponent(state.dashboardUserId)}` : "";
   const [scores, thanks, shifts, morning] = await Promise.all([
-    canLoadModule("rules") ? api(`/api/dashboards/red-black?${periodQuery()}${targetQuery}`).catch(() => emptyScores) : emptyScores,
-    canLoadModule("thanks") ? api(`/api/dashboards/thank-you?${periodQuery()}${targetQuery}`).catch(() => emptyThanks) : emptyThanks,
-    canLoadModule("shifts") ? api(`/api/dashboards/shifts?${periodQuery()}${targetQuery}`).catch(() => emptyShifts) : emptyShifts,
+    canLoadModule("rules") ? api(`/api/dashboards/red-black?${periodQuery()}${targetQuery}&include_details=1`).catch(() => emptyScores) : emptyScores,
+    canLoadModule("thanks") ? api(`/api/dashboards/thank-you?${periodQuery()}${targetQuery}&include_details=1`).catch(() => emptyThanks) : emptyThanks,
+    canLoadModule("shifts") ? api(`/api/dashboards/shifts?${periodQuery()}${targetQuery}&include_details=1`).catch(() => emptyShifts) : emptyShifts,
     canLoadModule("morning") ? loadPersonalMorningMonth(isAdminView() ? state.dashboardUserId : null).catch(() => emptyMorning) : emptyMorning,
   ]);
+  if (requestId !== dashboardRequestId || context !== dashboardContext()) return;
   const myScore = findMyDashboardRow(scores.totals);
   const myThanks = findMyDashboardRow(thanks.stars);
   const myShift = findMyDashboardRow(shifts.by_user);
   const myMorningItems = (morning.today?.items || []).filter(isMyMorningItem);
-  $("#metricScore").textContent = `红 ${Number(myScore?.red_points || 0)} / 黑 ${Number(myScore?.black_points || 0)}`;
+  $("#metricScore").textContent = scores.show_black_points === false ? `红 ${Number(myScore?.red_points || 0)}` : `红 ${Number(myScore?.red_points || 0)} / 黑 ${Number(myScore?.black_points || 0)}`;
   $("#metricThanks").textContent = Number(myThanks?.thanks || 0);
   $("#metricHours").textContent = Number(myShift?.hours || 0);
   $("#metricMeetings").textContent = myMorningItems.length;
+  for (const [data, id] of [[scores, "metricScore"], [thanks, "metricThanks"], [shifts, "metricHours"], [morning, "metricMeetings"]]) {
+    if (data.unavailable) $(`#${id}`).textContent = "暂不可用";
+  }
+  dashboardDetails.update({
+    context, owner: metricOwner,
+    scores: { available: !scores.unavailable, period: range, summary: $("#metricScore").textContent, rows: scores.details || [], note: scores.show_black_details === false ? "黑榜明细已由管理员隐藏。" : scores.show_black_points === false ? "黑榜积分已由管理员隐藏。" : "" },
+    thanks: { available: !thanks.unavailable, period: `${range}（按感谢所属周筛选）`, summary: `${Number(myThanks?.thanks || 0)} 次感谢`, rows: thanks.details || [] },
+    shifts: { available: !shifts.unavailable, period: range, summary: `${Number(myShift?.hours || 0)} 小时`, rows: shifts.details || [] },
+    morning: { available: !morning.unavailable, period: `当天 ${morning.today?.date || iso(new Date())}`, summary: `${myMorningItems.length} 项（含保留至本工作日的已完成事项）`, rows: myMorningItems },
+  });
   if ($("#metricScoreLabel")) $("#metricScoreLabel").textContent = `${metricOwner}的红榜 / 黑榜积分`;
   if ($("#metricThanksLabel")) $("#metricThanksLabel").textContent = `${metricOwner}收到的 Thank You`;
   if ($("#metricHoursLabel")) $("#metricHoursLabel").textContent = `${metricOwner}的已排工时`;
   if ($("#metricMeetingsLabel")) $("#metricMeetingsLabel").textContent = `${metricOwner}的早例会事项`;
-  $("#scoreRank").innerHTML = renderOwnScoreSummary(myScore);
+  $("#scoreRank").innerHTML = renderOwnScoreSummary(myScore, scores.show_black_points !== false);
   $("#thanksRank").innerHTML = renderOwnThanksSummary(myThanks);
   const viewingOther = Boolean(isAdminView() && selectedUser && Number(selectedUser.id) !== Number(state.user?.id));
   const dashboardField = $("#dashboardUserField");
@@ -4718,10 +4764,11 @@ function renderLinks() {
   const canEdit = canOperate("links", "edit");
   const canDelete = canOperate("links", "delete");
   const canManage = canEdit || canDelete;
+  $("#linkResultCount").textContent = `${filtered.length} / ${state.links.length} 个链接`;
   const manageHeader = canManage ? "<th>操作</th>" : "";
   $("#linkList").innerHTML = filtered.length ? `
     <table class="link-list-table ${canManage ? "has-manage" : ""}">
-      <thead><tr><th>名称</th><th>适用范围</th><th>地址</th><th>点击</th>${manageHeader}</tr></thead>
+      <thead><tr><th>名称 / 说明</th><th>适用范围</th><th>地址</th><th>访问</th>${manageHeader}</tr></thead>
       <tbody>
         ${filtered.map((link) => {
           const scope = [...(link.machine_scope || []), ...(link.process_tags || [])];
@@ -4731,11 +4778,12 @@ function renderLinks() {
           <tr class="${Number(link.invalid) === 1 ? "link-invalid" : ""}">
             <td>
               <div class="link-single-line link-name-line" title="${escapeHtml(link.title)}">
-                <strong>${escapeHtml(link.title)}</strong>
+                ${Number(link.invalid) === 1 ? `<strong>${escapeHtml(link.title)}</strong>` : `<a class="link-title" href="/api/links/${link.id}/open" target="_blank" rel="noopener noreferrer">${escapeHtml(link.title)}</a>`}
                 <span class="tag link-tag ${linkTagTone(link.category, 0)}">${escapeHtml(link.category || "通用")}</span>
                 ${Number(link.pinned) === 1 ? '<span class="pill link-pinned-pill">置顶</span>' : ""}
                 ${Number(link.invalid) === 1 ? '<span class="pill warn">失效</span>' : ""}
               </div>
+              ${link.description ? `<p class="link-description-text">${escapeHtml(link.description)}</p>` : ""}
             </td>
             <td>
               <div class="link-scope-tags" title="${escapeHtml(scopeText)}">
@@ -4747,7 +4795,6 @@ function renderLinks() {
                 ${Number(link.invalid) === 1
                   ? `<span class="link-url disabled">${escapeHtml(link.url)}</span>`
                   : `<a class="link-url" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>`}
-                ${link.description ? `<span class="link-description"> · ${escapeHtml(link.description)}</span>` : ""}
               </div>
             </td>
             <td><span title="${escapeHtml(link.last_clicked_at || "")}">${Number(link.click_count || 0)} 次</span></td>
@@ -4760,7 +4807,7 @@ function renderLinks() {
                     ${canDelete ? `<button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>` : ""}
                   </div>
                 </div>
-                ${isAdminView() ? `<form class="link-quality-form" data-link-id="${link.id}">
+                ${isAdminView() ? `<details class="link-quality-details"><summary>质量管理</summary><form class="link-quality-form" data-link-id="${link.id}">
                   <select name="pinned">
                     <option value="0" ${Number(link.pinned) === 1 ? "" : "selected"}>不置顶</option>
                     <option value="1" ${Number(link.pinned) === 1 ? "selected" : ""}>置顶</option>
@@ -4773,12 +4820,12 @@ function renderLinks() {
                   <input name="process_tags" value="${escapeHtml((link.process_tags || []).join(", "))}" placeholder="流程标签">
                   <input name="quality_note" value="${escapeHtml(link.quality_note || "")}" placeholder="质量备注">
                   <button>保存</button>
-                </form>` : ""}
+                </form></details>` : ""}
               </td>` : ""}
           </tr>`;
         }).join("")}
       </tbody>
-    </table>` : "<p>没有匹配的链接</p>";
+    </table>` : `<div class="link-empty-state"><strong>${state.links.length ? "没有匹配的链接" : "暂无链接"}</strong><p>${state.links.length ? "试试其他关键词，或重置筛选。" : "链接库还没有收录链接。"}</p></div>`;
 }
 
 function renderShiftLine(shift) {
@@ -5918,7 +5965,10 @@ function moveMomentGallery(step) {
 }
 
 async function loadMoments() {
+  const generation = authGeneration;
+  const orgPath = selectedOrganizationPath();
   const data = await api("/api/team-moments");
+  if (generation !== authGeneration || orgPath !== selectedOrganizationPath()) return;
   state.moments = data.moments || [];
   renderMomentYearFilter();
   renderMoments();
@@ -6075,6 +6125,7 @@ function bindEvents() {
     event.preventDefault();
     try {
       const data = await api("/api/login", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+      authGeneration += 1;
       state.user = data.user;
       state.permissions = data.permissions;
       applyOrganizationData(data.organization || state.organization);
@@ -6102,9 +6153,11 @@ function bindEvents() {
     safeSessionSet("teamLoopSsoSkip", "1");
     try {
       await api("/api/logout", { method: "POST", body: "{}" });
-    } finally {
-      await transitionToLoggedOut(true, true);
+    } catch (error) {
+      toast(`退出失败：${error.message}`);
+      return;
     }
+    await transitionToLoggedOut(true, true);
     toast("已退出登录");
   });
 
@@ -6112,6 +6165,8 @@ function bindEvents() {
     safeSessionSet("teamLoopSsoSkip", "1");
     state.showLogin = true;
     applyAuthView();
+    $("#loginView")?.scrollIntoView({ block: "start" });
+    $("#loginForm input[name='username']")?.focus({ preventScroll: true });
   });
 
   $("#passwordBtn")?.addEventListener("click", openPasswordModal);
@@ -6589,6 +6644,11 @@ function bindEvents() {
   $("#linkCategoryFilter").addEventListener("change", renderLinks);
   $("#linkStatusFilter").addEventListener("change", renderLinks);
   $("#linkKeywordSearch").addEventListener("input", renderLinks);
+  $("#linkClearFilters").addEventListener("click", () => {
+    for (const id of ["#linkCategoryFilter", "#linkStatusFilter", "#linkKeywordSearch"]) $(id).value = "";
+    renderLinks();
+    $("#linkKeywordSearch").focus();
+  });
   $("#morningDate")?.addEventListener("change", async (event) => {
     state.morningDate = event.target.value || iso(new Date());
     await loadMorning().catch((error) => toast(error.message));

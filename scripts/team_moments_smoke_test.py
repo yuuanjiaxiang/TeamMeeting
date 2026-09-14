@@ -142,6 +142,18 @@ def main():
             if child_type != "image/png" or not child_data.startswith(b"\x89PNG"):
                 raise RuntimeError("Parent administrator could not load the selected child-team image")
 
+            request_bytes(guest, f"{base_url}{child_image_url}", expected=403)
+            with app.connect() as conn:
+                conn.execute("UPDATE module_permissions SET can_view=1 WHERE user_type_key='guest' AND module_key='moments'")
+            guest_list = request_json(guest, f"{base_url}/api/team-moments", org_path="ess/mo")["moments"]
+            assert any(item["id"] == child_moment["id"] for item in guest_list)
+            request_bytes(guest, f"{base_url}{child_image_url}")
+            request_bytes(guest, f"{base_url}{child_image_url.split('?')[0]}")
+            request_bytes(guest, f"{base_url}{child_image_url.split('?')[0]}?org=ess", expected=404)
+            with app.connect() as conn:
+                conn.execute("UPDATE module_permissions SET can_view=0 WHERE user_type_key='guest' AND module_key='moments'")
+            request_bytes(guest, f"{base_url}{child_image_url}", expected=403)
+
             updated = request_json(
                 user,
                 f"{base_url}/api/team-moments/{moment_id}",

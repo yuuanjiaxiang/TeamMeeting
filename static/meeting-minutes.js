@@ -31,75 +31,56 @@ export function plannedAgendaTime(meeting, itemIndex) {
 }
 
 export function buildMinutesDocument(meeting, thankData = null) {
-  const overview = meetingOverview(meeting);
   const items = (meeting.items || []).filter((item) => !isSystemThanks(item));
-  const attending = (meeting.attendance || []).filter((row) => ["present", "late"].includes(row.status)).map((row) => row.display_name).join("、");
-  const exceptions = (meeting.attendance || []).filter((row) => ["late", "leave", "absent"].includes(row.status))
-    .map((row) => `${row.display_name}（${({ late: "迟到", leave: "请假", absent: "缺席" })[row.status]}）`).join("、");
-  const schedule = `${meeting.meeting_date}${meeting.start_time ? ` ${meeting.start_time}` : ""}`;
-  const subject = `【会议纪要】${meeting.meeting_date} ${meeting.title}`;
-  const muted = "color:#667085;font-size:12px;line-height:1.7;";
-  const paragraph = "margin:6px 0 12px;font-size:14px;line-height:1.8;overflow-wrap:anywhere;word-break:break-word;";
-  const heading = "margin:26px 0 12px;padding-bottom:9px;border-bottom:2px solid #dce5ef;font-size:17px;color:#24354b;";
-  const cell = "padding:10px 12px;border-bottom:1px solid #e5e9ef;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;";
-  const block = (label, value, color = "#344054") => filled(value)
-    ? `<p style="${paragraph}color:${color};"><strong>${label}</strong><br>${html(value)}</p>` : "";
-  const actions = overview.actions.map((item, index) => `<tr>
-    <td style="${cell}"><span style="${muted}">${index + 1}. ${html(item.title)}</span><br>${html(item.next_steps)}</td>
-    <td style="${cell}width:16%;">${html(item.owner_name || "待指定")}</td>
-    <td style="${cell}width:23%;font-size:12px;">${html(item.due_date || "未设日期")}<br>${statusNames[item.status] || "待处理"}</td>
-  </tr>`).join("");
-  const thanks = thankData ? `<h2 style="${heading}">团队感谢</h2>
-    <p style="${paragraph}">本周 ${(thankData.votes || []).length} 条 Thank You</p>
-    ${(thankData.stars || []).length ? block("Thank You 之星", thankData.stars.map((star) => `${star.display_name} · ${Number(star.thanks || 0)} 次`).join("；")) : ""}
-    ${(thankData.votes || []).map((vote) => `<p style="${paragraph}"><strong>${html(vote.voter_name)} → ${html(vote.receiver_name)}</strong><br>${html(vote.evidence)}</p>`).join("")}` : "";
-  const markup = `<article class="meeting-document" style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#24354b;line-height:1.7;text-align:left;">
-    <div style="border-top:4px solid #365f98;padding:22px 0 18px;border-bottom:1px solid #dce5ef;">
-      <p style="margin:0 0 6px;color:#365f98;font-size:12px;font-weight:bold;">会议纪要</p>
-      <h1 style="font-size:24px;line-height:1.4;margin:0 0 12px;color:#1d2939;overflow-wrap:anywhere;word-break:break-word;">${html(meeting.title)}</h1>
-      <p style="margin:0;${muted}">${html(schedule)} · 召集人 ${html(meeting.creator || "未记录")}</p>
-      ${filled(meeting.summary) ? `<p style="${paragraph}margin-bottom:0;">${html(meeting.summary)}</p>` : ""}
-    </div>
-    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="width:100%;border-collapse:collapse;table-layout:fixed;margin:16px 0;background:#f4f7fb;">
-      <tr>${[[overview.total, "议题"], [overview.attending, "出席（含迟到）"], [overview.duration, "预计分钟"]].map(([value, label]) => `<td style="padding:12px;text-align:left;vertical-align:top;"><strong style="font-size:21px;color:#24354b;">${value}</strong><br><span style="${muted}">${label}</span></td>`).join("")}</tr>
-    </table>
-    <p style="${paragraph}"><strong>参会人员</strong>　${html(attending || "尚无出席签到")}</p>
-    ${exceptions ? block("签到备注", exceptions) : ""}
-    <h2 style="${heading}">下一步安排 <span style="font-size:12px;font-weight:normal;color:#667085;">${overview.actions.length} 项</span></h2>
-    ${actions ? `<table aria-label="下一步安排" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;width:100%;table-layout:fixed;font-size:14px;">
-      <thead><tr style="background:#f4f7fb;"><th style="${cell}">行动内容</th><th style="${cell}width:16%;">责任人</th><th style="${cell}width:23%;">截止 / 状态</th></tr></thead><tbody>${actions}</tbody></table>` : `<p style="${muted}">暂无下一步安排</p>`}
-    <h2 style="${heading}">议题纪要 <span style="font-size:12px;font-weight:normal;color:#667085;">已记录 ${overview.recorded} / ${overview.manual}</span></h2>
-    ${items.map((item, index) => `<section style="padding:16px 0;border-bottom:1px solid #e5e9ef;break-inside:avoid;">
-      <h3 style="margin:0 0 7px;font-size:16px;color:#24354b;overflow-wrap:anywhere;word-break:break-word;">${String(index + 1).padStart(2, "0")}　${html(item.title)}</h3>
-      <p style="margin:0 0 12px;${muted}">${html(item.type_name || item.section || "议题")} · ${html(item.owner_name || "待指定负责人")} · ${statusNames[item.status] || "待处理"}</p>
-      ${block("背景", item.detail)}
-      ${filled(item.minutes) ? block("讨论结论", item.minutes) : `<p style="${paragraph}color:#986515;">本议题尚未记录结论</p>`}
-      ${block("风险 / 待确认", item.open_issues, "#a2353c")}
-      ${block("会前材料", item.materials)}
-    </section>`).join("") || `<p style="${muted}">暂无手动记录的议题</p>`}
-    ${thanks}
-    <p style="margin:26px 0 0;padding-top:12px;border-top:1px solid #dce5ef;${muted}">${html(schedule)} · ${html(meeting.title)} · Team Loop</p>
-  </article>`;
-  const lines = [`# ${subject}`, "", `时间：${schedule} | 召集人：${meeting.creator || "未记录"}`,
-    `议题：${overview.total} | 出席（含迟到）：${overview.attending} | 预计时长：${overview.duration} 分钟`,
-    `参会：${attending || "尚无出席签到"}`];
-  if (exceptions) lines.push(`签到备注：${exceptions}`);
-  if (filled(meeting.summary)) lines.push("", meeting.summary);
-  lines.push("", "## 下一步安排", "");
-  overview.actions.forEach((item, index) => lines.push(`${index + 1}. ${item.title}：${item.next_steps}`, `   责任人：${item.owner_name || "待指定"}；截止：${item.due_date || "未设日期"}；状态：${statusNames[item.status] || "待处理"}`));
-  if (!overview.actions.length) lines.push("暂无下一步安排");
-  lines.push("", "## 议题纪要", "");
-  items.forEach((item, index) => {
-    lines.push(`### ${index + 1}. ${item.title}`, `${item.type_name || item.section || "议题"} · ${item.owner_name || "待指定负责人"} · ${statusNames[item.status] || "待处理"}`);
-    for (const [label, value] of [["背景", item.detail], ["讨论结论", item.minutes || "尚未记录"], ["风险 / 待确认", item.open_issues], ["会前材料", item.materials]]) {
-      if (filled(value)) lines.push("", `${label}：${value}`);
-    }
-    lines.push("");
+  const attendees = (meeting.attendance || []).filter((row) => ["present", "late"].includes(row.status)).map((row) => row.display_name).join("、");
+  const schedule = [meeting.meeting_date, meeting.start_time].filter(Boolean).join(" ");
+  const subject = `【会议纪要】${meeting.meeting_date || ""} ${meeting.title || ""}`;
+  const cell = "border:1px solid #555;padding:10px 12px;vertical-align:middle;overflow-wrap:anywhere;word-break:break-word;";
+  const metadata = [
+    ["会议主题", meeting.title || "未填写"],
+    ["会议时间", schedule || "未填写", "会议地点", meeting.location || "未填写"],
+    ["会议主持人", meeting.host_name || meeting.creator || "未填写", "会议记录人", meeting.recorder_name || "未填写"],
+    ["参会人员", attendees || "尚无出席签到"],
+  ];
+  const content = [];
+  if (filled(meeting.summary)) content.push(meeting.summary);
+  items.forEach((item) => {
+    const parts = [item.title, item.detail, filled(item.minutes) ? item.minutes : "尚未记录结论"];
+    if (filled(item.materials)) parts.push(`会前材料：${item.materials}`);
+    content.push(parts.filter(Boolean).join("\n"));
   });
+  const discussions = items.filter((item) => filled(item.open_issues)).map((item) => `${item.title}\n${item.open_issues}`);
+  const tasks = items.filter((item) => filled(item.next_steps)).map((item) =>
+    `${item.owner_name || "待指定负责人"}：${item.next_steps}\n关联议题：${item.title}；完成时间：${item.due_date || "未填写"}；状态：${statusNames[item.status] || "待处理"}`);
+  const sections = [
+    ["一、会议内容", content, "暂无会议内容"],
+    ["二、会议讨论事项", discussions, "暂无待确认的讨论事项"],
+    ["三、会议待办事项", tasks, "暂无下一步安排"],
+  ];
   if (thankData) {
-    lines.push("## 团队感谢", "", `本周 ${(thankData.votes || []).length} 条 Thank You`);
-    if (thankData.stars?.length) lines.push("Thank You 之星：" + thankData.stars.map((star) => `${star.display_name} · ${Number(star.thanks || 0)} 次`).join("；"));
-    (thankData.votes || []).forEach((vote) => lines.push(`- ${vote.voter_name} 感谢 ${vote.receiver_name}：${vote.evidence}`));
+    const thanks = (thankData.votes || []).map((vote) => `${vote.voter_name} 感谢 ${vote.receiver_name}：${vote.evidence}`);
+    if (thankData.stars?.length) thanks.unshift("Thank You 之星：" + thankData.stars.map((star) => `${star.display_name} · ${Number(star.thanks || 0)} 次`).join("；"));
+    sections.push(["团队感谢", thanks, "本周暂无 Thank You"]);
   }
+  const markup = `<article class="meeting-document" style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#111;line-height:1.7;">
+    <h1 style="text-align:center;font-size:30px;line-height:1.4;margin:16px 0 28px;color:#111;">会议纪要</h1>
+    <table cellpadding="0" cellspacing="0" width="100%" aria-label="会议纪要" style="width:100%;table-layout:fixed;border-collapse:collapse;border:2px solid #444;font-size:14px;background:#fff;">
+      <colgroup><col width="25%"><col width="25%"><col width="25%"><col width="25%"></colgroup>
+      <tbody>${metadata.map((row) => row.length === 2
+        ? `<tr><th scope="row" style="${cell}font-weight:normal;text-align:center;">${html(row[0])}</th><td colspan="3" style="${cell}">${html(row[1])}</td></tr>`
+        : `<tr><th scope="row" style="${cell}font-weight:normal;text-align:center;">${html(row[0])}</th><td style="${cell}">${html(row[1])}</td><th scope="row" style="${cell}font-weight:normal;text-align:center;">${html(row[2])}</th><td style="${cell}">${html(row[3])}</td></tr>`).join("")}
+      ${sections.map(([title, rows, empty]) => `<tr><th colspan="4" style="${cell}text-align:left;background:#eef0f3;font-size:16px;font-weight:600;">${title}</th></tr>${(rows.length ? rows : [empty]).map((value, index) => `<tr><td colspan="4" style="${cell}vertical-align:top;">${rows.length ? `${index + 1}. ` : ""}${html(value)}</td></tr>`).join("")}`).join("")}
+      </tbody>
+    </table>
+  </article>`;
+  const lines = ["# 会议纪要", ""];
+  metadata.forEach((row) => {
+    lines.push(`${row[0]}：${row[1]}`);
+    if (row.length === 4) lines.push(`${row[2]}：${row[3]}`);
+  });
+  sections.forEach(([title, rows, empty]) => {
+    lines.push("", `## ${title}`, "");
+    lines.push(...(rows.length ? rows.map((value, index) => `${index + 1}. ${value}`) : [empty]));
+  });
   return { html: markup, text: lines.join("\n"), subject };
 }

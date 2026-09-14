@@ -428,6 +428,48 @@ def main():
             }
             if mo_machine["id"] in ws_machine_ids:
                 raise RuntimeError("Machine configuration leaked into a child team")
+            # Workbench details must reuse the metric scope, without widening ordinary reads.
+            with app.connect() as conn:
+                for kind, points in [("red", 7), ("black", -3)]:
+                    conn.execute(
+                        "INSERT INTO red_black_scores(user_id,kind,points,score_date,reason,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                        (ws_user_id, kind, points, app.today_iso(), "dashboard detail test", admin_id, app.now_iso()),
+                    )
+                conn.execute(
+                    "INSERT INTO shifts(machine_id,user_id,shift_type,shift_date,hours,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (mo_machine["id"], user_id, "day", app.today_iso(), 8, "dashboard shift test", admin_id, app.now_iso()),
+                )
+            period = f"from={app.week_start(app.today_iso())}&to={app.today_iso()}&include_details=1"
+            for kind, target, rows_key, value_key, detail_key in [
+                ("red-black", ws_user_id, "totals", "red_points", "user_id"),
+                ("shifts", user_id, "by_user", "hours", "user_id"),
+                ("thank-you", ws_user_id, "stars", "thanks", "receiver_id"),
+            ]:
+                payload = request_json(admin_opener, base_url, f"/api/dashboards/{kind}?{period}&user_id={target}", org_path="ess/mo")
+                details = payload["details"]
+                assert details and all(row[detail_key] == target for row in details), payload
+                total = next(row[value_key] for row in payload[rows_key] if row["id"] == target)
+                expected = sum(abs(row["points"]) for row in details if row["kind"] == "red") if kind == "red-black" else sum(row["hours"] for row in details) if kind == "shifts" else len(details)
+                assert total == expected, payload
+                default_payload = request_json(admin_opener, base_url, f"/api/dashboards/{kind}?{period}", org_path="ess/mo")
+                assert all(row["id"] == user_id for row in default_payload[rows_key]), default_payload
+                if target == ws_user_id:
+                    normal = request_json(ws_opener, base_url, f"/api/dashboards/{kind}?{period}&user_id={user_id}", org_path="ess/mo/ws")
+                    assert all(row[detail_key] == ws_user_id for row in normal["details"]), normal
+                expect_http_status(admin_opener, base_url, f"/api/dashboards/{kind}?{period}&user_id={rs_user_id}", 404, org_path="ess/mo/ws")
+                old = request_json(admin_opener, base_url, f"/api/dashboards/{kind}?from=2000-01-01&to=2000-01-02&include_details=1&user_id={target}", org_path="ess/mo")
+                assert old["details"] == [], old
+            with app.connect() as conn:
+                conn.execute("UPDATE system_settings SET value='0' WHERE key IN ('red_black_show_black_points','red_black_show_black_details')")
+            hidden = request_json(ws_opener, base_url, f"/api/dashboards/red-black?{period}", org_path="ess/mo/ws")
+            assert all(row["kind"] == "red" for row in hidden["details"]), hidden
+            assert all(row["black_points"] == 0 for row in hidden["totals"]), hidden
+            with app.connect() as conn:
+                conn.execute("UPDATE system_settings SET value='1' WHERE key='red_black_show_black_details'")
+            visible = request_json(ws_opener, base_url, f"/api/dashboards/red-black?{period}", org_path="ess/mo/ws")
+            assert any(row["kind"] == "black" and row["points"] is None for row in visible["details"]), visible
+            with app.connect() as conn:
+                conn.execute("UPDATE system_settings SET value='1' WHERE key='red_black_show_black_points'")
             root_moment = request_json(
                 admin_opener,
                 base_url,
