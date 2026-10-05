@@ -40,6 +40,7 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 - [二次开发指南](docs/DEVELOPMENT.md)
 - [项目跟进功能与远端合并说明](docs/PROJECT_FOLLOWUP.md)
 - [HTTP API 参考](docs/API.md)
+- [企业 SSO 配置与登录流程](docs/SSO_LOGIN_FLOW.md)
 - [数据库与备份](docs/DATABASE.md)
 - [常见问题](docs/TROUBLESHOOTING.md)
 - [本地业务知识库与 AI 问答接入](docs/KNOWLEDGE_BASE.md)

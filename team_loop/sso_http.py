@@ -6,7 +6,7 @@ import json
 import re
 import threading
 import time
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import getproxies, proxy_bypass
 
 from .common import AppError
@@ -216,7 +216,7 @@ def _fetch_once(url, method, body, headers):
         _SSO_HTTP_POOL.release(connection_key, connection, reusable)
 
 
-def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份平台", _redirects=0):
+def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份平台", _redirects=0, allow_redirects=True):
     validate_sso_url(url, f"{purpose}地址")
     method = method.upper()
     request_headers = {"Accept": "application/json", "User-Agent": "TeamLoop-OIDC/1.1", **(headers or {})}
@@ -234,7 +234,8 @@ def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份
             break
         except TimeoutError as exc:
             last_error = exc
-            break
+            detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(exc)).strip()[:160]
+            raise AppError(502, f"{purpose}请求超时：{detail}") from exc
         except (http.client.HTTPException, OSError) as exc:
             last_error = exc
     else:
@@ -243,6 +244,8 @@ def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份
         raise AppError(502, f"无法连接{purpose}，请检查地址、DNS、代理和防火墙{suffix}") from last_error
 
     if status in SSO_REDIRECT_STATUSES:
+        if not allow_redirects:
+            raise AppError(502, f"{purpose}不允许重定向")
         location = response_headers.get("Location") or response_headers.get("location")
         if not location or _redirects >= 3:
             raise AppError(502, f"{purpose}返回了无效或过多的重定向")
@@ -273,6 +276,37 @@ def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份
     if not isinstance(data, dict):
         raise AppError(502, f"{purpose}响应必须是 JSON 对象")
     return data
+
+
+def fetch_sso_userinfo(discovery, config, access_token, purpose="UserInfo 接口"):
+    url = discovery["userinfo_endpoint"]
+    if config.get("profile") == "sicarrier":
+        parsed = urlparse(url)
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                 if key not in {"access_token", "scope", "client_id"}]
+        query.extend((key, value) for key, value in {
+            "access_token": access_token, "scope": config["scopes"], "client_id": config["client_id"],
+        }.items())
+        url = urlunparse(parsed._replace(query=urlencode(query)))
+        headers = {}
+    else:
+        headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        claims = fetch_json(url, headers=headers, purpose=purpose, allow_redirects=False)
+        if "errorCode" in claims and str(claims["errorCode"]) not in ("", "0", "200", "000000"):
+            code = str(claims["errorCode"])
+            detail = str(claims.get("errorDesc") or "身份平台拒绝获取用户信息")
+            raise AppError(502, f"{purpose}返回业务错误（{code}）：{detail}")
+        return claims
+    except AppError as exc:
+        message = exc.message
+        # Providers may echo the query URL in an error; never surface the token.
+        for sensitive in (access_token, urlencode({"token": access_token}).split("=", 1)[1]):
+            if sensitive:
+                message = message.replace(sensitive, "[已隐藏]")
+        message = re.sub(r"(?i)(access_token(?:=|%3d))[^&\s\"<>]+", r"\1[已隐藏]", message)
+        message = re.sub(r"[\x00-\x1f\x7f]+", " ", message)
+        raise AppError(exc.status, message[:500]) from None
 
 
 def load_oidc_discovery(config, force_refresh=False):

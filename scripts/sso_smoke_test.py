@@ -23,6 +23,7 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
     subject = "smoke-subject"
     display_name = "SSO 冒烟用户"
     groups = ["SMOKE-MO"]
+    profile = "standard"
 
     def log_message(self, _format, *_args):
         return
@@ -50,7 +51,15 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/authorize":
             query = parse_qs(parsed.query)
-            self.__class__.expected_challenge = query["code_challenge"][0]
+            if self.profile == "sicarrier":
+                if "code_challenge" in query or "code_challenge_method" in query:
+                    self.send_json({"error": "pkce_not_supported"}, 400)
+                    return
+            else:
+                if query.get("code_challenge_method") != ["S256"]:
+                    self.send_json({"error": "pkce_required"}, 400)
+                    return
+                self.__class__.expected_challenge = query["code_challenge"][0]
             callback = f"{query['redirect_uri'][0]}?{urlencode({'code': 'smoke-code', 'state': query['state'][0]})}"
             self.send_response(302)
             self.send_header("Location", callback)
@@ -58,6 +67,15 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if parsed.path == "/userinfo":
+            if self.profile == "sicarrier":
+                query = parse_qs(parsed.query)
+                if (self.headers.get("Authorization") or query.get("access_token") != ["smoke-access-token"]
+                    or query.get("scope") != ["base.profile"] or query.get("client_id") != ["team-loop-smoke"]):
+                    self.send_json({"errorCode": "TOKEN_MISSING", "errorDesc": "query token required"})
+                    return
+                self.send_json({"id": self.subject, "employeeNumber": self.employee_id,
+                                "displayNameCn": self.display_name, "employeeType": self.groups})
+                return
             if self.headers.get("Authorization") != "Bearer smoke-access-token":
                 self.send_json({"error": "invalid_token"}, 401)
                 return
@@ -71,6 +89,13 @@ class FakeOAuth2Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length") or 0)
         form = parse_qs(self.rfile.read(length).decode("utf-8"))
+        if self.profile == "sicarrier":
+            if ("code_verifier" in form or self.headers.get("Authorization")
+                or form.get("client_secret") != ["smoke-secret"] or form.get("code") != ["smoke-code"]):
+                self.send_json({"error": "invalid_client"}, 400)
+                return
+            self.send_json({"access_token": "smoke-access-token", "token_type": "Bearer"})
+            return
         verifier = form.get("code_verifier", [""])[0]
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
         if form.get("code", [""])[0] != "smoke-code" or challenge != self.expected_challenge:
@@ -88,7 +113,9 @@ def start_server(handler):
 
 def main():
     parser = argparse.ArgumentParser(description="Run an isolated OAuth2 SSO integration smoke test")
-    parser.parse_args()
+    parser.add_argument("--profile", choices=("standard", "sicarrier"), default="standard")
+    args = parser.parse_args()
+    FakeOAuth2Handler.profile = args.profile
     with tempfile.TemporaryDirectory(prefix="team-loop-sso-") as temporary_directory:
         os.environ["TEAM_LOOP_DB_PATH"] = str(Path(temporary_directory) / "sso-smoke.db")
         os.environ["TEAM_LOOP_DATA_DIR"] = temporary_directory
@@ -108,6 +135,7 @@ def main():
                     "sso_enabled": "1",
                     "sso_auto_login": "1",
                     "sso_mode": "manual",
+                    "sso_profile": args.profile,
                     "sso_authorization_url": f"{FakeOAuth2Handler.issuer}/authorize",
                     "sso_token_url": f"{FakeOAuth2Handler.issuer}/token",
                     "sso_userinfo_url": f"{FakeOAuth2Handler.issuer}/userinfo",
@@ -119,10 +147,14 @@ def main():
                     "sso_auto_provision": "1",
                     "sso_default_user_type": app.DEFAULT_USER_TYPE_KEY,
                 }
+                if args.profile == "sicarrier":
+                    values.update(sso_scopes="base.profile", sso_username_claim="employeeNumber",
+                                  sso_display_name_claim="displayNameCn", sso_group_claim="employeeType",
+                                  sso_redirect_uri=f"{app_url}/api/auth/oauth/callback")
                 for key, value in values.items():
                     conn.execute("UPDATE system_settings SET value=? WHERE key=?", (value, key))
                 conn.execute(
-                    "UPDATE users SET employee_id='E10086', org_unit_id=(SELECT id FROM org_units WHERE name='MO') WHERE username='user'"
+                    "UPDATE users SET employee_id='e10086', org_unit_id=(SELECT id FROM org_units WHERE name='MO') WHERE username='user'"
                 )
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='MO'", (json.dumps(["SMOKE-MO"]),))
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='WS'", (json.dumps(["SMOKE-WS"]),))
@@ -172,7 +204,7 @@ def main():
             if (
                 diagnostic.get("status") != "matched"
                 or diagnostic.get("employee_id") != "E10086"
-                or diagnostic.get("username_claim_used") != "userName"
+                or diagnostic.get("username_claim_used") != ("employeeNumber" if args.profile == "sicarrier" else "userName")
             ):
                 raise RuntimeError(f"Huawei-style UserInfo diagnostic failed: {diagnostic}")
 
@@ -198,12 +230,14 @@ def main():
                     "SELECT employee_id, auth_source, external_subject FROM users WHERE employee_id='E10086'"
                 ).fetchone()
                 employee_count = conn.execute("SELECT COUNT(*) FROM users WHERE LOWER(employee_id)=LOWER('E10086')").fetchone()[0]
-            if not identity or identity["auth_source"] != "oauth2" or not identity["external_subject"]:
+            if not identity or identity["auth_source"] != "oauth2" or bool(identity["external_subject"]) != (args.profile == "standard"):
                 raise RuntimeError("OAuth2 employee identity was not persisted")
             if employee_count != 1:
                 raise RuntimeError("SSO employee matching created a duplicate user")
 
             FakeOAuth2Handler.groups = ["SMOKE-WS"]
+            if args.profile == "sicarrier":
+                FakeOAuth2Handler.subject = "changed-subject-same-employee"
             preserve_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             with preserve_opener.open(f"{app_url}/api/sso/login", timeout=15):
                 pass
@@ -259,7 +293,20 @@ def main():
                 assigned = (json.load(response).get("user") or {})
             if assigned.get("org_unit_name") != "WS" or assigned.get("suggested_org_unit_id"):
                 raise RuntimeError(f"Administrator could not adopt the suggested organization: {assigned}")
-            print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "org_approved": True, "pkce": "S256"}, ensure_ascii=False))
+
+            # A matching username is not proof of employee identity.
+            FakeOAuth2Handler.employee_id = "user"
+            FakeOAuth2Handler.subject = "username-collision"
+            collision_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            with collision_opener.open(f"{app_url}/api/sso/login", timeout=15) as response:
+                response.read()
+                error = parse_qs(urlparse(response.geturl()).query).get("sso_error", [""])[0]
+            if "用户名冲突" not in error:
+                raise RuntimeError(f"Username collision was not rejected: {error}")
+            with collision_opener.open(f"{app_url}/api/me", timeout=15) as response:
+                if json.load(response).get("user"):
+                    raise RuntimeError("Username collision issued a session")
+            print(json.dumps({"status": "ok", "profile": args.profile, "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "org_approved": True, "pkce": "disabled" if args.profile == "sicarrier" else "S256"}, ensure_ascii=False))
         finally:
             app_server.shutdown()
             oidc_server.shutdown()

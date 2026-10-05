@@ -117,10 +117,13 @@ def main():
         original_proxy = os.environ.get("HTTP_PROXY")
         original_no_proxy = os.environ.get("NO_PROXY")
         original_proxy_bypass = sso_http.proxy_bypass
+        original_getproxies = sso_http.getproxies
         try:
             os.environ["HTTP_PROXY"] = f"http://127.0.0.1:{proxy.server_port}"
             os.environ["NO_PROXY"] = ""
             sso_http.proxy_bypass = lambda _host: False
+            # Exercise only the local fixture, regardless of inherited proxy casing.
+            sso_http.getproxies = lambda: {"http": f"http://127.0.0.1:{proxy.server_port}"}
             app.clear_sso_http_state()
             target_url = "http://localhost:65530/userinfo"
             proxied = app.fetch_json(target_url, purpose="Proxy smoke UserInfo")
@@ -128,6 +131,7 @@ def main():
                 raise RuntimeError({"proxied": proxied, "targets": ForwardProxyHandler.requested_targets})
         finally:
             sso_http.proxy_bypass = original_proxy_bypass
+            sso_http.getproxies = original_getproxies
             if original_proxy is None:
                 os.environ.pop("HTTP_PROXY", None)
             else:

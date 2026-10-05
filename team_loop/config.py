@@ -66,6 +66,7 @@ DEFAULT_SETTINGS = [
     ("sso_enabled", "启用企业 SSO", "0", "boolean", "启用后登录页显示企业 SSO 入口"),
     ("sso_auto_login", "首页自动 SSO 登录", "1", "boolean", "未登录访问首页时自动跳转企业登录；失败后回退系统账号登录"),
     ("sso_mode", "OAuth2 配置方式", "discovery", "choice", "推荐使用 OIDC 自动发现；不支持 Discovery 时选择手动 OAuth2 端点"),
+    ("sso_profile", "身份平台协议", "standard", "choice", "标准 OAuth2/OIDC 或 Sicarrier 兼容协议；Sicarrier 需手动配置端点"),
     ("sso_button_label", "SSO 按钮名称", "企业 SSO 登录", "text", "登录页统一身份入口的显示名称"),
     ("sso_issuer_url", "OIDC Issuer 地址", "", "text", "企业身份平台的 Issuer，不含 /.well-known/openid-configuration"),
     ("sso_authorization_url", "OAuth2 认证地址", "", "text", "用户登录时跳转的认证地址，例如 https://sso.example.com/oauth2/authorize"),
@@ -144,5 +145,4 @@ INITIAL_TYPE_OPERATIONS = {
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}
 MORNING_PRIORITIES = {"low", "normal", "high"}
 ORG_VISIBILITY_MODES = {"all", "subtree", "unit"}
-
 

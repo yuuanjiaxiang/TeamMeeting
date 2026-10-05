@@ -69,7 +69,7 @@ class AccountsHandlerMixin:
             nonce = secrets.token_urlsafe(32)
             verifier = secrets.token_urlsafe(64)
             now = dt.datetime.now().replace(microsecond=0)
-            conn.execute("DELETE FROM sso_login_states WHERE expires_at<? OR used_at IS NOT NULL", ((now - dt.timedelta(minutes=10)).isoformat(),))
+            conn.execute("DELETE FROM sso_login_states WHERE expires_at<=? OR used_at IS NOT NULL", (now.isoformat(),))
             conn.execute(
                 """
                 INSERT INTO sso_login_states(state_hash, nonce, code_verifier, redirect_uri, return_to, created_at, expires_at)
@@ -84,9 +84,9 @@ class AccountsHandlerMixin:
             "scope": config["scopes"],
             "state": state,
             "nonce": nonce,
-            "code_challenge": base64url_digest(verifier),
-            "code_challenge_method": "S256",
         }
+        if config.get("profile") != "sicarrier":
+            parameters.update(code_challenge=base64url_digest(verifier), code_challenge_method="S256")
         separator = "&" if "?" in discovery["authorization_endpoint"] else "?"
         self.send_redirect(f"{discovery['authorization_endpoint']}{separator}{urlencode(parameters)}")
 
@@ -100,6 +100,9 @@ class AccountsHandlerMixin:
             raise AppError(400, "SSO 回调缺少授权码或状态参数")
         now = dt.datetime.now().replace(microsecond=0)
         with connect() as conn:
+            # Serialize validation and consumption before making any provider request.
+            conn.execute("BEGIN IMMEDIATE")
+            now = dt.datetime.now().replace(microsecond=0)
             config = sso_configuration(conn)
             row = conn.execute(
                 "SELECT * FROM sso_login_states WHERE state_hash=? AND used_at IS NULL",
@@ -107,7 +110,7 @@ class AccountsHandlerMixin:
             ).fetchone()
             if not row or (parse_iso_datetime(row["expires_at"]) or now) <= now:
                 raise AppError(400, "SSO 登录请求已失效，请重新发起登录")
-            conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=?", (now.isoformat(), token_digest(state)))
+            conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=? AND used_at IS NULL", (now.isoformat(), token_digest(state)))
             redirect_uri = row["redirect_uri"]
             verifier = row["code_verifier"]
             return_to = sanitize_sso_return_to(row["return_to"])
@@ -119,12 +122,14 @@ class AccountsHandlerMixin:
             "code": code,
             "redirect_uri": redirect_uri,
             "client_id": config["client_id"],
-            "code_verifier": verifier,
         }
+        sicarrier = config.get("profile") == "sicarrier"
+        if not sicarrier:
+            token_form["code_verifier"] = verifier
         token_headers = {}
         if config["client_secret"]:
             supported = discovery.get("token_endpoint_auth_methods_supported") or []
-            if "client_secret_basic" in supported:
+            if not sicarrier and "client_secret_basic" in supported:
                 credentials = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode("utf-8")).decode("ascii")
                 token_headers["Authorization"] = f"Basic {credentials}"
             else:
@@ -140,11 +145,7 @@ class AccountsHandlerMixin:
         if not access_token:
             available = "、".join(sorted(str(key) for key in tokens.keys())[:12]) or "无"
             raise AppError(502, f"Access Token 接口未返回 access_token，可用字段：{available}")
-        claims = fetch_json(
-            discovery["userinfo_endpoint"],
-            headers={"Authorization": f"Bearer {access_token}"},
-            purpose="UserInfo 接口",
-        )
+        claims = fetch_sso_userinfo(discovery, config, access_token)
         identity_claims = resolve_sso_identity(claims, config)
         sso_groups = identity_claims["groups"]
         employee_id = identity_claims["employee_id"]
@@ -162,6 +163,7 @@ class AccountsHandlerMixin:
         identity = f"{provider_key}|{subject}"
         auth_source = "oauth2" if config.get("mode") == "manual" else "oidc"
         with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             matched_org = match_sso_org_unit(conn, sso_groups)
             matched_org_id = matched_org["id"] if matched_org else None
             root_org = next(
@@ -187,28 +189,30 @@ class AccountsHandlerMixin:
                 WHERE u.auth_source IN ('oidc', 'oauth2') AND u.external_subject=?
                 """,
                 (identity,),
-            ).fetchone()
+            ).fetchone() if not sicarrier else None
             linked_existing = False
             created = False
             if not user:
                 existing = conn.execute(
-                    "SELECT * FROM users WHERE LOWER(employee_id)=LOWER(?) OR LOWER(username)=LOWER(?) ORDER BY CASE WHEN LOWER(employee_id)=LOWER(?) THEN 0 ELSE 1 END LIMIT 1",
-                    (employee_id, employee_id, employee_id),
+                    "SELECT * FROM users WHERE LOWER(employee_id)=LOWER(?) LIMIT 1",
+                    (employee_id,),
                 ).fetchone()
                 if existing:
                     if not existing["active"]:
                         raise AppError(403, "该企业账号对应的系统用户已停用")
-                    if existing["external_subject"] and existing["external_subject"] != identity:
+                    if not sicarrier and existing["external_subject"] and existing["external_subject"] != identity:
                         raise AppError(409, "该系统账号已绑定其他企业身份")
                     conn.execute(
                         "UPDATE users SET auth_source=?, external_subject=?, employee_id=? WHERE id=?",
-                        (auth_source, identity, employee_id, existing["id"]),
+                        (auth_source, None if sicarrier else identity, employee_id, existing["id"]),
                     )
                     linked_existing = True
                     user_id = existing["id"]
                 else:
                     if not config["auto_provision"]:
                         raise AppError(403, "该企业账号尚未在系统中创建，请联系管理员")
+                    if conn.execute("SELECT id FROM users WHERE LOWER(username)=LOWER(?)", (username,)).fetchone():
+                        raise AppError(409, "该工号与已有系统用户名冲突，请联系管理员核对工号")
                     user_type = conn.execute(
                         "SELECT key FROM user_types WHERE key=? AND active=1",
                         (GUEST_USER_TYPE_KEY,),
@@ -227,7 +231,7 @@ class AccountsHandlerMixin:
                         """,
                         (
                             username, employee_id, salt, password_hash, display_name, "user", user_type["key"],
-                            provision_org_id, now_iso(), auth_source, identity, matched_org_id,
+                            provision_org_id, now_iso(), auth_source, None if sicarrier else identity, matched_org_id,
                             json.dumps(sso_groups, ensure_ascii=False), now.isoformat(),
                         ),
                     )
@@ -1511,5 +1515,3 @@ class AccountsHandlerMixin:
                 (member_id, user["id"], kind, content, now_iso()),
             )
         return {"message": "已发布", "members": self.list_members()}
-
-

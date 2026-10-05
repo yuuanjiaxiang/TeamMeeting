@@ -523,6 +523,7 @@ class SystemHandlerMixin:
         result = {
             "enabled": config["enabled"],
             "mode": config["mode"],
+            "profile": config["profile"],
             "auto_provision": config["auto_provision"],
             "client_secret_configured": bool(config["client_secret"]),
             "missing": missing,
@@ -535,7 +536,7 @@ class SystemHandlerMixin:
             "connection_pool": sso_http_pool_stats(),
         }
         result["warnings"] = []
-        if config["mode"] == "manual" and config["scopes"] != "get_user_info":
+        if config["mode"] == "manual" and config.get("profile") != "sicarrier" and config["scopes"] != "get_user_info":
             result["warnings"].append(
                 "华为云 OneAccess 的 OAuth2 Scope 固定为 get_user_info；当前值不同，请确认身份平台要求"
             )
@@ -552,11 +553,7 @@ class SystemHandlerMixin:
         result["userinfo_host"] = urlparse(discovery["userinfo_endpoint"]).netloc
         if not access_token:
             return result
-        claims = fetch_json(
-            discovery["userinfo_endpoint"],
-            headers={"Authorization": f"Bearer {access_token}"},
-            purpose="UserInfo 诊断",
-        )
+        claims = fetch_sso_userinfo(discovery, config, access_token, purpose="UserInfo 诊断")
         result["connection_pool"] = sso_http_pool_stats()
         identity_claims = resolve_sso_identity(claims, config)
         available_claims = sorted(str(key) for key in claims.keys())[:40]
@@ -579,13 +576,10 @@ class SystemHandlerMixin:
                 """
                 SELECT id, display_name, username, employee_id, active, auth_source
                 FROM users
-                WHERE LOWER(employee_id)=LOWER(?) OR LOWER(username)=LOWER(?)
-                ORDER BY CASE WHEN LOWER(employee_id)=LOWER(?) THEN 0 ELSE 1 END
+                WHERE LOWER(employee_id)=LOWER(?)
                 LIMIT 1
                 """,
                 (
-                    identity_claims["employee_id"],
-                    identity_claims["employee_id"],
                     identity_claims["employee_id"],
                 ),
             ).fetchone()
@@ -648,6 +642,8 @@ class SystemHandlerMixin:
                     validate_sso_url(normalized, labels[key])
                 if key == "sso_mode" and normalized not in ("discovery", "manual"):
                     raise AppError(400, "OAuth2 配置方式不正确")
+                if key == "sso_profile" and normalized not in ("standard", "sicarrier"):
+                    raise AppError(400, "身份平台协议不正确")
                 if key == "sso_default_user_type":
                     normalized = GUEST_USER_TYPE_KEY
                 conn.execute(
@@ -657,6 +653,8 @@ class SystemHandlerMixin:
             config = sso_configuration(conn)
             if config["enabled"]:
                 if not sso_configuration_ready(config):
+                    if config.get("profile") == "sicarrier":
+                        raise AppError(400, f"启用 Sicarrier SSO 前必须配置：{'、'.join(sso_missing_fields(config))}")
                     if config["mode"] == "manual":
                         raise AppError(400, "启用企业 SSO 前必须填写 Client ID 以及三个 OAuth2 服务地址")
                     raise AppError(400, "启用企业 SSO 前必须填写 OIDC Issuer 和 Client ID")
@@ -754,6 +752,4 @@ class SystemHandlerMixin:
         if not backup:
             raise AppError(500, "备份失败")
         return {"message": "备份已创建", "backup": backup, "backups": self.list_backups()}
-
-
 
