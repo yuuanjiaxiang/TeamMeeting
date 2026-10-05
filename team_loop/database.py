@@ -682,6 +682,10 @@ def ensure_morning_carryover(conn, item_date):
               AND i.status!='done'
               AND COALESCE(owner_type.include_in_morning, 1)=1
               AND NOT EXISTS (
+                  SELECT 1 FROM morning_items present
+                  WHERE present.item_date=? AND COALESCE(present.root_id,present.id)=COALESCE(i.root_id,i.id)
+              )
+              AND NOT EXISTS (
                   SELECT 1
                   FROM morning_items newer
                   WHERE COALESCE(newer.root_id, newer.id)=COALESCE(i.root_id, i.id)
@@ -693,28 +697,21 @@ def ensure_morning_carryover(conn, item_date):
               )
             ORDER BY i.owner_id, i.id
             """,
-            (item_date, item_date),
+            (item_date, item_date, item_date),
         ).fetchall()
     )
     carried_count = 0
     for item in source_items:
         root_id = item.get("root_id") or item["id"]
-        exists = conn.execute(
-            """
-            SELECT id
-            FROM morning_items
-            WHERE item_date=? AND COALESCE(root_id, id)=?
-            """,
-            (item_date, root_id),
-        ).fetchone()
-        if exists:
-            continue
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO morning_items(
                 owner_id, item_date, title, detail, status, priority, blocker, due_date,
                 root_id, carry_from_id, carried_from_date, updated_by, created_at, updated_at, active
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,1
+              WHERE NOT EXISTS (
+                  SELECT 1 FROM morning_items WHERE item_date=? AND COALESCE(root_id,id)=?
+              )
             """,
             (
                 item["owner_id"],
@@ -731,9 +728,11 @@ def ensure_morning_carryover(conn, item_date):
                 item.get("updated_by"),
                 now_iso(),
                 now_iso(),
+                item_date,
+                root_id,
             ),
         )
-        carried_count += 1
+        carried_count += cursor.rowcount
     return carried_count
 
 
@@ -1621,8 +1620,18 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_morning_order ON users(org_unit_id, morning_sort_order, active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sso_states_expiry ON sso_login_states(expires_at, used_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_morning_date_owner ON morning_items(item_date, active, owner_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_morning_owner_date ON morning_items(owner_id, item_date, active)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_morning_chain_date ON morning_items(COALESCE(root_id,id), item_date, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scores_user_date ON red_black_scores(user_id, score_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scores_date ON red_black_scores(score_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_thanks_receiver_week ON thank_you_votes(receiver_id, week_start)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_items_meeting ON meeting_items(meeting_id, deleted_at, sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replies_post_live ON team_post_replies(post_id, deleted_at, created_at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reply_reactions_reply ON team_reply_reactions(reply_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_page ON team_posts(org_unit_id, deleted_at, pinned DESC, COALESCE(updated_at,created_at) DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moments_org_date ON team_moments(org_unit_id, deleted_at, event_date DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moment_images_moment ON team_moment_images(moment_id, sort_order, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meetings_org_date ON meetings(org_unit_id, meeting_date)")

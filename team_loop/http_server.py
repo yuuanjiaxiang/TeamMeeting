@@ -17,7 +17,17 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, request_handler_class)
 
     def process_request(self, request, client_address):
-        self._worker_slots.acquire()
+        request.settimeout(20)
+        if not self._worker_slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                payload = b'{"error":"Server busy; retry later"}'
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 2\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + str(len(payload)).encode("ascii") + b"\r\n\r\n" + payload)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
         try:
             super().process_request(request, client_address)
         except Exception:

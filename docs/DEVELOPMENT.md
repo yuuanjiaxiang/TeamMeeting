@@ -315,3 +315,7 @@ python scripts\seed_scale_mock.py --target-users 100 --seed 20260811
 ```
 
 Mock 账号仅用于灰度体验，禁止把灰度数据库、`mock_backups/` 或统一测试密码提交到 Git，也禁止将生成后的灰度库提升或复制为正式数据库。重新执行 `deploy.ps1 -Action Gray` 会从正式库重新制作灰度快照，因此会清除此前生成的 Mock 数据；需要体验时应在灰度部署完成后最后执行本脚本。
+# 性能与模块边界更新
+
+2026-10-05：页面按模块注册和加载、请求调度、分页及新模块接入约束见 [PERFORMANCE.md](PERFORMANCE.md)。排班明细位于 `static/shift-workspace.js` / `.css`，讨论分页位于 `team_loop/handlers/forum_reads.py`，缓存和后台维护位于 `team_loop/runtime_performance.py`。新增功能优先在所属模块中实现；现存公共入口中的旧逻辑尚未全部迁出。
+

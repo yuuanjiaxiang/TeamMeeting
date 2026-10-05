@@ -7,7 +7,7 @@ export function matchesMorningFocus(item, focus) {
   return ({
     all: true,
     active: item.status !== "done",
-    risk: Boolean(item.needs_attention),
+    risk: item.status !== "done" && Boolean(item.needs_attention || item.status === "risk" || item.blocker?.trim()),
     overdue: Boolean(item.is_overdue),
     due: Boolean(item.due_today),
     stale: Boolean(item.is_stale),
@@ -211,6 +211,11 @@ export function createMorningFollowup({ state, api, escapeHtml, toast, render, o
       const button = event.target.closest("[data-morning-focus]");
       if (!button) return;
       focus = button.dataset.morningFocus;
+      // Metric counts cover the whole board, so remove conflicting filters.
+      for (const id of ["morningKeyword", "morningPriorityFilter", "morningOwnerFilter", "morningStatusFilter", "morningNavigatorSearch"]) {
+        const input = $(`#${id}`);
+        if (input) input.value = "";
+      }
       render();
     });
     document.addEventListener("click", (event) => {

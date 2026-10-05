@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
     <link rel="stylesheet" href="/style.css?v=20260817-team-scope-v1" />
+    <link rel="stylesheet" href="/shift-workspace.css" />
     <link rel="stylesheet" href="/morning-followup.css?v=20260907" />
     <link rel="stylesheet" href="/meeting-workspace.css?v=20260907" />
     <link rel="stylesheet" href="/links-workspace.css?v=20260908" />
@@ -1114,7 +1115,17 @@
                   <h2 id="shiftMonthTitle2"></h2>
                   <button id="nextMonthBtn2" class="secondary" type="button">下月</button>
                 </div>
+                <div id="shiftWorkspaceTools" role="group" aria-label="排班视图">
+                  <button type="button" data-shift-view="calendar" aria-pressed="true">月历</button>
+                  <button type="button" data-shift-view="agenda" aria-pressed="false">明细</button>
+                  <span id="shiftMonthSummary"></span>
+                </div>
+                <div id="shiftAgendaFilters" hidden>
+                  <input id="shiftListSearch" type="search" aria-label="搜索排班" placeholder="搜索人员、机台或备注">
+                  <select id="shiftListType" aria-label="班次"><option value="">全部班次</option><option value="day">白班</option><option value="night">夜班</option></select>
+                </div>
                 <div id="shiftCalendar" class="calendar"></div>
+                <div id="shiftAgenda" hidden></div>
               </div>
 
               <aside class="panel schedule-editor">

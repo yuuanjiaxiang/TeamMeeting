@@ -1,4 +1,6 @@
 from ..permissions import *
+from ..runtime_performance import backup_gate, serve_asset
+import time
 
 
 class RequestHandlerMixin:
@@ -41,13 +43,14 @@ class RequestHandlerMixin:
             raise AppError(426, f"{purpose}只允许通过 HTTPS 访问，请使用正式 HTTPS 域名")
 
     def handle_request(self, method):
+        self._request_started = time.perf_counter()
         self.apply_forwarded_request_context()
         parsed = urlparse(self.path)
         try:
             if parsed.path.startswith("/api/") and method in {"POST", "PATCH", "DELETE"}:
                 self.require_https_transport("登录和数据写入")
-            if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
-                ensure_daily_backup()
+            if parsed.path.startswith("/api/") and parsed.path != "/api/health" and DEPLOY_ENV != "gray":
+                backup_gate.schedule(ensure_daily_backup)
             if parsed.path in ("/api/sso/login", "/api/sso/callback") and method == "GET":
                 sso_query = parse_qs(parsed.query)
                 return_to = self.sso_return_target(parsed.path, sso_query)
@@ -84,8 +87,20 @@ class RequestHandlerMixin:
             self.send_json({"error": exc.message}, exc.status)
         except json.JSONDecodeError:
             self.send_json({"error": "请求体不是合法 JSON"}, 400)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
         except Exception as exc:
             self.send_json({"error": str(exc)}, 500)
+        finally:
+            elapsed_ms = (time.perf_counter() - self._request_started) * 1000
+            if elapsed_ms >= 500:
+                print(f"slow_request method={method} path={parsed.path} elapsed_ms={elapsed_ms:.1f}")
+
+    def end_headers(self):
+        started = getattr(self, "_request_started", None)
+        if started is not None:
+            self.send_header("Server-Timing", f"app;dur={(time.perf_counter() - started) * 1000:.1f}")
+        super().end_headers()
 
     def serve_static(self, path):
         if path in ("", "/") or path.startswith("/org/"):
@@ -98,22 +113,7 @@ class RequestHandlerMixin:
         if not file_path.exists() or not file_path.is_file():
             raise AppError(404, "文件不存在")
         mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        content = file_path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.send_header("Connection", "close")
-        self.close_connection = True
-        self.end_headers()
-        # Large JavaScript bundles can be truncated by the Windows socket stack
-        # when they are written in one send while the browser loads assets in
-        # parallel. Small fixed-size writes keep the response length reliable.
-        for offset in range(0, len(content), 64 * 1024):
-            self.wfile.write(content[offset:offset + 64 * 1024])
-        self.wfile.flush()
+        serve_asset(self, file_path, mime)
 
     def organization_context(self, conn, user=None, requested_path=None):
         units = organization_rows(conn)
@@ -578,11 +578,11 @@ class RequestHandlerMixin:
             action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
             raise AppError(403, f"当前用户类型无权{action_name}该模块内容")
 
-    def health(self):
+    def health(self, deep=False):
         try:
             with connect() as conn:
                 conn.execute("SELECT 1").fetchone()
-                check = conn.execute("PRAGMA quick_check").fetchone()[0]
+                check = conn.execute("PRAGMA quick_check").fetchone()[0] if deep else "ok"
         except sqlite3.Error as exc:
             raise AppError(503, f"数据库检查失败：{exc}") from exc
         if check != "ok":
@@ -592,12 +592,16 @@ class RequestHandlerMixin:
             "environment": DEPLOY_ENV,
             "release": RELEASE_ID,
             "database": "ok",
+            "check": "integrity" if deep else "read",
             "time": now_iso(),
         }
 
     def route_api(self, method, path, query):
         if path == "/api/health" and method == "GET":
-            return self.health()
+            deep = query.get("deep") == ["1"]
+            if deep:
+                self.require_admin()
+            return self.health(deep=deep)
         if path == "/api/login" and method == "POST":
             return self.login()
         if path == "/api/logout" and method == "POST":
@@ -705,12 +709,14 @@ class RequestHandlerMixin:
             return self.create_member_post(int(parts[2]), user)
         if path == "/api/team-posts":
             if method == "GET":
+                if query.get("paged") == ["1"]:
+                    return self.team_post_page(query, user)
                 return {"posts": self.list_team_posts(user)}
             if method == "POST":
                 return self.create_team_post(user)
         if len(parts) == 3 and parts[:2] == ["api", "team-posts"]:
             if method == "GET":
-                return self.get_team_post(int(parts[2]), user)
+                return self.get_team_post(int(parts[2]), user, record_view=query.get("view") != ["refresh"])
             if method == "PATCH":
                 return self.update_team_post(int(parts[2]), user)
             if method == "DELETE":
@@ -731,6 +737,8 @@ class RequestHandlerMixin:
                 return self.create_morning_item(user)
         if path == "/api/morning-items/version" and method == "GET":
             return self.morning_items_version(query)
+        if path == "/api/morning-items/month" and method == "GET":
+            return self.personal_morning_month(query)
         if path == "/api/morning-items/report" and method == "GET":
             return self.morning_progress_report(query, user)
         if path == "/api/morning-items/order" and method == "PATCH":

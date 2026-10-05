@@ -297,7 +297,7 @@ class OperationsHandlerMixin:
             )
             items = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT i.*, u.display_name AS owner_name,
                            c.display_name AS created_by_name,
                            t.name AS type_name, t.color AS type_color,
@@ -307,9 +307,12 @@ class OperationsHandlerMixin:
                     LEFT JOIN users c ON c.id = i.created_by
                     LEFT JOIN meeting_topic_types t ON t.id = i.type_id
                     LEFT JOIN meeting_topic_options o ON o.id = i.option_id
-                    WHERE i.deleted_at IS NULL
+                    WHERE i.deleted_at IS NULL AND i.meeting_id IN (
+                        SELECT m.id FROM meetings m WHERE {where} AND {org_where}
+                    )
                     ORDER BY i.meeting_id, i.sort_order, i.created_at
-                    """
+                    """,
+                    [*params, *org_params],
                 ).fetchall()
             )
             attendance = rows_to_list(
@@ -318,21 +321,26 @@ class OperationsHandlerMixin:
                     SELECT a.*, u.display_name
                     FROM meeting_attendance a
                     JOIN users u ON u.id = a.user_id
-                    WHERE {attendance_where}
+                    WHERE {attendance_where} AND a.meeting_id IN (
+                        SELECT m.id FROM meetings m WHERE {where} AND {org_where}
+                    )
                     ORDER BY u.display_name
                     """,
-                    attendance_params,
+                    [*attendance_params, *params, *org_params],
                 ).fetchall()
             )
             topic_links = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT l.meeting_id, t.id, t.name, t.color, t.sort_order
                     FROM meeting_topic_links l
                     JOIN meeting_topic_types t ON t.id = l.type_id
-                    WHERE t.active=1
+                    WHERE t.active=1 AND l.meeting_id IN (
+                        SELECT m.id FROM meetings m WHERE {where} AND {org_where}
+                    )
                     ORDER BY l.sort_order, t.sort_order, t.id
-                    """
+                    """,
+                    [*params, *org_params],
                 ).fetchall()
             )
         item_map = {}

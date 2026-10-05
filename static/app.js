@@ -1,9 +1,12 @@
 import "./vendor/emoji-picker-element/index.js";
 import zhCnEmojiI18n from "./vendor/emoji-picker-element/i18n/zh_CN.js";
-import { createMorningFollowup } from "./morning-followup.js";
+import { createMorningFollowup, matchesMorningFocus } from "./morning-followup.js";
 import { createMeetingWorkspace } from "./meeting-workspace.js";
 import { buildMinutesDocument } from "./meeting-minutes.js";
 import { createDashboardDetails } from "./dashboard-details.js";
+import { createRequestScheduler } from "./request-scheduler.js";
+import { createShiftWorkspace } from "./shift-workspace.js";
+import { createPageRegistry } from "./page-registry.js";
 
 const uiThemeVersion = "miro-v1";
 
@@ -25,6 +28,8 @@ const state = {
   forumSort: "recent",
   forumMineOnly: false,
   forumPage: 1,
+  forumPageData: null,
+  selectedForumPost: null,
   selectedForumPostId: null,
   editingForumPostId: null,
   rules: [],
@@ -167,6 +172,7 @@ let pendingLinkDeleteId = null;
 let activePageRefreshId = 0;
 let authSyncInFlight = false;
 let authGeneration = 0;
+const requestScheduler = createRequestScheduler();
 let dashboardRequestId = 0;
 const dashboardContext = () => JSON.stringify([authGeneration, state.user?.id, state.organization?.selected?.path, state.dashboardUserId, periodQuery(), isAdminView()]);
 const dashboardDetails = createDashboardDetails((context) => context === dashboardContext());
@@ -554,11 +560,21 @@ function setDefaultDates() {
 async function api(path, options = {}) {
   const generation = authGeneration;
   const orgPath = selectedOrganizationPath();
-  const response = await fetch(path, {
+  const fetchOptions = {
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(orgPath ? { "X-Team-Org-Path": orgPath } : {}), ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...(orgPath ? { "X-Team-Org-Path": orgPath } : {}), ...(/^\/api\/team-(posts|replies)/.test(path) ? { "X-Team-Compact": "1" } : {}), ...(options.headers || {}) },
     ...options,
-  });
+  };
+  const method = (options.method || "GET").toUpperCase();
+  // Keep remote-customized authentication transport unchanged.
+  const authRequest = /^\/api\/(me(?:[/?]|$)|login|logout|sso(?:[/?]|$)|sessions(?:[/?]|$))/.test(path);
+  const scope = JSON.stringify([generation, orgPath, isAdminView()]);
+  const response = method === "GET" && !authRequest
+    ? await requestScheduler.read(path, fetchOptions, scope)
+    : await fetch(path, fetchOptions);
+  if (method === "GET" && !authRequest && (generation !== authGeneration || orgPath !== selectedOrganizationPath())) {
+    throw Object.assign(new Error(""), { name: "AbortError" });
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || "请求失败");
@@ -644,6 +660,7 @@ async function momentFilesToData(fileList) {
 }
 
 function toast(message) {
+  if (!message) return;
   const el = $("#toast");
   el.textContent = message;
   el.classList.remove("hidden");
@@ -861,53 +878,29 @@ function switchPage(id, updateRoute = true) {
   }
 }
 
-async function loadReferenceData() {
+async function loadReferenceData(page = state.currentPage) {
   const tasks = [];
-  tasks.push(api("/api/org-context").then((data) => applyOrganizationData(data)));
-  if (canLoadModule("members")) {
-    tasks.push(api("/api/members").then((data) => { state.members = data.members; }));
-  } else {
-    state.members = [];
-  }
-  if (canLoadModule("rules")) {
-    tasks.push(api("/api/rules").then((data) => { state.rules = data.rules; }));
-  } else {
-    state.rules = [];
-  }
-  if (canLoadModule("shifts")) {
+  if (page === "shifts" && canLoadModule("shifts")) {
     tasks.push(api("/api/machines").then((data) => { state.machines = data.machines; }));
-  } else {
-    state.machines = [];
   }
-  if (canLoadModule("links")) {
+  if (page === "links" && canLoadModule("links")) {
     tasks.push(api("/api/link-categories").then((data) => { state.linkCategories = data.categories; }));
-  } else {
-    state.linkCategories = [];
   }
-  if (canLoadModule("meetings")) {
+  if (page === "meetings" && canLoadModule("meetings")) {
     tasks.push(api("/api/meeting-topics").then((data) => { state.topics = data.types; }));
-  } else {
-    state.topics = [];
   }
-  if (isAdminView()) {
+  if (isAdminView() && page === "members") {
     tasks.push(api("/api/users").then((data) => { state.users = data.users; }));
-    tasks.push(api("/api/org-units").then((data) => { state.orgUnits = data.units || []; renderOrgUnits(); }));
-    tasks.push(api("/api/user-types").then((data) => {
-      state.userTypes = data.types;
-      state.moduleCatalog = data.modules;
-    }));
-  } else {
+  } else if (!isAdminView()) {
     state.users = [];
     state.orgUnits = state.organization?.accessible || [];
   }
-  if (!isGuest()) {
-    tasks.push(loadReminders());
-  } else {
+  if (isGuest()) {
     state.reminders = [];
     renderReminders(0);
   }
   await Promise.all(tasks);
-  if (!isAdminView() && state.members.length) {
+  if (!isAdminView() && page === "members" && state.members.length) {
     state.users = state.members
       .filter((member) => member.user_id)
       .map((member) => ({ id: member.user_id, display_name: member.linked_user || member.name, active: 1, role: "user" }));
@@ -916,6 +909,7 @@ async function loadReferenceData() {
 }
 
 function populateSelects() {
+  const selections = $$('select').map((select) => [select, select.value]);
   const selectUsers = state.users.length ? state.users : state.morningUsers.map((user) => ({ ...user, active: 1 }));
   const activeUsers = selectUsers.filter((user) => user.active !== 0);
   const userOptions = activeUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
@@ -990,6 +984,9 @@ function populateSelects() {
     categoryList.innerHTML = state.linkCategories.length
       ? state.linkCategories.map((category) => `<span class="chip">${escapeHtml(category.name)}</span>`).join("")
       : "<p>暂无分类</p>";
+  }
+  for (const [select, value] of selections) {
+    if ([...select.options].some((option) => option.value === value)) select.value = value;
   }
 }
 
@@ -1392,14 +1389,8 @@ function renderOwnThanksSummary(thanks) {
 async function loadPersonalMorningMonth(userId = null) {
   const today = iso(new Date());
   const start = iso(monthStart(new Date()));
-  const dates = dateListBetween(start, today);
   const userQuery = userId ? `&user_id=${encodeURIComponent(userId)}` : "";
-  const responses = await Promise.all(dates.map((date) => api(`/api/morning-items?date=${encodeURIComponent(date)}${userQuery}`)));
-  const todayData = responses.find((response) => response.date === today) || responses[responses.length - 1] || { items: [] };
-  return {
-    today: todayData,
-    monthItems: responses.flatMap((response) => response.items || []),
-  };
+  return api(`/api/morning-items/month?from=${start}&to=${today}${userQuery}`);
 }
 
 async function loadDashboard() {
@@ -1623,7 +1614,7 @@ function morningRiskItems(items = state.morningItems) {
 function renderMorningFocus() {
   const target = $("#morningFocusList");
   if (!target) return;
-  const risks = morningRiskItems().slice(0, 4);
+  const risks = morningRiskItems();
   target.innerHTML = risks.length
     ? `<strong>今日风险重点</strong>${risks.map((item) => `
         <span class="morning-focus-chip ${item.status === "risk" ? "is-risk" : ""}">
@@ -1661,7 +1652,7 @@ function renderMorningBoard() {
   const byOwner = {};
   const filteredItems = state.morningItems.filter((item) => {
     if (ownerFilter && String(item.owner_id) !== String(ownerFilter)) return false;
-    if (statusFilter && item.status !== statusFilter) return false;
+    if (statusFilter === "risk" ? !matchesMorningFocus(item, "risk") : statusFilter && item.status !== statusFilter) return false;
     return morningFollowup.matches(item);
   });
   filteredItems.forEach((item) => {
@@ -1675,7 +1666,7 @@ function renderMorningBoard() {
     const items = byOwner[user.id] || [];
     const personSummary = {
       active: items.filter((item) => item.status !== "done").length,
-      risk: items.filter((item) => item.needs_attention).length,
+      risk: items.filter((item) => matchesMorningFocus(item, "risk")).length,
       done: items.filter((item) => item.status === "done").length,
     };
     return `
@@ -4828,6 +4819,8 @@ function renderLinks() {
     </table>` : `<div class="link-empty-state"><strong>${state.links.length ? "没有匹配的链接" : "暂无链接"}</strong><p>${state.links.length ? "试试其他关键词，或重置筛选。" : "链接库还没有收录链接。"}</p></div>`;
 }
 
+const shiftWorkspace = createShiftWorkspace({ getShifts: () => state.shifts, escapeHtml, canDelete: isAdminView });
+
 function renderShiftLine(shift) {
   const isNight = shift.shift_type === "night";
   const isMine = Number(shift.user_id) === Number(state.user?.id);
@@ -4935,6 +4928,7 @@ function renderCalendar() {
     </div>`);
   }
   $("#shiftCalendar").innerHTML = weekdays + cells.join("");
+  shiftWorkspace.render();
   renderMachineList();
 }
 
@@ -5050,12 +5044,8 @@ function canLoadPageData(id) {
   return canLoadModule(id);
 }
 
-async function refreshPageData(id = state.currentPage) {
-  const requestId = ++activePageRefreshId;
-  await loadReferenceData();
-  if (requestId !== activePageRefreshId) return;
-  if (!canLoadPageData(id)) return;
-  const loaders = {
+const pageModules = createPageRegistry();
+Object.entries({
     members: loadMembers,
     moments: loadMoments,
     dashboard: loadDashboard,
@@ -5069,31 +5059,28 @@ async function refreshPageData(id = state.currentPage) {
     links: loadLinks,
     users: loadUsers,
     system: loadSystemAdmin,
-  };
-  const loader = loaders[id];
-  if (loader) await loader();
-  renderNav();
+}).forEach(([id, load]) => pageModules.register(id, { load, references: () => loadReferenceData(id) }));
+
+async function refreshPageData(id = state.currentPage) {
+  const requestId = ++activePageRefreshId;
+  requestScheduler.invalidate();
+  $$('[aria-busy="true"]').forEach((element) => element.removeAttribute("aria-busy"));
+  if (!canLoadPageData(id)) return;
+  const page = document.getElementById(id);
+  page?.setAttribute("aria-busy", "true");
+  try {
+    await pageModules.load(id, () => requestId === activePageRefreshId);
+    if (requestId === activePageRefreshId) renderNav();
+  } finally {
+    if (requestId === activePageRefreshId) page?.removeAttribute("aria-busy");
+  }
 }
 
 async function refreshAll() {
-  await loadReferenceData();
-  const loaders = [];
-  if (canLoadModule("rules")) loaders.push(loadRulesAndScores);
-  if (canLoadModule("members")) loaders.push(loadMembers);
-  if (canLoadModule("moments")) loaders.push(loadMoments);
-  if (canLoadModule("morning")) loaders.push(loadMorning);
-  if (!isGuest() && canLoadModule("processes")) loaders.push(loadProcesses);
-  if (canLoadModule("links")) loaders.push(loadLinks);
-  if (canLoadModule("shifts")) loaders.push(loadShifts);
-  if (canLoadModule("thanks")) loaders.push(loadThanks);
-  if (canLoadModule("archive")) loaders.push(loadArchive);
-  if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
-  if (canLoadModule("meetings")) loaders.push(loadMeetings);
-  if (isAdminView()) {
-    loaders.push(loadUsers, loadSystemAdmin);
-  }
-  await Promise.all(loaders.map((loader) => loader()));
   applyAuthView();
+  await refreshPageData(state.currentPage);
+  // Reminders must not gate the visible page, and hidden modules load on entry.
+  if (!isGuest()) loadReminders().catch((error) => { if (error.name !== "AbortError") console.warn("Reminder refresh failed"); });
 }
 
 function bindForm(id, handler) {
@@ -5101,11 +5088,15 @@ function bindForm(id, handler) {
   if (!form) return;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (form.dataset.submitting === "1") return;
+    form.dataset.submitting = "1";
+    const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
+    const disabled = buttons.map((button) => button.disabled);
+    buttons.forEach((button) => { button.disabled = true; });
     try {
       await handler(formData(form), form);
       form.reset();
       syncMorningChoiceGroups(form);
-      setDefaultDates();
       await refreshAll();
       toast("已保存");
     } catch (error) {
@@ -5113,6 +5104,9 @@ function bindForm(id, handler) {
       if (error.status === 409) {
         refreshPageData(state.currentPage).catch(() => {});
       }
+    } finally {
+      delete form.dataset.submitting;
+      buttons.forEach((button, index) => { button.disabled = disabled[index]; });
     }
   });
 }
@@ -5316,37 +5310,39 @@ function forumCategory(post = {}) {
 }
 
 function forumFilteredPosts() {
-  const keyword = state.forumSearch.trim().toLowerCase();
-  const items = state.teamPosts.filter((post) => {
-    if (state.forumCategory !== "all" && post.category !== state.forumCategory) return false;
-    if (state.forumMineOnly && Number(post.user_id) !== Number(state.user?.id)) return false;
-    if (!keyword) return true;
-    return [post.title, post.content, post.display_name, post.username]
-      .some((value) => String(value || "").toLowerCase().includes(keyword));
-  });
-  return items.sort((left, right) => {
-    if (Number(right.pinned || 0) !== Number(left.pinned || 0)) return Number(right.pinned || 0) - Number(left.pinned || 0);
-    if (state.forumSort === "popular") return Number(right.reply_count || 0) - Number(left.reply_count || 0);
-    if (state.forumSort === "views") return Number(right.view_count || 0) - Number(left.view_count || 0);
-    return String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || ""));
-  });
+  return state.teamPosts;
+}
+
+let forumLoadSequence = 0;
+let forumSearchTimer;
+async function loadForumTopics() {
+  const sequence = ++forumLoadSequence;
+  const query = new URLSearchParams({ paged: "1", page: state.forumPage, page_size: forumPageSize,
+    category: state.forumCategory, keyword: state.forumSearch.slice(0, 80), sort: state.forumSort, mine: state.forumMineOnly ? "1" : "0" });
+  const data = await api(`/api/team-posts?${query}`);
+  if (sequence !== forumLoadSequence) return;
+  state.teamPosts = data.posts || [];
+  state.forumPageData = data;
+  state.forumPage = data.pagination.page;
+  renderForumTopics();
+}
+
+function requestForumTopics() {
+  if (state.currentPage !== "members") return;
+  loadForumTopics().catch((error) => toast(error.message));
 }
 
 function renderForumSidebar() {
   const hotList = $("#forumHotTopics");
   const activeList = $("#forumActiveMembers");
   if (!hotList || !activeList) return;
-  const hot = [...state.teamPosts]
-    .sort((left, right) => (Number(right.reply_count || 0) * 3 + Number(right.view_count || 0)) - (Number(left.reply_count || 0) * 3 + Number(left.view_count || 0)))
-    .slice(0, 3);
+  const hot = state.forumPageData?.hot || [];
   hotList.innerHTML = hot.length ? hot.map((post, index) => `
     <button type="button" data-forum-post-id="${post.id}">
       <span>${index + 1}</span><span><strong>${escapeHtml(post.title || post.content)}</strong><small>${Number(post.reply_count || 0)} 回复 · ${Number(post.view_count || 0)} 浏览</small></span>
     </button>`).join("") : "<p class=\"forum-empty-note\">暂无热门讨论</p>";
 
-  const activity = new Map();
-  state.teamPosts.forEach((post) => activity.set(post.display_name, (activity.get(post.display_name) || 0) + 1 + Number(post.reply_count || 0)));
-  const active = [...activity.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const active = (state.forumPageData?.active || []).map((user) => [user.display_name]);
   $("#forumActiveCount").textContent = `${active.length} 人`;
   activeList.innerHTML = active.length ? active.map(([name]) => `<span title="${escapeHtml(name)}">${escapeHtml(String(name || "?").slice(0, 1))}</span>`).join("") : "<small>暂无活跃成员</small>";
 }
@@ -5356,15 +5352,15 @@ function renderForumTopics() {
   const pagination = $("#forumPagination");
   if (!list || !pagination) return;
   const filtered = forumFilteredPosts();
-  const pages = Math.max(1, Math.ceil(filtered.length / forumPageSize));
+  const total = state.forumPageData?.pagination?.total || 0;
+  const pages = Math.max(1, Math.ceil(total / forumPageSize));
   state.forumPage = Math.min(Math.max(1, state.forumPage), pages);
   $$("[data-forum-category]").forEach((button) => {
     const active = button.dataset.forumCategory === state.forumCategory;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
   });
-  const start = (state.forumPage - 1) * forumPageSize;
-  const items = filtered.slice(start, start + forumPageSize);
+  const items = filtered;
   list.innerHTML = items.length ? items.map((post) => {
     const category = forumCategory(post);
     const lastName = post.last_reply_name || post.display_name;
@@ -5385,13 +5381,14 @@ function renderForumTopics() {
       <div class="forum-topic-update"><strong>${escapeHtml(lastName || "")}</strong><small>${escapeHtml(shortDateTime(lastTime || ""))}</small></div>
     </article>`;
   }).join("") : `<div class="forum-empty"><strong>没有找到讨论主题</strong><p>换个分类或关键词试试，也可以发起一条新讨论。</p></div>`;
-  pagination.innerHTML = filtered.length > forumPageSize ? `
-    <span>共 ${filtered.length} 个主题</span>
+  const pageNumbers = [...new Set([1, ...Array.from({length: 5}, (_, i) => state.forumPage + i - 2), pages])].filter((page) => page >= 1 && page <= pages).sort((a,b) => a-b);
+  pagination.innerHTML = total > forumPageSize ? `
+    <span>共 ${total} 个主题</span>
     <div>
       <button type="button" data-forum-page="${state.forumPage - 1}" ${state.forumPage === 1 ? "disabled" : ""}>‹</button>
-      ${Array.from({ length: pages }, (_, index) => index + 1).map((page) => `<button type="button" data-forum-page="${page}" class="${page === state.forumPage ? "active" : ""}">${page}</button>`).join("")}
+      ${pageNumbers.map((page) => `<button type="button" data-forum-page="${page}" class="${page === state.forumPage ? "active" : ""}">${page}</button>`).join("")}
       <button type="button" data-forum-page="${state.forumPage + 1}" ${state.forumPage === pages ? "disabled" : ""}>›</button>
-    </div>` : `<span>共 ${filtered.length} 个主题</span>`;
+    </div>` : `<span>共 ${total} 个主题</span>`;
   renderForumSidebar();
 }
 
@@ -5460,12 +5457,13 @@ function renderForumDetail(post) {
 }
 
 function renderTeamChat(posts) {
-  state.teamPosts = posts || [];
-  renderForumTopics();
-  if (state.selectedForumPostId) {
-    const selected = state.teamPosts.find((post) => Number(post.id) === Number(state.selectedForumPostId));
-    if (selected) renderForumDetail(selected);
-  }
+  requestForumTopics();
+  const selectedId = state.selectedForumPostId;
+  if (selectedId) api(`/api/team-posts/${selectedId}?view=refresh`).then((data) => {
+    if (state.selectedForumPostId !== selectedId) return;
+    state.selectedForumPost = data.post;
+    renderForumDetail(data.post);
+  }).catch((error) => { if (error.status === 404) closeForumDetailModal(); else toast(error.message); });
 }
 
 function openForumCreateModal(post = null) {
@@ -5502,14 +5500,15 @@ async function openForumDetail(postId) {
   const modal = $("#forumDetailModal");
   state.selectedForumPostId = Number(postId);
   const cached = state.teamPosts.find((post) => Number(post.id) === Number(postId));
-  if (cached) renderForumDetail(cached);
+  state.selectedForumPost = null;
+  $("#forumDetailTitle").textContent = cached?.title || "讨论详情";
+  $("#forumDetailBody").innerHTML = '<p role="status">正在加载讨论…</p>';
   modal?.classList.remove("hidden");
   modal?.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   const data = await api(`/api/team-posts/${postId}`);
-  const index = state.teamPosts.findIndex((post) => Number(post.id) === Number(postId));
-  if (index >= 0) state.teamPosts[index] = data.post;
-  renderForumTopics();
+  if (Number(state.selectedForumPostId) !== Number(postId)) return;
+  state.selectedForumPost = data.post;
   renderForumDetail(data.post);
 }
 
@@ -6054,13 +6053,14 @@ async function submitMomentForm(form) {
 }
 
 async function loadMembers() {
-  const [membersData, postsData] = await Promise.all([
+  const [membersData] = await Promise.all([
     api("/api/members"),
-    api("/api/team-posts"),
+    loadForumTopics(),
   ]);
   state.members = membersData.members;
-  renderTeamChat(postsData.posts);
   $("#memberList").innerHTML = renderMemberCards();
+  if (!isAdminView()) state.users = state.members.filter((member) => member.user_id).map((member) => ({id: member.user_id, display_name: member.linked_user || member.name, active: 1}));
+  populateSelects();
 }
 
 function updateOptionSelect(typeSelect) {
@@ -6251,7 +6251,7 @@ function bindEvents() {
     setSidebarAccountExpanded(expanded);
   });
 
-  $("#refreshBtn").addEventListener("click", refreshAll);
+  $("#refreshBtn").addEventListener("click", () => refreshAll().catch((error) => toast(error.message)));
   $("#momentCreateButton")?.addEventListener("click", () => openMomentModal());
   $("#momentYearFilter")?.addEventListener("change", (event) => {
     state.momentYear = event.target.value || "";
@@ -6721,12 +6721,14 @@ function bindEvents() {
   $("#forumSearchInput")?.addEventListener("input", (event) => {
     state.forumSearch = event.target.value || "";
     state.forumPage = 1;
-    renderForumTopics();
+    clearTimeout(forumSearchTimer);
+    forumLoadSequence += 1;
+    forumSearchTimer = setTimeout(requestForumTopics, 250);
   });
   $("#forumSortSelect")?.addEventListener("change", (event) => {
     state.forumSort = event.target.value || "recent";
     state.forumPage = 1;
-    renderForumTopics();
+    requestForumTopics();
   });
   $("#teamChatForm")?.elements.content?.addEventListener("input", (event) => {
     $("#forumContentCount").textContent = `${event.target.value.length} / 2000`;
@@ -6970,7 +6972,7 @@ function bindEvents() {
         button.classList.toggle("active", active);
         button.setAttribute("aria-selected", String(active));
       });
-      renderForumTopics();
+      requestForumTopics();
       return;
     }
     if (event.target.closest("#forumMineButton")) {
@@ -6978,13 +6980,13 @@ function bindEvents() {
       state.forumPage = 1;
       $("#forumMineButton").classList.toggle("active", state.forumMineOnly);
       $("#forumMineButton").setAttribute("aria-pressed", String(state.forumMineOnly));
-      renderForumTopics();
+      requestForumTopics();
       return;
     }
     const forumPageButton = event.target.closest("[data-forum-page]");
     if (forumPageButton && !forumPageButton.disabled) {
       state.forumPage = Number(forumPageButton.dataset.forumPage) || 1;
-      renderForumTopics();
+      requestForumTopics();
       return;
     }
     const forumStatusToggle = event.target.closest(".forum-status-toggle");
@@ -6999,7 +7001,7 @@ function bindEvents() {
     }
     const forumEditPost = event.target.closest(".forum-edit-post");
     if (forumEditPost) {
-      const post = state.teamPosts.find((item) => Number(item.id) === Number(forumEditPost.dataset.postId));
+      const post = state.selectedForumPost?.id === Number(forumEditPost.dataset.postId) ? state.selectedForumPost : null;
       if (!post) return toast("讨论主题已更新，请刷新后重试");
       closeForumDetailModal();
       openForumCreateModal(post);
@@ -7991,7 +7993,9 @@ async function boot() {
     if (maybeStartSsoAutoLogin(callbackState)) return;
     switchPage(pageFromLocation() || "members");
     await refreshAll();
-  } catch {
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    if (state.user) { toast(error.message); return; }
     state.user = null;
     state.permissions = {};
     state.publicSettings = {};
@@ -8014,6 +8018,7 @@ async function startDevelopmentHotReload() {
     return;
   }
   window.setInterval(async () => {
+    if (document.hidden) return;
     try {
       const response = await fetch(`/api/health?reload=${Date.now()}`, {
         cache: "no-store",
@@ -8027,7 +8032,7 @@ async function startDevelopmentHotReload() {
     } catch {
       // The development server is briefly unavailable while the watcher restarts it.
     }
-  }, 1200);
+  }, 5000);
 }
 
 boot().finally(() => {

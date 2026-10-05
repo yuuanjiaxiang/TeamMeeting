@@ -54,6 +54,8 @@ Use these references conditionally:
 
 ### Backend and data
 
+- Read `docs/PERFORMANCE.md` for page loading and performance contracts. Register page loaders in `static/page-registry.js`; keep new business UI/handlers in domain-owned files. Do not restore all-module refreshes or per-day month requests. Run `scripts/performance_ui_test.mjs` and `scripts/performance_smoke_test.py` after scheduling, pagination, static caching, or concurrency changes. Preserve uncached permissioned business reads and never automatically retry writes.
+
 - Use parameterized SQL and one transaction for multi-step writes.
 - Record significant writes with `write_audit()`.
 - Prefer soft deletion and recycle-bin integration for business history.

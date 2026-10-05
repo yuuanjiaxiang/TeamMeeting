@@ -167,7 +167,9 @@ class CollaborationHandlerMixin:
             write_audit(conn, user, "team_moment.delete", "team_moment", moment_id, "团队时刻已移入回收站", {}, self.client_address[0])
         return {"message": "团队时刻已移入回收站", "moments": self.list_team_moments(user)}
 
-    def list_team_posts(self, user=None):
+    def list_team_posts(self, user=None, post_id=None):
+        if post_id is None and self.command != "GET" and self.headers.get("X-Team-Compact") == "1":
+            return None
         with connect() as conn:
             context = self.organization_context(conn, user)
             org_where, org_params = self.organization_entity_filter(conn, "p.org_unit_id", user)
@@ -185,9 +187,10 @@ class CollaborationHandlerMixin:
                     JOIN users u ON u.id = p.user_id
                     LEFT JOIN org_units o ON o.id=p.org_unit_id
                     WHERE p.deleted_at IS NULL AND ({org_where} OR ({inherited_where}))
+                      AND (? IS NULL OR p.id=?)
                     ORDER BY p.pinned DESC, COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
                     """,
-                    [*org_params, *inherited_ids],
+                    [*org_params, *inherited_ids, post_id, post_id],
                 ).fetchall()
             )
             if not posts:
@@ -284,11 +287,12 @@ class CollaborationHandlerMixin:
             )
         return posts
 
-    def get_team_post(self, post_id, user=None):
+    def get_team_post(self, post_id, user=None, record_view=True):
         with connect() as conn:
             self.require_team_post_read_access(conn, post_id, user)
-            conn.execute("UPDATE team_posts SET view_count=view_count+1 WHERE id=?", (post_id,))
-        result = next((item for item in self.list_team_posts(user) if item["id"] == post_id), None)
+            if record_view:
+                conn.execute("UPDATE team_posts SET view_count=view_count+1 WHERE id=?", (post_id,))
+        result = next(iter(self.list_team_posts(user, post_id=post_id)), None)
         if not result:
             raise AppError(404, "讨论主题不存在")
         return {"post": result}
@@ -557,6 +561,39 @@ class CollaborationHandlerMixin:
                 self.client_address[0],
             )
         return {"message": "回复已移入回收站", "posts": self.list_team_posts(user)}
+
+    def personal_morning_month(self, query):
+        actor = getattr(self, "api_user", None)
+        if not actor:
+            raise AppError(401, "请先登录")
+        end = (query.get("to") or [today_iso()])[0]
+        start = (query.get("from") or [end[:7] + "-01"])[0]
+        try:
+            date_range(start, end, max_days=31)
+        except ValueError as exc:
+            raise AppError(400, "日期格式不正确") from exc
+        if end > today_iso():
+            raise AppError(400, "工作台不能查询未来事项")
+        target = (query.get("user_id") or [None])[0]
+        today = self.list_morning_items({"date": [end], "user_id": [target]})
+        owner_id = int(target) if actor.get("role") == "admin" and target else actor["id"]
+        today["items"] = [item for item in today["items"] if item["owner_id"] == owner_id]
+        today["users"] = [user for user in today["users"] if user["id"] == owner_id]
+        with connect() as conn:
+            org_where, org_params = self.organization_workbench_user_filter(conn, "owner", actor, target)
+            items = rows_to_list(conn.execute(
+                f"""SELECT i.*, owner.display_name AS owner_name,
+                       COALESCE(root.item_date, i.item_date) AS start_date
+                FROM morning_items i JOIN users owner ON owner.id=i.owner_id
+                LEFT JOIN user_types t ON t.key=owner.user_type
+                LEFT JOIN morning_items root ON root.id=COALESCE(i.root_id,i.id)
+                WHERE i.active=1 AND i.owner_id=? AND i.item_date BETWEEN ? AND ?
+                  AND COALESCE(t.include_in_morning,1)=1 AND {org_where}
+                ORDER BY i.item_date, i.id""",
+                [owner_id, start, end, *org_params],
+            ).fetchall())
+        merged = {item["id"]: item for item in items + today["items"]}
+        return {"today": today, "monthItems": list(merged.values())}
 
     def list_morning_items(self, query):
         item_date = (query.get("date") or [today_iso()])[0] or today_iso()
