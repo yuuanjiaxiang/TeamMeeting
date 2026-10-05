@@ -234,7 +234,8 @@ def fetch_json(url, method="GET", form=None, headers=None, purpose="企业身份
             break
         except TimeoutError as exc:
             last_error = exc
-            break
+            detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(exc)).strip()[:160]
+            raise AppError(502, f"{purpose}请求超时：{detail}") from exc
         except (http.client.HTTPException, OSError) as exc:
             last_error = exc
     else:

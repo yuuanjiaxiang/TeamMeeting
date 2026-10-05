@@ -122,7 +122,7 @@ def main():
                 for key, value in values.items():
                     conn.execute("UPDATE system_settings SET value=? WHERE key=?", (value, key))
                 conn.execute(
-                    "UPDATE users SET employee_id='E10086', org_unit_id=(SELECT id FROM org_units WHERE name='MO') WHERE username='user'"
+                    "UPDATE users SET employee_id='e10086', org_unit_id=(SELECT id FROM org_units WHERE name='MO') WHERE username='user'"
                 )
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='MO'", (json.dumps(["SMOKE-MO"]),))
                 conn.execute("UPDATE org_units SET sso_groups=? WHERE name='WS'", (json.dumps(["SMOKE-WS"]),))
@@ -259,6 +259,19 @@ def main():
                 assigned = (json.load(response).get("user") or {})
             if assigned.get("org_unit_name") != "WS" or assigned.get("suggested_org_unit_id"):
                 raise RuntimeError(f"Administrator could not adopt the suggested organization: {assigned}")
+
+            # A matching username is not proof of employee identity.
+            FakeOAuth2Handler.employee_id = "user"
+            FakeOAuth2Handler.subject = "username-collision"
+            collision_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            with collision_opener.open(f"{app_url}/api/sso/login", timeout=15) as response:
+                response.read()
+                error = parse_qs(urlparse(response.geturl()).query).get("sso_error", [""])[0]
+            if "用户名冲突" not in error:
+                raise RuntimeError(f"Username collision was not rejected: {error}")
+            with collision_opener.open(f"{app_url}/api/me", timeout=15) as response:
+                if json.load(response).get("user"):
+                    raise RuntimeError("Username collision issued a session")
             print(json.dumps({"status": "ok", "linked": user["username"], "provisioned": provisioned["username"], "classified": True, "org_approved": True, "pkce": "S256"}, ensure_ascii=False))
         finally:
             app_server.shutdown()

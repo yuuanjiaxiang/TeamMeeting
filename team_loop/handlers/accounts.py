@@ -69,7 +69,7 @@ class AccountsHandlerMixin:
             nonce = secrets.token_urlsafe(32)
             verifier = secrets.token_urlsafe(64)
             now = dt.datetime.now().replace(microsecond=0)
-            conn.execute("DELETE FROM sso_login_states WHERE expires_at<? OR used_at IS NOT NULL", ((now - dt.timedelta(minutes=10)).isoformat(),))
+            conn.execute("DELETE FROM sso_login_states WHERE expires_at<=? OR used_at IS NOT NULL", (now.isoformat(),))
             conn.execute(
                 """
                 INSERT INTO sso_login_states(state_hash, nonce, code_verifier, redirect_uri, return_to, created_at, expires_at)
@@ -100,6 +100,9 @@ class AccountsHandlerMixin:
             raise AppError(400, "SSO 回调缺少授权码或状态参数")
         now = dt.datetime.now().replace(microsecond=0)
         with connect() as conn:
+            # Serialize validation and consumption before making any provider request.
+            conn.execute("BEGIN IMMEDIATE")
+            now = dt.datetime.now().replace(microsecond=0)
             config = sso_configuration(conn)
             row = conn.execute(
                 "SELECT * FROM sso_login_states WHERE state_hash=? AND used_at IS NULL",
@@ -107,7 +110,7 @@ class AccountsHandlerMixin:
             ).fetchone()
             if not row or (parse_iso_datetime(row["expires_at"]) or now) <= now:
                 raise AppError(400, "SSO 登录请求已失效，请重新发起登录")
-            conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=?", (now.isoformat(), token_digest(state)))
+            conn.execute("UPDATE sso_login_states SET used_at=? WHERE state_hash=? AND used_at IS NULL", (now.isoformat(), token_digest(state)))
             redirect_uri = row["redirect_uri"]
             verifier = row["code_verifier"]
             return_to = sanitize_sso_return_to(row["return_to"])
@@ -162,6 +165,7 @@ class AccountsHandlerMixin:
         identity = f"{provider_key}|{subject}"
         auth_source = "oauth2" if config.get("mode") == "manual" else "oidc"
         with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             matched_org = match_sso_org_unit(conn, sso_groups)
             matched_org_id = matched_org["id"] if matched_org else None
             root_org = next(
@@ -192,8 +196,8 @@ class AccountsHandlerMixin:
             created = False
             if not user:
                 existing = conn.execute(
-                    "SELECT * FROM users WHERE LOWER(employee_id)=LOWER(?) OR LOWER(username)=LOWER(?) ORDER BY CASE WHEN LOWER(employee_id)=LOWER(?) THEN 0 ELSE 1 END LIMIT 1",
-                    (employee_id, employee_id, employee_id),
+                    "SELECT * FROM users WHERE LOWER(employee_id)=LOWER(?) LIMIT 1",
+                    (employee_id,),
                 ).fetchone()
                 if existing:
                     if not existing["active"]:
@@ -209,6 +213,8 @@ class AccountsHandlerMixin:
                 else:
                     if not config["auto_provision"]:
                         raise AppError(403, "该企业账号尚未在系统中创建，请联系管理员")
+                    if conn.execute("SELECT id FROM users WHERE LOWER(username)=LOWER(?)", (username,)).fetchone():
+                        raise AppError(409, "该工号与已有系统用户名冲突，请联系管理员核对工号")
                     user_type = conn.execute(
                         "SELECT key FROM user_types WHERE key=? AND active=1",
                         (GUEST_USER_TYPE_KEY,),
@@ -1511,5 +1517,4 @@ class AccountsHandlerMixin:
                 (member_id, user["id"], kind, content, now_iso()),
             )
         return {"message": "已发布", "members": self.list_members()}
-
 

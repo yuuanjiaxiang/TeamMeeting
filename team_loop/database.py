@@ -846,10 +846,11 @@ SSO_RETURN_VIEWS = {
 
 
 def sanitize_sso_return_to(value):
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
+    raw = str(value or "")
     if re.search(r"[\x00-\x1f\x7f\\]", raw):
+        return ""
+    raw = raw.strip()
+    if not raw:
         return ""
     parsed = urlparse(raw)
     if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
@@ -1713,5 +1714,3 @@ def init_db():
         seed_morning_items(conn)
         seed_morning_history_samples(conn)
         sync_members_with_users(conn)
-
-
