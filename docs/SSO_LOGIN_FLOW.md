@@ -10,6 +10,7 @@ Discovery 模式从 `{issuer}/.well-known/openid-configuration` 获取认证、T
 | `sso_enabled` | `0` | 企业 SSO 开关 |
 | `sso_auto_login` | `1` | 未登录时自动发起 SSO |
 | `sso_mode` | `discovery` | `discovery` 或 `manual` |
+| `sso_profile` | `standard` | `standard` 或 `sicarrier`，后者必须使用 Manual 模式 |
 | `sso_issuer_url` | 空 | Issuer，不包含 `.well-known` |
 | `sso_authorization_url` | 空 | Manual 认证地址 |
 | `sso_token_url` | 空 | Manual Token 地址 |
@@ -39,3 +40,21 @@ SSO HTTP 连接池按 Origin 隔离；跨 Origin 重定向和 Token POST 重定�
 ## 验证
 
 运行 `python scripts/sso_smoke_test.py`、`python scripts/sso_pool_smoke_test.py` 和 `python scripts/sso_security_test.py`。测试使用临时数据库及本地模拟身份平台，不修改运行中的业务数据库。
+
+## Sicarrier 自研 OAuth2
+
+Sicarrier（`heds.sicarrier.com/saaslogin1/oauth2`，Issuer 为 `uniportal.sicarrier.com`）不使用标准 OIDC 请求方式。请在系统管理中选择“手动 OAuth2 端点”和“Sicarrier 自研 OAuth2”，填写平台提供的完整三端点及 Client ID、Client Secret，设置：
+
+- `sso_scopes=base.profile`
+- `sso_username_claim=employeeNumber`
+- `sso_display_name_claim=displayNameCn`
+- `sso_group_claim=employeeType`
+- `sso_redirect_uri=https://本系统域名/api/auth/oauth/callback`（须与平台登记地址完全一致；原 `/api/sso/callback` 也受支持）
+
+兼容模式不发送 PKCE 参数；Token 请求使用表单 `client_secret`；UserInfo 使用 GET 查询参数 `access_token`、`scope`、`client_id`，不发送 Bearer 头。登录和管理员映射诊断共用同一调用逻辑。UserInfo 返回 `errorCode/errorDesc` 时显示平台业务错误，不再误报为工号映射错误。
+
+账号只按工号大小写不敏感匹配，不用外部 subject 查找或绑定；已有工号账号的旧 subject 绑定在成功登录时清空。标准协议账号继续使用外部主体关联机制。兼容模式仍保留一次性 state、10 分钟过期、站内跳转白名单、TLS 校验及访客待分类规则。
+
+UserInfo 查询串含 Token，所有 UserInfo 重定向均拒绝。应用错误提示隐藏 Token；部署代理和身份平台的访问日志也应屏蔽查询串。不要复制带 Token 的完整 URL。
+
+运行 `python scripts/sso_smoke_test.py --profile sicarrier` 验证兼容模式及新回调路径。本地模拟测试不能代替企业平台实际联调。

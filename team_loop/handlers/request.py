@@ -48,7 +48,7 @@ class RequestHandlerMixin:
                 self.require_https_transport("登录和数据写入")
             if parsed.path.startswith("/api/") and DEPLOY_ENV != "gray":
                 ensure_daily_backup()
-            if parsed.path in ("/api/sso/login", "/api/sso/callback") and method == "GET":
+            if parsed.path in ("/api/sso/login", "/api/sso/callback", "/api/auth/oauth/callback") and method == "GET":
                 sso_query = parse_qs(parsed.query)
                 return_to = self.sso_return_target(parsed.path, sso_query)
                 try:
@@ -918,5 +918,4 @@ class RequestHandlerMixin:
             return self.restore_backup()
 
         raise AppError(404, "接口不存在")
-
 

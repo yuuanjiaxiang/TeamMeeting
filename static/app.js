@@ -3042,6 +3042,13 @@ async function markRemindersRead(keys = [], all = false) {
 
 function renderSettingField(setting) {
   const key = escapeHtml(setting.key);
+  if (setting.key === "sso_profile") {
+    return `<label class="setting-field"><span>${escapeHtml(setting.label)}</span>
+      <select name="${key}">
+        <option value="standard" ${setting.value !== "sicarrier" ? "selected" : ""}>标准 OAuth2 / OIDC</option>
+        <option value="sicarrier" ${setting.value === "sicarrier" ? "selected" : ""}>Sicarrier 自研 OAuth2</option>
+      </select><small>${escapeHtml(setting.description || "")}</small></label>`;
+  }
   const modeClass = setting.key === "sso_issuer_url" ? " sso-discovery-only" : ["sso_authorization_url", "sso_token_url", "sso_userinfo_url"].includes(setting.key) ? " sso-manual-only" : "";
   if (setting.key === "sso_mode") {
     return `<label class="setting-field">
@@ -3105,11 +3112,11 @@ function renderSettings() {
     <details class="settings-group" open>
       <summary>企业 SSO 登录</summary>
       <div class="settings-group-note sso-provider-note">
-        <span>已知认证、Access Token、UserInfo 三个地址时，选择“手动 OAuth2 端点”并按顺序填写即可。系统使用授权码 + PKCE。</span>
+        <span>已知三个服务地址时选择手动配置。标准协议使用授权码 + PKCE；Sicarrier 平台需选择对应兼容协议。</span>
         <button id="ssoOneAccessPresetBtn" class="secondary" type="button">应用华为云 OneAccess 预设</button>
       </div>
       <div class="sso-setup-head">
-        <div class="sso-mode-field">${renderSsoFields(["sso_mode"])}</div>
+        <div class="sso-mode-field">${renderSsoFields(["sso_mode", "sso_profile"])}</div>
         <div id="ssoConfigReadiness" class="sso-config-readiness" aria-live="polite"></div>
       </div>
       <section class="sso-config-section">
@@ -3172,6 +3179,7 @@ function updateSsoModeFields() {
 function applyOneAccessPreset() {
   const values = {
     sso_mode: "manual",
+    sso_profile: "standard",
     sso_scopes: "get_user_info",
     sso_username_claim: "userName",
     sso_display_name_claim: "name",

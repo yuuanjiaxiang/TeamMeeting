@@ -90,6 +90,30 @@ def main():
                     self.assertEqual(app.sanitize_sso_return_to(target), "")
                 self.assertEqual(app.sanitize_sso_return_to("/org/ess/mo/ws?view=meetings"), "/org/ess/mo/ws?view=meetings")
 
+            def test_userinfo_business_errors_are_redacted(self):
+                discovery = {"userinfo_endpoint": "http://localhost/userinfo"}
+                settings = {**config, "profile": "sicarrier", "scopes": "base.profile"}
+                token = "secret/token+value"
+                with patch.object(http, "_fetch_once", return_value=(200, {},
+                    b'{"errorCode":"INVALID_TOKEN","errorDesc":"bad secret/token+value"}')):
+                    with self.assertRaises(app.AppError) as caught:
+                        http.fetch_sso_userinfo(discovery, settings, token)
+                    self.assertEqual(caught.exception.status, 502)
+                    self.assertIn("INVALID_TOKEN", caught.exception.message)
+                    self.assertNotIn(token, caught.exception.message)
+
+            def test_query_userinfo_never_redirects(self):
+                settings = {**config, "profile": "sicarrier", "scopes": "base.profile"}
+                with patch.object(http, "_fetch_once", return_value=(302, {"Location": "/next"}, b"")) as fetch:
+                    with self.assertRaises(app.AppError):
+                        http.fetch_sso_userinfo({"userinfo_endpoint": "http://localhost/userinfo"}, settings, "test-token")
+                    self.assertEqual(fetch.call_count, 1)
+
+            def test_sicarrier_requires_manual_and_secret(self):
+                settings = {**config, "profile": "sicarrier", "mode": "discovery"}
+                self.assertIn("Sicarrier 手动 OAuth2 配置方式", app.sso_missing_fields(settings))
+                self.assertIn("Sicarrier Client Secret", app.sso_missing_fields(settings))
+
         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(SecurityTests))
         if not result.wasSuccessful():
             raise SystemExit(1)

@@ -783,6 +783,7 @@ def sso_configuration(conn):
         "enabled": enabled,
         "auto_login": sso_setting(conn, "sso_auto_login", "1").lower() in ("1", "true", "yes", "on", "启用"),
         "mode": mode,
+        "profile": sso_setting(conn, "sso_profile", "standard").lower() or "standard",
         "button_label": sso_setting(conn, "sso_button_label", "企业 SSO 登录") or "企业 SSO 登录",
         "issuer_url": sso_setting(conn, "sso_issuer_url").rstrip("/"),
         "authorization_url": sso_setting(conn, "sso_authorization_url"),
@@ -806,6 +807,12 @@ def sso_configuration_ready(config):
 
 def sso_missing_fields(config):
     missing = []
+    if config.get("profile") not in (None, "standard", "sicarrier"):
+        missing.append("有效的身份平台协议")
+    if config.get("profile") == "sicarrier" and config.get("mode") != "manual":
+        missing.append("Sicarrier 手动 OAuth2 配置方式")
+    if config.get("profile") == "sicarrier" and not config.get("client_secret"):
+        missing.append("Sicarrier Client Secret")
     if not config.get("client_id"):
         missing.append("Client ID")
     if config.get("mode") == "manual":
