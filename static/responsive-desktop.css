@@ -1,0 +1,49 @@
+/* CSS viewport widths also cover OS scaling and resized desktop windows. */
+body[data-theme] .content { width:100%; min-width:0; }
+.meeting-batch-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:10px 0; }
+.meeting-batch-toolbar[hidden], .meeting-batch-targets[hidden] { display:none; }
+.meeting-batch-dates { display:flex; flex-wrap:wrap; gap:6px; max-height:100px; overflow:auto; flex-basis:100%; }
+.meeting-batch-targets { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; max-height:180px; overflow:auto; flex-shrink:0; padding:4px; }
+.meeting-batch-targets label { min-width:0; display:grid; gap:4px; }
+.meeting-agenda-picker-form[data-batch="true"] { grid-template-rows:auto auto minmax(0,1fr) auto; }
+.meeting-date-check { float:right; cursor:pointer; }
+body[data-theme] #meetings .meeting-date-check input { width:18px; height:18px; min-height:18px; margin:0; }
+.meeting-calendar-agendas { padding:0; margin:4px 0 8px; max-height:130px; overflow:auto; font-size:12px; color:#26374a; list-style:none; }
+.meeting-calendar-agendas li { overflow-wrap:anywhere; line-height:1.5; border-left:3px solid var(--agenda-color); background:var(--agenda-tint); padding:4px 6px; margin:4px 0; }
+.meeting-calendar-agendas small { display:block; color:#475569; font-size:10px; }
+body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 32px); max-height:calc(100dvh - 32px); }
+@media (min-width:1921px) and (max-width:2560px) {
+  body[data-theme] .app-shell { grid-template-columns:238px minmax(0,1fr); }
+  body[data-theme] .content { max-width:1800px; padding:26px; }
+}
+@media (min-width:1181px) and (max-width:1920px) {
+  body[data-theme] .app-shell { grid-template-columns:210px minmax(0,1fr); }
+  body[data-theme] .content { max-width:1600px; padding:20px; }
+  body[data-theme] .sidebar { padding:12px 10px; gap:12px; }
+  body[data-theme] .topbar { padding:18px; margin-bottom:16px; }
+  body[data-theme] .panel { padding:16px; }
+  body[data-theme] .member-layout { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  body[data-theme] #meetings .meeting-workbench { grid-template-columns:220px minmax(0,1fr); }
+  body[data-theme] #meetings .meeting-detail-panel { padding:18px; }
+  body[data-theme] .morning-board-layout { padding-right:196px; }
+  body[data-theme] .morning-navigator { width:184px; right:12px; }
+}
+@media (min-width:901px) and (max-width:1440px) {
+  body[data-theme] .content { padding:16px; }
+  body[data-theme] .member-layout { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  body[data-theme] .shift-layout { grid-template-columns:minmax(0,1fr) 250px; }
+  body[data-theme] .forum-content-grid { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] .forum-sidebar { display:none; }
+  body[data-theme] .personal-workbench { grid-template-columns:minmax(0,1fr); }
+}
+@media (min-width:901px) and (max-height:850px) {
+  body[data-theme] .sidebar { gap:8px; }
+  body[data-theme] .sidebar nav { min-height:0; overflow-y:auto; flex:1 1 auto; }
+  body[data-theme] .sidebar .user-box { flex-shrink:0; margin-top:0; }
+  body[data-theme] .brand { padding-bottom:8px; }
+  body[data-theme] .morning-navigator { top:100px; max-height:calc(100dvh - 116px); }
+}
+@media (max-width:720px) {
+  .meeting-batch-targets { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); }
+}

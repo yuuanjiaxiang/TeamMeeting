@@ -794,6 +794,8 @@ class RequestHandlerMixin:
         if path == "/api/dashboards/red-black" and method == "GET":
             return self.red_black_dashboard(query)
 
+        if path == "/api/meetings/batch-agenda" and method == "POST":
+            return self.batch_meeting_agenda(user)
         if path == "/api/meetings":
             if method == "GET":
                 return {

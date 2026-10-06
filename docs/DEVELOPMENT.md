@@ -319,3 +319,7 @@ Mock 账号仅用于灰度体验，禁止把灰度数据库、`mock_backups/` �
 
 2026-10-05：页面按模块注册和加载、请求调度、分页及新模块接入约束见 [PERFORMANCE.md](PERFORMANCE.md)。排班明细位于 `static/shift-workspace.js` / `.css`，讨论分页位于 `team_loop/handlers/forum_reads.py`，缓存和后台维护位于 `team_loop/runtime_performance.py`。新增功能优先在所属模块中实现；现存公共入口中的旧逻辑尚未全部迁出。
 
+2026-10-06：会议日期多选在 `static/meeting-calendar-planner.js`，批量服务在 `team_loop/handlers/meeting_batch.py`，通过单事务保证全成或全败。`POST /api/meetings/batch-agenda` 接收 `dates:[{date,meeting_id?}]`、`items:[{option_id,owner_id?}]`，沿用 meetings.create 权限，只操作当前团队的会议和预设，责任人遵循协调范围。已有议题不覆盖，新建草稿按日期/标题/创建人复用。运行 `python scripts/meeting_batch_smoke_test.py` 回归。
+
+桌面适配集中在最后加载的 `static/responsive-desktop.css`，使用 CSS 视口断点，不检测物理屏幕或修改 zoom/font-size。测试 2560×1440、1920×1080、1536×864、1280×720 以及手机回归；日历、流程图和表格只允许容器内滚动。`static/score-period.js` 独立处理红黑榜年月边界，运行 `node scripts/performance_ui_test.mjs` 验证闰年、无效月份、进展倒序和颜色合法性。
+

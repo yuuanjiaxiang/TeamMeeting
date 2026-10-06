@@ -3,6 +3,13 @@ const statusNames = { todo: "待处理", doing: "进行中", risk: "有风险", 
 const priorityNames = { high: "高", normal: "中", low: "低" };
 const focusNames = { all: "全部事项", active: "未完成", risk: "有风险", overdue: "已逾期", due: "今日到期", stale: "待跟进" };
 
+export function newestMorningHistory(history = []) {
+  return [...history].sort((a, b) =>
+    String(b.item_date || "").localeCompare(String(a.item_date || "")) ||
+    String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")) ||
+    Number(b.id || 0) - Number(a.id || 0));
+}
+
 export function matchesMorningFocus(item, focus) {
   return ({
     all: true,

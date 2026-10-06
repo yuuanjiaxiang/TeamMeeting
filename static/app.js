@@ -1,12 +1,14 @@
 import "./vendor/emoji-picker-element/index.js";
 import zhCnEmojiI18n from "./vendor/emoji-picker-element/i18n/zh_CN.js";
-import { createMorningFollowup, matchesMorningFocus } from "./morning-followup.js";
+import { createMorningFollowup, matchesMorningFocus, newestMorningHistory } from "./morning-followup.js";
 import { createMeetingWorkspace } from "./meeting-workspace.js";
 import { buildMinutesDocument } from "./meeting-minutes.js";
 import { createDashboardDetails } from "./dashboard-details.js";
 import { createRequestScheduler } from "./request-scheduler.js";
 import { createShiftWorkspace } from "./shift-workspace.js";
 import { createPageRegistry } from "./page-registry.js";
+import { scoreMonthPeriod, initializeScorePeriod } from "./score-period.js";
+import { createMeetingCalendarPlanner, agendaColor } from "./meeting-calendar-planner.js";
 
 const uiThemeVersion = "miro-v1";
 
@@ -128,7 +130,7 @@ const pages = [
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const dateFilterPages = new Set(["dashboard", "rules"]);
+const dateFilterPages = new Set(["dashboard"]);
 const uiThemes = new Set(["miro", "feishu", "yuque", "linear", "dingtalk"]);
 const teamReactionOptions = ["+1", "👍", "👏", "😊", "🎉", "收到", "辛苦了", "已跟进"];
 const momentCategoryMeta = {
@@ -1857,7 +1859,7 @@ function closeMorningHistoryModal() {
 
 function renderMorningHistory(data) {
   const item = data.item || {};
-  const history = data.history || [];
+  const history = newestMorningHistory(data.history || []);
   const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
   const title = $("#morningHistoryTitle");
   const subtitle = $("#morningHistorySubtitle");
@@ -1876,6 +1878,7 @@ function renderMorningHistory(data) {
     `;
   }
   if (!list) return;
+  list.scrollTop = 0;
   if (!history.length) {
     list.innerHTML = `<p class="empty-note">这条事项还没有手动更新记录。自动带入但未更新的日期不会展示。</p>`;
     return;
@@ -3563,13 +3566,20 @@ function renderAnnualScoreTable(rows = [], year = new Date().getFullYear(), show
     </table>`;
 }
 
+let scoreLoadSequence = 0;
 async function loadRulesAndScores() {
+  const sequence = ++scoreLoadSequence;
+  initializeScorePeriod($("#scoreYear"), $("#scoreMonth"));
   state.rules = (await api("/api/rules")).rules;
   const year = scoreYearValue();
+  const month = Number($("#scoreMonth").value);
+  const period = new URLSearchParams(scoreMonthPeriod(year, month));
   const [scoresData, annualData] = await Promise.all([
-    api(`/api/scores?${periodQuery()}`),
+    api(`/api/scores?${period}`),
     api(`/api/dashboards/red-black?from=${year}-01-01&to=${year}-12-31`),
   ]);
+  if (sequence !== scoreLoadSequence) return;
+  $("#scorePeriodLabel").textContent = `${year} 年 ${month} 月积分明细`;
   const scores = scoresData.scores || [];
   state.ruleUsers = (annualData.annual || []).map((user) => ({ ...user, active: 1 }));
   const renderRuleColumn = (kind, title) => {
@@ -3861,6 +3871,10 @@ function openMeetingAgendaModal(meetingId) {
   const modal = $("#meetingAgendaModal");
   const form = $("#meetingAgendaPickerForm");
   if (!meeting || !modal || !form) return;
+  delete form.dataset.batch;
+  $("#meetingAgendaSubmitBtn").textContent = "加入本场会议";
+  $("#meetingBatchTargets").hidden = true;
+  $("#meetingBatchTargets").replaceChildren();
   form.reset();
   form.elements.meeting_id.value = meeting.id;
   $("#meetingAgendaSearch").value = "";
@@ -4443,6 +4457,23 @@ async function openMeetingEmail(meetingId, includeThanks = true) {
   toast(`已生成会议邮件，${copyHint}，${pasteHint}`);
 }
 
+const meetingCalendarPlanner = createMeetingCalendarPlanner({
+  escapeHtml, scope: () => `${state.user?.id}:${state.organization?.selected?.id}:${isAdminView()}`,
+  canCreate: () => !isGuest() && canOperate("meetings", "create"),
+  openPicker: () => {
+    const form = $("#meetingAgendaPickerForm");
+    form.reset();
+    form.dataset.batch = "true";
+    $("#meetingAgendaSearch").value = "";
+    $("#meetingAgendaSubtitle").textContent = "跨月批量安排 · 选择目标会议、议题及责任人";
+    $("#meetingAgendaSubmitBtn").textContent = "确认批量添加";
+    renderMeetingAgendaPicker({ items: [] });
+    $("#meetingAgendaModal").classList.remove("hidden");
+    $("#meetingAgendaModal").setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+  },
+});
+
 function renderMeetingCalendar(meetings) {
   const month = state.meetingMonth;
   const start = monthStart(month);
@@ -4469,10 +4500,11 @@ function renderMeetingCalendar(meetings) {
     const hasSelected = dayMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
     cells.push(`<div class="day-cell meeting-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedMeetingDate ? "selected" : ""} ${hasSelected ? "active-meeting-day" : ""} ${dayMeetings.length ? "has-meeting" : ""}" data-date="${date}">
       <div class="day-no">${d.getDate()}</div>
-      ${dayMeetings.map((meeting) => `<button type="button" class="meeting-line meeting-select-btn" data-meeting-id="${meeting.id}">${meeting.start_time ? `${escapeHtml(meeting.start_time)} · ` : ""}${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</button>`).join("")}
+      ${dayMeetings.map((meeting) => `<button type="button" class="meeting-line meeting-select-btn" data-meeting-id="${meeting.id}">${meeting.start_time ? `${escapeHtml(meeting.start_time)} · ` : ""}${escapeHtml(meeting.title)} · ${meeting.items.length} 议题</button><ul class="meeting-calendar-agendas">${meeting.items.map((item) => `<li style="--agenda-color:${agendaColor(item)};--agenda-tint:${agendaColor(item)}14" title="${escapeHtml(item.title)}"><small>${escapeHtml(item.type_name || item.section || '议题')}${item.option_id ? ' · 预设' : ''}</small>${escapeHtml(item.title)}</li>`).join('')}</ul>`).join("")}
     </div>`);
   }
   $("#meetingCalendar").innerHTML = weekdays + cells.join("");
+  meetingCalendarPlanner.render(meetings);
 }
 
 function meetingListRange() {
@@ -6373,6 +6405,9 @@ function bindEvents() {
   $("#scoreYear")?.addEventListener("change", () => {
     loadRulesAndScores().catch((error) => toast(error.message));
   });
+  $("#scoreMonth")?.addEventListener("change", () => {
+    loadRulesAndScores().catch((error) => toast(error.message));
+  });
   $("#blackVisibilityForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -6595,10 +6630,18 @@ function bindEvents() {
     submit.disabled = true;
     submit.textContent = "正在加入";
     try {
-      const response = await api(`/api/meetings/${form.elements.meeting_id.value}/agenda-options`, {
+      const batch = form.dataset.batch === "true";
+      const response = await api(batch ? "/api/meetings/batch-agenda" : `/api/meetings/${form.elements.meeting_id.value}/agenda-options`, {
         method: "POST",
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({ items, ...(batch ? { dates: meetingCalendarPlanner.dates() } : {}) }),
       });
+      if (batch) {
+        meetingCalendarPlanner.clear();
+        closeMeetingAgendaModal();
+        await loadMeetings();
+        toast(response.message);
+        return;
+      }
       state.meetings = response.meetings || state.meetings;
       closeMeetingAgendaModal();
       const current = state.meetings.find((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
@@ -6611,6 +6654,7 @@ function bindEvents() {
       updateMeetingAgendaSelection();
     } finally {
       submit.textContent = "加入本场会议";
+      submit.disabled = false;
     }
   });
 

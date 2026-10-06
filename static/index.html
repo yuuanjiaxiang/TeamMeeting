@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/meeting-workspace.css?v=20260907" />
     <link rel="stylesheet" href="/links-workspace.css?v=20260908" />
     <link rel="stylesheet" href="/dashboard-details.css?v=20260915" />
+    <link rel="stylesheet" href="/responsive-desktop.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -343,6 +344,7 @@
                   <label class="meeting-agenda-search">搜索议题<input id="meetingAgendaSearch" type="search" placeholder="输入议题或一级分类" /></label>
                   <span id="meetingAgendaSelectedCount" class="meeting-agenda-selected-count">已选 0 项</span>
                 </div>
+                <div id="meetingBatchTargets" class="meeting-batch-targets" hidden></div>
                 <div id="meetingAgendaPickerList" class="meeting-agenda-picker-list"></div>
                 <div class="modal-actions">
                   <button class="secondary" type="button" data-meeting-agenda-close>取消</button>
@@ -984,7 +986,12 @@
                   </div>
                   <div class="mw-workspace-actions"><button id="openMeetingManagement" class="secondary admin-only" type="button">议题库与批量安排</button><button id="openMeetingCreateBtn" type="button">创建会议</button></div>
             </header>
-            <details class="meeting-calendar-panel mw-calendar-disclosure"><summary>月历</summary>
+            <details class="meeting-calendar-panel mw-calendar-disclosure" open><summary>月历</summary>
+              <div id="meetingBatchToolbar" class="meeting-batch-toolbar" hidden>
+                <strong id="meetingBatchCount">已选 0 天</strong>
+                <button id="meetingBatchOpen" type="button" disabled>批量添加预设议题</button>
+                <div id="meetingBatchDates" class="meeting-batch-dates"></div>
+              </div>
               <div id="meetingCalendar" class="calendar meeting-calendar"></div>
             </details>
 
@@ -1147,6 +1154,13 @@
           </section>
 
           <section id="rules" class="page">
+            <div class="panel-title">
+              <h2 id="scorePeriodLabel">本月积分明细</h2>
+              <div class="annual-score-tools">
+                <label class="year-chip">年份<select id="scoreYear" aria-label="红黑榜年份"></select></label>
+                <label class="year-chip">月份<select id="scoreMonth" aria-label="红黑榜月份"></select></label>
+              </div>
+            </div>
             <div class="split admin-only">
               <section class="panel">
                 <h2>发布红黑榜规则</h2>
@@ -1186,14 +1200,13 @@
                     <label><input name="show_details" type="checkbox" /> <span>公开黑榜明细</span></label>
                     <button class="secondary" type="submit">保存显示设置</button>
                   </form>
-                  <label class="year-chip">年份<input id="scoreYear" type="number" min="2000" max="2100" step="1" /></label>
                 </div>
               </div>
               <div id="annualScoreTable" class="annual-score-wrap"></div>
             </section>
             <section class="panel">
               <div class="panel-title compact-title">
-                <div><h2>积分明细</h2><p>按时间倒序显示当前筛选范围内的全部记录。</p></div>
+                <div><h2>积分明细</h2><p>按时间倒序显示所选月份的全部记录。</p></div>
               </div>
               <div id="scoreList" class="table score-detail-scroll"></div>
             </section>

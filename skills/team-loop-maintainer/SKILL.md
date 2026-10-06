@@ -38,6 +38,7 @@ Use these references conditionally:
 - Keep the sidebar organization switcher hierarchical and collapsible; expand only the selected path by default, keep deep trees internally scrollable, and verify desktop, medium, and mobile layouts.
 - Verify Miro theme first, then check theme overrides and responsive breakpoints.
 - Make each page reload its latest data when opened.
+- Calendar batch selection belongs to `static/meeting-calendar-planner.js`; clear it on identity/organization changes and retain dates across month changes. Keep batch agenda writes in `handlers/meeting_batch.py`, atomic and exact-team scoped, and run `scripts/meeting_batch_smoke_test.py`. Desktop adaptations belong to `static/responsive-desktop.css`; use CSS viewport widths rather than screen resolution or global zoom, and keep category colors stable with readable text labels.
 
 ### Permissions
 
