@@ -1,3 +1,35 @@
+export function renderWordCloud(words, e) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const placed = [];
+  const max = Math.max(1, ...words.map(word => Number(word.count)));
+  const labels = [];
+  words.slice(0, 40).sort((a,b) => b.count-a.count).forEach((word, index) => {
+    let size = 20 + 34 * Math.sqrt(Number(word.count)/max);
+    const vertical = index > 2 && index % 5 === 0;
+    for (; size >= 12; size -= 2) {
+      ctx.font = `700 ${size}px sans-serif`;
+      const length = ctx.measureText(word.text).width + 8;
+      const width = vertical ? size+8 : length, height = vertical ? length : size+8;
+      let location = null;
+      for (let step=0; step<2400; step++) {
+        const angle=step*0.23, radius=1.9*Math.sqrt(step);
+        const x=250+Math.cos(angle)*radius*2.3-width/2;
+        const y=160+Math.sin(angle)*radius*1.5-height/2;
+        if (x<6 || y<6 || x+width>494 || y+height>314) continue;
+        if (placed.some(rect => x<rect.x+rect.width && x+width>rect.x && y<rect.y+rect.height && y+height>rect.y)) continue;
+        location={x,y,width,height};break;
+      }
+      if (!location) continue;
+      placed.push(location);
+      const x=location.x+width/2, y=location.y+height/2;
+      labels.push(`<text class="thank-cloud-word tone-${index%4}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})${vertical ? ' rotate(-90)' : ''}" text-anchor="middle" dominant-baseline="central" font-size="${size}" font-weight="700"><title>${e(word.text)}：${Number(word.count)} 条感谢提及</title>${e(word.text)}</text>`);
+      break;
+    }
+  });
+  return labels.length ? `<svg class="thank-word-cloud" viewBox="0 0 500 320" role="img" aria-label="感谢内容词云：字号越大，提及越多"><title>感谢内容关键词词云</title>${labels.join('')}</svg>` : '<p>感谢内容较简短，暂未提炼出关键词。</p>';
+}
+
 export function createThanksInsights({api, escapeHtml: e, periodQuery, contextKey}) {
   const box = document.querySelector('#thankInsightPopover');
   if (!box) return {close() {}};
@@ -34,9 +66,8 @@ export function createThanksInsights({api, escapeHtml: e, periodQuery, contextKe
       const report=data.reports?.[0];
       if (!report) throw new Error('当前时间范围暂无感谢分析');
       document.querySelector('#thankInsightTitle').textContent=`TOP${report.rank} · ${report.display_name}`;
-      const max=Math.max(1,...report.words.map(word=>word.count));
       content.innerHTML=`<div class="thank-insight-stat"><strong>${Number(report.thanks)} 次感谢</strong><span>${e(report.period_from)} — ${e(report.period_to)}</span></div>
-        <p>${e(report.summary)}</p><div class="thank-word-wall" aria-label="感谢内容关键词">${report.words.map((word,i)=>`<span class="thank-wall-word tone-${i%4}" style="font-size:${14+Math.round(18*word.count/max)}px" title="${Number(word.count)} 条感谢提及">${e(word.text)}<small>${Number(word.count)}</small></span>`).join('') || '<p>感谢内容较简短，暂未提炼出关键词。</p>'}</div>
+        <p>${e(report.summary)}</p><div class="thank-word-wall">${renderWordCloud(report.words, e)}</div>
         <details class="thank-insight-examples"><summary>看看大家怎么说</summary>${report.examples.map(text=>`<blockquote>${e(text)}</blockquote>`).join('')}</details>
         <footer><p>${e(report.method)}</p><small>更新于 ${e(new Date(report.generated_at).toLocaleString('zh-CN'))} · 定时更新</small></footer>`;
       place();

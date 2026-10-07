@@ -110,7 +110,8 @@ export function createMeetingWorkspace({ state, api, escapeHtml: e, toast, organ
       ${meeting.summary ? `<p class="mw-meeting-summary">${e(meeting.summary)}</p>` : ""}
       <div class="mw-header-bottom"><span class="mw-muted">召集人 ${e(meeting.creator || "未记录")}</span><div class="mw-header-actions">
         ${editable ? `<button class="secondary meeting-agenda-picker-btn" type="button" data-meeting-id="${meeting.id}">添加预设议题</button><button class="secondary" type="button" data-mw-custom>自定义议题</button>` : ""}
-        <button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${isAdminView() && !locked ? "签到" : "查看签到"}</button>
+        <button class="secondary meeting-attendance-btn" type="button" data-meeting-id="${meeting.id}">${state.user && state.user.role !== "guest" && !locked ? "签到" : "查看签到"}</button>
+        ${isAdminView() && !locked ? `<button class="secondary meeting-participants-edit-btn" type="button" data-meeting-id="${meeting.id}">更新参会人</button>` : ""}
       </div></div>
       ${isAdminView() && !meeting.inherited ? `<div class="mw-lifecycle" aria-label="会议阶段">${Object.entries(statusMeta).map(([value, meta]) => `<button type="button" data-meeting-id="${meeting.id}" data-meeting-status="${value}" aria-pressed="${normalizeStatus(meeting.status) === value}">${meta[0]}</button>`).join("")}${!locked ? `<button type="button" class="meeting-copy-agenda-btn" data-meeting-id="${meeting.id}">沿用上场议题</button>` : ""}</div>` : ""}
     </header>

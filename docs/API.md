@@ -259,3 +259,5 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 ### Thank You TOP3 内容分析
 
 `GET /api/thank-you/insights?from=YYYY-MM-DD&to=YYYY-MM-DD&receiver_id=ID` 遵循 `thanks.view` 和组织访问检查，只返回当前组织直属、参与感谢榜单的 TOP3 接收者。发送者范围为当前及祖先组织，和榜单口径一致；日期范围不超过一年。`receiver_id` 可省略以读取 TOP3，指定非 TOP3 或其他团队成员返回 404。报告包含 `words`（关键词及提及记录数）、`thanks`、`summary`、原文 `examples`、UTC `generated_at` 和分析方法。只复用与当前原始记录指纹一致的缓存，不返回过期文字墙。
+
+已有会议可由管理员点击“更新参会人”修改名单（PATCH `/api/meetings/{id}` 的 `participant_user_ids`）；至少一位当前团队有效成员。移除成员后，其原签到记录保留，但不计入当前名单统计。普通成员和管理员均可为当前团队本场受邀成员代签到（POST `/api/meetings/{id}/attendance`），普通成员不提交乐捐金额或收款状态，这些财务信息仅管理员可修改。上级继承会议、已结束或归档会议只读；管理员重新开启后可修改。访客不允许签到。Thank You TOP3 小心心展开关键词词云，以字号表示频率，悬停可查看提及次数；默认每周更新。

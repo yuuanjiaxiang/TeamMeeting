@@ -22,3 +22,5 @@
 - 邮件采用内联样式和表格排版；不同邮件客户端粘贴的实际结果仍需在部署环境验证。
 - 参会人名单使用 `meetings.participant_user_ids` 可空 JSON 字段，启动时幂等迁移；不修改 SSO 协议或连接池适配。
 - 执行 `python scripts/meeting_participants_smoke_test.py` 与 `node scripts/meeting_participants_test.mjs` 验证名单持久化、团队范围、签到限制及历史兼容。
+
+已有会议可由管理员点击“更新参会人”修改名单（PATCH `/api/meetings/{id}` 的 `participant_user_ids`）；至少一位当前团队有效成员。移除成员后，其原签到记录保留，但不计入当前名单统计。普通成员和管理员均可为当前团队本场受邀成员代签到（POST `/api/meetings/{id}/attendance`），普通成员不提交乐捐金额或收款状态，这些财务信息仅管理员可修改。上级继承会议、已结束或归档会议只读；管理员重新开启后可修改。访客不允许签到。Thank You TOP3 小心心展开关键词词云，以字号表示频率，悬停可查看提及次数；默认每周更新。

@@ -430,7 +430,7 @@ class OperationsHandlerMixin:
                 raise AppError(400, "会议状态不正确")
             fields.append("status=?")
             values.append(status)
-        if not fields:
+        if not fields and "participant_user_ids" not in data:
             raise AppError(400, "没有可更新字段")
         values.append(meeting_id)
         with connect() as conn:
@@ -438,6 +438,19 @@ class OperationsHandlerMixin:
             meeting = conn.execute("SELECT id, status, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
+            self.require_current_org_unit_access(conn, meeting["org_unit_id"], admin)
+            if "participant_user_ids" in data:
+                if meeting["status"] in ("completed", "archived"):
+                    raise AppError(409, "请先重新开启会议再更新参会人")
+                ids = data["participant_user_ids"]
+                if not isinstance(ids, list) or not ids or any(type(value) is not int or value <= 0 for value in ids):
+                    raise AppError(400, "请至少选择一位有效参会人")
+                ids = list(dict.fromkeys(ids))
+                valid = {row["id"] for row in conn.execute("SELECT id FROM users WHERE active=1 AND org_unit_id=?", (meeting["org_unit_id"],))}
+                if not set(ids).issubset(valid):
+                    raise AppError(400, "参会人必须是当前团队的有效账号")
+                fields.append("participant_user_ids=?")
+                values.insert(-1, json.dumps(ids))
             conn.execute(f"UPDATE meetings SET {', '.join(fields)} WHERE id=?", values)
             write_audit(conn, admin, "meeting.update", "meeting", meeting_id, "会议状态或信息已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "会议已更新", "meetings": self.list_meetings({})}
@@ -1098,7 +1111,9 @@ class OperationsHandlerMixin:
         return {"message": "会议议题已移入回收站", "meetings": self.list_meetings({})}
 
     def upsert_attendance(self, meeting_id):
-        admin = self.require_admin()
+        actor = self.current_user()
+        if actor["role"] == "guest":
+            raise AppError(403, "访客不能签到")
         data = read_json(self)
         status = data.get("status") or "present"
         if status not in ("present", "leave", "absent", "late"):
@@ -1110,17 +1125,30 @@ class OperationsHandlerMixin:
             raise AppError(400, "乐捐金额不正确")
         donation_done = 1 if donation_required and data.get("donation_done") else 0
         with connect() as conn:
-            self.require_meeting_access(conn, meeting_id, admin)
-            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            self.require_meeting_access(conn, meeting_id, actor)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", actor)
             attendee = conn.execute(
                 f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
                 [data.get("user_id"), *org_params],
             ).fetchone()
             if not attendee:
                 raise AppError(400, "签到成员不属于当前团队")
-            invited = conn.execute("SELECT participant_user_ids FROM meetings WHERE id=?", (meeting_id,)).fetchone()[0]
+            meeting = conn.execute("SELECT participant_user_ids, status, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            self.require_current_org_unit_access(conn, meeting["org_unit_id"], actor)
+            if meeting["status"] in ("completed", "archived"):
+                raise AppError(409, "已结束会议不能签到")
+            invited = meeting["participant_user_ids"]
             if invited is not None and attendee["id"] not in json.loads(invited):
                 raise AppError(400, "该成员不在本场会议参会名单中")
+            if actor["role"] != "admin":
+                if "donation_amount" in data or "donation_done" in data:
+                    raise AppError(403, "乐捐金额和收款状态仅管理员可修改")
+                previous = conn.execute("SELECT donation_amount, donation_done, note FROM meeting_attendance WHERE meeting_id=? AND user_id=?", (meeting_id, attendee["id"])).fetchone()
+                donation_amount = previous["donation_amount"] if previous else 0
+                donation_done = previous["donation_done"] if previous else 0
+                data["note"] = previous["note"] if previous else ""
+                if donation_amount or donation_done:
+                    donation_required = 1
             conn.execute(
                 """
                 INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_amount, donation_done, note, updated_by, updated_at)
@@ -1134,9 +1162,9 @@ class OperationsHandlerMixin:
                     updated_by=excluded.updated_by,
                     updated_at=excluded.updated_at
                 """,
-                (meeting_id, data.get("user_id"), status, donation_required, donation_amount, donation_done, data.get("note") or "", admin["id"], now_iso()),
+                (meeting_id, data.get("user_id"), status, donation_required, donation_amount, donation_done, data.get("note") or "", actor["id"], now_iso()),
             )
-            write_audit(conn, admin, "attendance.upsert", "meeting_attendance", meeting_id, "参会状态已更新", {"meeting_id": meeting_id, "user_id": data.get("user_id"), "status": status, "donation_amount": donation_amount}, self.client_address[0])
+            write_audit(conn, actor, "attendance.upsert", "meeting_attendance", meeting_id, "参会状态已更新", {"meeting_id": meeting_id, "user_id": data.get("user_id"), "status": status, "donation_amount": donation_amount}, self.client_address[0])
         return {"message": "参会状态已更新", "meetings": self.list_meetings({})}
 
     def list_links(self):

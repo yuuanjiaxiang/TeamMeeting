@@ -621,6 +621,8 @@ class RequestHandlerMixin:
         self.api_user = user
         parts = path.strip("/").split("/")
         action = {"GET": "view", "POST": "create", "PATCH": "edit", "DELETE": "delete"}.get(method, "view")
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["api", "meetings"] and parts[3] == "attendance":
+            action = "view"
         self.require_module(user, self.module_for_path(path), action)
 
         if path == "/api/team-posts":

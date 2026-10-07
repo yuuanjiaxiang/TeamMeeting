@@ -3912,18 +3912,28 @@ function closeMeetingCreateModal() {
   document.body.classList.remove("modal-open");
 }
 
-function openMeetingCreateModal() {
+function openMeetingCreateModal(meetingId = null) {
+  const meeting = state.meetings.find((item) => Number(item.id) === Number(meetingId));
   const modal = $("#meetingCreateModal");
   const form = $("#meetingCreateForm");
   if (!modal || !form) return;
   form.reset();
+  form.dataset.meetingId = meeting ? meeting.id : "";
+  $("#meetingCreateTitle").textContent = meeting ? "更新参会人" : "创建会议";
+  form.querySelector('button[type="submit"]').textContent = meeting ? "保存参会人" : "创建并选择议题";
+  modal.querySelector(".modal-head p").textContent = meeting ? `${meeting.title} · 保存后签到和出勤统计按新名单计算。` : "先确定时间和主题，创建后立即勾选本场议题。";
+  for (const name of ["meeting_date", "start_time", "title", "summary"]) {
+    form.elements[name].closest("label").hidden = Boolean(meeting);
+    form.elements[name].disabled = Boolean(meeting);
+  }
+  const selected = meeting ? new Set(meetingParticipants(meeting, state.meetingUsers).map(user => Number(user.id))) : null;
   form.elements.meeting_date.value = state.selectedMeetingDate || iso(new Date());
-  $("#meetingParticipantList").innerHTML = state.meetingUsers.filter((user) => user.active !== 0).map((user) => `<label data-participant-search="${escapeHtml(`${user.display_name} ${user.username || ''}`.toLowerCase())}"><input type="checkbox" name="participant_user_ids" value="${Number(user.id)}" checked /><span>${escapeHtml(user.display_name)}${user.username ? `<small>${escapeHtml(user.username)}</small>` : ''}</span></label>`).join("") || '<p>当前团队暂无可选参会人</p>';
+  $("#meetingParticipantList").innerHTML = state.meetingUsers.filter((user) => user.active !== 0).map((user) => `<label data-participant-search="${escapeHtml(`${user.display_name} ${user.username || ''}`.toLowerCase())}"><input type="checkbox" name="participant_user_ids" value="${Number(user.id)}" ${!selected || selected.has(Number(user.id)) ? "checked" : ""} /><span>${escapeHtml(user.display_name)}${user.username ? `<small>${escapeHtml(user.username)}</small>` : ''}</span></label>`).join("") || '<p>当前团队暂无可选参会人</p>';
   updateMeetingParticipantCount();
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
-  form.elements.title.focus();
+  (meeting ? $("#meetingParticipantSearch") : form.elements.title).focus();
 }
 
 function updateMeetingParticipantCount() {
@@ -3940,6 +3950,16 @@ async function createMeetingFromForm(form) {
   if (form.id === "meetingCreateForm") {
     payload.participant_user_ids = $$("#meetingParticipantList input:checked").map((input) => Number(input.value));
     if (!payload.participant_user_ids.length) throw new Error("请至少选择一位参会人");
+  }
+  if (form.dataset.meetingId) {
+    const response = await api(`/api/meetings/${form.dataset.meetingId}`, {method: "PATCH", body: JSON.stringify({participant_user_ids: payload.participant_user_ids})});
+    state.meetings = response.meetings;
+    closeMeetingCreateModal();
+    renderMeetingCalendar(state.meetings);
+    renderMeetingList(state.meetings);
+    renderMeetingDetail(state.meetings.find(item => Number(item.id) === Number(form.dataset.meetingId)));
+    toast("参会人已更新");
+    return;
   }
   const response = await api("/api/meetings", { method: "POST", body: JSON.stringify(payload) });
   state.meetings = response.meetings || state.meetings;
@@ -4006,7 +4026,7 @@ function openMeetingAttendanceModal(meetingId) {
   const meeting = state.meetings.find((entry) => Number(entry.id) === Number(meetingId));
   const modal = $("#meetingAttendanceModal");
   if (!meeting || !modal) return;
-  const editable = isAdminView() && !meeting.inherited;
+  const editable = Boolean(state.user) && state.user.role !== "guest" && !meeting.inherited && !meetingIsLocked(meeting);
   $("#meetingAttendanceSubtitle").textContent = `${meetingScheduleLabel(meeting)} · ${meeting.title}${editable ? " · 点击即保存" : " · 只读"}`;
   $("#meetingAttendanceSummary").innerHTML = renderMeetingAttendanceSummary(meeting);
   $("#meetingAttendanceList").innerHTML = editable ? renderAttendance(meeting) : renderAttendanceReadonly(meeting);
@@ -4045,7 +4065,7 @@ function renderAttendance(meeting) {
       <div class="attendance-status-group" role="group" aria-label="${escapeHtml(user.display_name)}签到状态">
         ${statuses.map(([value, label]) => `<button type="button" class="attendance-status-btn ${status === value ? "active" : ""} ${value}" data-attendance-status="${value}">${label}</button>`).join("")}
       </div>
-      <div class="attendance-donation ${needsDonation ? "" : "hidden"}">
+      <div class="attendance-donation ${needsDonation && isAdminView() ? "" : "hidden"}">
         <label>金额<input name="donation_amount" type="number" min="0" step="1" value="${Number(record.donation_amount || 0) || ""}" placeholder="乐捐金额"></label>
         <label class="donation-received"><input name="donation_done" type="checkbox" ${record.donation_done ? "checked" : ""}> 已收到</label>
       </div>
@@ -4137,7 +4157,7 @@ function updateAttendanceDonationVisibility(form) {
   const status = form.elements.status?.value || "present";
   const needsDonation = status === "late" || status === "absent";
   const donation = form.querySelector(".attendance-donation");
-  donation?.classList.toggle("hidden", !needsDonation);
+  donation?.classList.toggle("hidden", !needsDonation || !isAdminView());
   if (!needsDonation) {
     if (form.elements.donation_amount) form.elements.donation_amount.value = "";
     if (form.elements.donation_done) form.elements.donation_done.checked = false;
@@ -4150,8 +4170,8 @@ function attendancePayload(form) {
   return {
     user_id: form.elements.user_id.value,
     status,
-    donation_amount: needsDonation ? form.elements.donation_amount?.value || 0 : 0,
-    donation_done: needsDonation ? Boolean(form.elements.donation_done?.checked) : false,
+    ...(isAdminView() ? {donation_amount: needsDonation ? form.elements.donation_amount?.value || 0 : 0,
+    donation_done: needsDonation ? Boolean(form.elements.donation_done?.checked) : false} : {}),
   };
 }
 
@@ -4171,6 +4191,7 @@ async function saveAttendanceForm(form) {
       $("#meetingAttendanceSummary").innerHTML = renderMeetingAttendanceSummary(current);
     }
   }
+  if (stateEl) stateEl.textContent = "已保存";
   toast("签到已更新");
 }
 
@@ -7409,6 +7430,8 @@ function bindEvents() {
       openMeetingAgendaModal(meetingAgendaPicker.dataset.meetingId);
       return;
     }
+    const participantsEdit = event.target.closest(".meeting-participants-edit-btn");
+    if (participantsEdit) { openMeetingCreateModal(participantsEdit.dataset.meetingId); return; }
     const meetingAttendance = event.target.closest(".meeting-attendance-btn");
     if (meetingAttendance) {
       openMeetingAttendanceModal(meetingAttendance.dataset.meetingId);

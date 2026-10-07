@@ -38,8 +38,24 @@ def main():
             legacy = request_json(admin,base+'/api/meetings','POST',{'title':'兼容会议'})
             assert next(m for m in legacy['meetings'] if m['id']==legacy['meeting_id'])['participant_user_ids'] is None
             request_json(admin,f"{base}/api/meetings/{legacy['meeting_id']}/attendance",'POST',{'user_id':same_id,'status':'present'})
-            guest = login(base,'user','user123')
-            request_json(guest,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':admin_id},403)
+            member = login(base,'user','user123')
+            request_json(admin,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':admin_id,'status':'late','donation_amount':20,'donation_done':True})
+            request_json(member,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':admin_id})
+            with app.connect() as conn:
+                money = conn.execute('SELECT donation_amount,donation_done,donation_required FROM meeting_attendance WHERE meeting_id=? AND user_id=?',(mid,admin_id)).fetchone()
+                assert tuple(money)==(20,1,1)
+            request_json(member,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':admin_id,'donation_amount':10},403)
+            edited = request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'participant_user_ids':[same_id]})
+            assert next(m for m in edited['meetings'] if m['id']==mid)['attendance']==[]
+            request_json(member,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':admin_id},400)
+            request_json(member,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':same_id})
+            for ids in [[],[other_id],[True],None]:
+                request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'participant_user_ids':ids},400)
+            request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'status':'completed'})
+            request_json(member,f'{base}/api/meetings/{mid}/attendance','POST',{'user_id':same_id},409)
+            request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'participant_user_ids':[admin_id]},409)
+            request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'status':'in_progress'})
+            request_json(admin,f'{base}/api/meetings/{mid}','PATCH',{'participant_user_ids':[admin_id,same_id]})
             print('Meeting participants: persistence, scope, validation, attendance guard, legacy compatibility and migration passed')
         finally:
             server.shutdown();server.server_close();thread.join(5)
