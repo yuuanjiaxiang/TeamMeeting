@@ -53,8 +53,6 @@ body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 3
     gap:12px;
     align-items:start;
   }
-  /* This theme uses a horizontal navigation bar, spanning the full viewport. */
-  body[data-theme="dingtalk"] .app-shell { grid-template-columns:minmax(0,1fr); }
 }
 
 body[data-theme] #memberList .member-card { min-width:0; }
@@ -63,3 +61,64 @@ body[data-theme] #memberList .member-head > div { min-width:0; }
 body[data-theme] #memberList .member-profile h3,
 body[data-theme] #memberList .member-brief p { overflow-wrap:anywhere; }
 body[data-theme] #memberList .member-account { margin-left:0; max-width:100%; }
+
+/* Shared page sizing: browser zoom changes CSS viewport, so layouts reflow naturally. */
+body[data-theme] .content {
+  width:100%;
+  max-width:none;
+  padding:clamp(12px,1.05vw,26px);
+}
+body[data-theme] .page.active { gap:clamp(12px,0.85vw,20px); }
+body[data-theme] :is(.page,.panel,.split,.metrics,.settings-grid,.rule-columns,.shift-layout,.personal-workbench,.forum-content-grid) > * { min-width:0; }
+body[data-theme] :is(.topbar,.panel-title,.toolbar,.section-headline,.calendar-head,.machine-list-heading) { flex-wrap:wrap; }
+body[data-theme] :is(.topbar,.panel-title) > div { min-width:0; }
+body[data-theme] :is(.panel-title,.topbar) :is(h1,h2,p) { overflow-wrap:anywhere; }
+body[data-theme] :is(input,select,textarea) { max-width:100%; }
+body[data-theme] :is(.table,.calendar,.personal-morning-calendar,.process-mindmap-viewport) { min-width:0; max-width:100%; }
+body[data-theme] :is(.modal-card,dialog) { overflow-y:auto; overscroll-behavior:contain; }
+@media (min-width:1181px) {
+  body[data-theme] .app-shell { grid-template-columns:clamp(210px,12.4vw,260px) minmax(0,1fr); }
+  body[data-theme="dingtalk"] .app-shell { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] .panel { padding:clamp(16px,1vw,24px); }
+  body[data-theme] .metrics { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  body[data-theme] .settings-grid { grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
+  body[data-theme] .moment-card-grid { grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }
+  body[data-theme] .shift-layout { grid-template-columns:minmax(0,1fr) clamp(250px,17vw,360px); }
+  body[data-theme] #meetings .meeting-workbench { grid-template-columns:clamp(220px,15vw,300px) minmax(0,1fr); }
+  body[data-theme] .sidebar nav { min-height:0; overflow-y:auto; flex:1 1 auto; }
+  body[data-theme] .sidebar .user-box { flex-shrink:0; }
+  body[data-theme="dingtalk"] .sidebar nav { overflow-x:auto; }
+}
+@media (min-width:901px) and (max-width:1180px) {
+  body[data-theme] .app-shell { grid-template-columns:200px minmax(0,1fr); }
+  body[data-theme] .sidebar { padding:12px 10px; gap:10px; }
+  body[data-theme] .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  body[data-theme] :is(.split,.rule-columns,.shift-layout,.settings-grid,.meeting-admin-grid) { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] #meetings .meeting-workbench { grid-template-columns:200px minmax(0,1fr); }
+  body[data-theme] #links.active { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] #links .link-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; }
+}
+@media (max-width:900px) {
+  body[data-theme] .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  body[data-theme] #links.active { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] #meetings .meeting-workbench { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] #meetings .meeting-list-panel { position:static; border-right:0; padding:12px 0; }
+  body[data-theme] #meetings .meeting-detail-panel { padding:16px 0; }
+  body[data-theme] .toolbar { justify-content:flex-start; width:100%; }
+  body[data-theme] .period-controls { grid-template-columns:repeat(2,minmax(0,1fr)); max-width:100%; }
+  body[data-theme] .moment-card-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr)); }
+}
+@media (max-width:480px) {
+  body[data-theme] #links .link-toolbar { grid-template-columns:minmax(0,1fr); }
+  body[data-theme] :is(.metrics,.settings-grid) { grid-template-columns:minmax(0,1fr); }
+}
+/* The workbench entry form has six controls; avoid fixed minimum tracks. */
+@media (min-width:1181px) {
+  body[data-theme] .personal-create-form {
+    grid-template-columns:minmax(0,1fr) minmax(0,1.1fr) minmax(0,1.1fr) minmax(150px,0.8fr) 140px auto;
+  }
+  body[data-theme] .personal-create-form > * { min-width:0; }
+}
+@media (min-width:901px) and (max-width:1500px) {
+  body[data-theme] .personal-create-form { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
