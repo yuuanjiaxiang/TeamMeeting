@@ -11,7 +11,7 @@ def main():
                           TEAM_LOOP_BACKUP_DIR=str(Path(folder)/'backups'),TEAM_LOOP_ENV='gray')
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
         import server as app
-        from team_loop.thanks_insights import refresh_all, reports
+        from team_loop.thanks_insights import refresh_all, reports, KEYWORDS
         app.init_db();app.init_db()
         with app.connect() as conn:
             admin_id,org=conn.execute("SELECT id,org_unit_id FROM users WHERE username='admin'").fetchone()
@@ -34,6 +34,16 @@ def main():
             conn.execute("UPDATE thank_you_votes SET evidence='感谢耐心培训分享经验' WHERE receiver_id=? AND voter_id=? AND week_start='2026-10-01'",(others[0],admin_id))
             changed=reports(conn,org,'2026-10-01','2026-10-31')
             assert any(word['text']=='培训' for word in changed[0]['words'])
+            rich_text = '、'.join(dict.fromkeys(KEYWORDS))
+            conn.execute("UPDATE thank_you_votes SET evidence=? WHERE receiver_id=? AND voter_id=? AND week_start='2026-10-01'",(rich_text,others[0],admin_id))
+            richer = reports(conn,org,'2026-10-01','2026-10-31')[0]
+            assert 40 <= len(richer['words']) <= 60
+            source = rich_text + '感谢专业技术支持、故障定位与问题解决。'
+            assert all(word['text'] in source for word in richer['words'])
+            # A cached report from the previous extractor must be regenerated.
+            refresh_all(conn)
+            conn.execute("UPDATE thank_you_insights SET fingerprint='previous-analysis-version',report_json='{}'")
+            assert reports(conn,org,'2026-10-01','2026-10-31')[0]['words'] == richer['words']
         server,thread=start_server(app.Handler);base=f'http://127.0.0.1:{server.server_port}'
         try:
             admin=login(base,'admin','admin123')

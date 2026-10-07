@@ -1,33 +1,45 @@
 export function renderWordCloud(words, e) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  const placed = [];
-  const max = Math.max(1, ...words.map(word => Number(word.count)));
-  const labels = [];
-  words.slice(0, 40).sort((a,b) => b.count-a.count).forEach((word, index) => {
-    let size = 20 + 34 * Math.sqrt(Number(word.count)/max);
-    const vertical = index > 2 && index % 5 === 0;
-    for (; size >= 12; size -= 2) {
-      ctx.font = `700 ${size}px sans-serif`;
-      const length = ctx.measureText(word.text).width + 8;
-      const width = vertical ? size+8 : length, height = vertical ? length : size+8;
-      let location = null;
-      for (let step=0; step<2400; step++) {
-        const angle=step*0.23, radius=1.9*Math.sqrt(step);
-        const x=250+Math.cos(angle)*radius*2.3-width/2;
-        const y=160+Math.sin(angle)*radius*1.5-height/2;
-        if (x<6 || y<6 || x+width>494 || y+height>314) continue;
-        if (placed.some(rect => x<rect.x+rect.width && x+width>rect.x && y<rect.y+rect.height && y+height>rect.y)) continue;
-        location={x,y,width,height};break;
+  const ctx = document.createElement('canvas').getContext('2d');
+  const entries = words.filter(word => word.text && Number(word.count)>0).slice(0,60)
+    .sort((a,b) => b.count-a.count || b.text.length-a.text.length);
+  if (!entries.length) return '<p>感谢内容较简短，暂未提炼出关键词。</p>';
+  const max = Math.max(...entries.map(word => Number(word.count)));
+  // Search the entire rectangle, including the corners, with a tight gap.
+  const points=[];
+  for (let y=8;y<280;y+=6) for (let x=8;x<500;x+=6) points.push({x,y});
+  points.sort((a,b) => Math.hypot((a.x-250)/250,(a.y-140)/140)-Math.hypot((b.x-250)/250,(b.y-140)/140));
+  function layout(scale) {
+    const placed=[];
+    entries.forEach((word,index) => {
+      const vertical=index>2 && index%6===0 && word.text.length<=5;
+      const initial=(17+34*Math.sqrt(Number(word.count)/max)) * scale;
+      for (let size=initial;size>=12;size-=3) {
+        ctx.font=`700 ${size}px system-ui,sans-serif`;
+        const length=ctx.measureText(word.text).width+4;
+        const width=vertical ? size*1.3+6 : length, height=vertical ? length : size*1.3+6;
+        const point=points.find(({x,y}) => x-width/2>=4 && x+width/2<=496 && y-height/2>=4 && y+height/2<=276 &&
+          !placed.some(rect => Math.abs(x-rect.x)<(width+rect.width)/2 && Math.abs(y-rect.y)<(height+rect.height)/2));
+        if (!point) continue;
+        placed.push({...point,width,height,size,vertical,word,index});
+        break;
       }
-      if (!location) continue;
-      placed.push(location);
-      const x=location.x+width/2, y=location.y+height/2;
-      labels.push(`<text class="thank-cloud-word tone-${index%4}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})${vertical ? ' rotate(-90)' : ''}" text-anchor="middle" dominant-baseline="central" font-size="${size}" font-weight="700"><title>${e(word.text)}：${Number(word.count)} 条感谢提及</title>${e(word.text)}</text>`);
-      break;
-    }
-  });
-  return labels.length ? `<svg class="thank-word-cloud" viewBox="0 0 500 320" role="img" aria-label="感谢内容词云：字号越大，提及越多"><title>感谢内容关键词词云</title>${labels.join('')}</svg>` : '<p>感谢内容较简短，暂未提炼出关键词。</p>';
+    });
+    return placed;
+  }
+  let placed=[];
+  for (const scale of [1.45,1.2,1,0.85]) {
+    const candidate=layout(scale);
+    const area=list => list.reduce((total,item) => total+item.width*item.height,0);
+    if (candidate.length>placed.length || candidate.length===placed.length && area(candidate)>area(placed)) placed=candidate;
+    if (placed.length===entries.length && area(placed)>500*280*0.65) break;
+  }
+  // Trim unused margins for sparse source data instead of repeating invented words.
+  const left=Math.min(...placed.map(r=>r.x-r.width/2))-4;
+  const top=Math.min(...placed.map(r=>r.y-r.height/2))-4;
+  const width=Math.max(...placed.map(r=>r.x+r.width/2))-left+4;
+  const height=Math.max(...placed.map(r=>r.y+r.height/2))-top+4;
+  const labels=placed.map(({x,y,size,vertical,word,index}) => `<text class="thank-cloud-word tone-${index%4}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})${vertical?' rotate(-90)':''}" text-anchor="middle" dominant-baseline="central" font-size="${size.toFixed(1)}" font-weight="700"><title>${e(word.text)}：${Number(word.count)} 条感谢提及</title>${e(word.text)}</text>`);
+  return `<svg class="thank-word-cloud" viewBox="${left} ${top} ${width} ${height}" role="img" aria-label="感谢内容词云：字号越大，提及越多"><title>感谢内容关键词词云</title>${labels.join('')}</svg>`;
 }
 
 export function createThanksInsights({api, escapeHtml: e, periodQuery, contextKey}) {

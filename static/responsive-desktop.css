@@ -162,8 +162,8 @@ body[data-theme] #thankStars button.thank-rank-heart:hover, body[data-theme] #th
 .thank-statistics strong { font-size:22px; font-variant-numeric:tabular-nums; }
 .thank-statistics span { font-size:12px; text-align:center; color:var(--muted); }
 
-.thank-word-wall { display:block; padding:8px; min-height:0; }
-.thank-word-cloud { display:block; width:100%; height:auto; }
+.thank-word-wall { display:block; padding:10px; min-height:0; background:linear-gradient(145deg,var(--panel-soft,#f8f9ff),var(--panel,#fff)); }
+.thank-word-cloud { display:block; width:100%; height:auto; max-height:320px; }
 .thank-cloud-word { fill:#c5446b; font-family:system-ui,sans-serif; }
 .thank-cloud-word.tone-1 { fill:#4265bb; }
 .thank-cloud-word.tone-2 { fill:#26816f; }

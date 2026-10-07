@@ -8,6 +8,8 @@ import json
 import re
 
 KEYWORDS = ('技术支持','现场支持','故障定位','问题解决','经验分享','知识分享','团队协作','项目推进','沟通协调','质量改进','交付保障','持续跟进','认真负责','细致耐心','响应及时','主动帮助','主动协助','排障','调试','复盘','培训','协调','沟通','协作','支持','跟进','交付','优化','自动化','测试','质量','耐心','专业','负责','效率','帮助','文档','分享','经验','机台','维修','供应商','风险','数据','代码')
+ANALYSIS_VERSION = 'dense-cloud-v2'
+KEYWORDS += ('解决问题','解决方案','技术指导','业务支持','及时响应','及时处理','耐心解答','细心检查','积极配合','主动承担','加班','协同','合作','配合','指导','解答','处理','排查','定位','修复','整改','改进','创新','需求','设计','开发','部署','上线','维护','运维','实施','计划','进度','推进','保障','验收','项目','产品','客户','服务','培训指导','知识传递','资料整理','整理','分析','总结','学习','成长','责任心','责任','细心','细致','认真','积极','主动','及时','高效','热情','敬业','投入','专注','可靠','担当','执行力','贡献','建议','突破','攻坚','应急','救场','值班','安全','稳定','性能','流程','工具','系统','设备','现场','方案','沟通顺畅','无私分享','辛苦付出','持续改进')
 STOP = {'thanks','thank','you','http','https','www','com'}
 
 
@@ -40,7 +42,7 @@ def reports(conn, org_id, start, end, persist=False):
     if persist:
         conn.execute('DELETE FROM thank_you_insights WHERE org_unit_id=? AND period_from=? AND period_to=?',(org_id,start,end))
     for rank,(uid,rows) in enumerate(top,1):
-        fingerprint=hashlib.sha256(json.dumps(rows,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+        fingerprint=hashlib.sha256((ANALYSIS_VERSION + json.dumps(rows,ensure_ascii=False,sort_keys=True)).encode()).hexdigest()
         cache=conn.execute('SELECT fingerprint,report_json FROM thank_you_insights WHERE org_unit_id=? AND period_from=? AND period_to=? AND receiver_id=?',(org_id,start,end,uid)).fetchone()
         if cache and cache['fingerprint']==fingerprint and not persist:
             report=json.loads(cache['report_json']);report['rank']=rank
@@ -50,10 +52,14 @@ def reports(conn, org_id, start, end, persist=False):
                 text=re.sub(r'<(script|style)\b[^>]*>.*?</\1>', ' ', row['evidence'], flags=re.I | re.S)
                 text=html.unescape(re.sub(r'<[^>]*>', ' ', text)).lower()
                 words={word for word in KEYWORDS if word in text}
-                words={word for word in words if not any(word!=other and word in other for other in words)}
+                # Keep both specific phrases and their meaningful source terms.
+                # Short clauses add vocabulary beyond the maintained dictionary.
+                clauses = re.split(r'[，。！？；、\s,.!?;:：]|感谢|谢谢|非常|特别|以及|并且|能够|帮忙|帮助|我们|大家|你的|您的|他的|她的|为我|给予', text)
+                words.update(clause for clause in clauses if re.fullmatch(r'[\u4e00-\u9fff]{2,8}', clause)
+                             and clause not in {'感谢','谢谢','辛苦了','小伙伴','同事','本周','这次'})
                 words.update(token for token in re.findall(r'\b[a-z][a-z0-9_+#.-]{1,23}\b',text) if token not in STOP)
                 counts.update(words)
-            wall=[{'text':word,'count':count} for word,count in sorted(counts.items(),key=lambda item:(-item[1],-len(item[0]),item[0]))[:18]]
+            wall=[{'text':word,'count':count} for word,count in sorted(counts.items(),key=lambda item:(-item[1],-len(item[0]),item[0]))[:60]]
             topics='、'.join(word['text'] for word in wall[:3])
             report={'receiver_id':uid,'display_name':rows[0]['display_name'],'rank':rank,'thanks':len(rows),
                     'period_from':start,'period_to':end,'words':wall,
