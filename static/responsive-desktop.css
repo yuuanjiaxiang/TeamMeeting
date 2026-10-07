@@ -14,15 +14,14 @@ body[data-theme] #meetings .meeting-date-check input { width:18px; height:18px; 
 body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 32px); max-height:calc(100dvh - 32px); }
 @media (min-width:1921px) and (max-width:2560px) {
   body[data-theme] .app-shell { grid-template-columns:238px minmax(0,1fr); }
-  body[data-theme] .content { max-width:1800px; padding:26px; }
+  body[data-theme] .content { max-width:none; padding:26px; }
 }
 @media (min-width:1181px) and (max-width:1920px) {
   body[data-theme] .app-shell { grid-template-columns:210px minmax(0,1fr); }
-  body[data-theme] .content { max-width:1600px; padding:20px; }
+  body[data-theme] .content { max-width:none; padding:20px; }
   body[data-theme] .sidebar { padding:12px 10px; gap:12px; }
   body[data-theme] .topbar { padding:18px; margin-bottom:16px; }
   body[data-theme] .panel { padding:16px; }
-  body[data-theme] .member-layout { grid-template-columns:repeat(3,minmax(0,1fr)); }
   body[data-theme] #meetings .meeting-workbench { grid-template-columns:220px minmax(0,1fr); }
   body[data-theme] #meetings .meeting-detail-panel { padding:18px; }
   body[data-theme] .morning-board-layout { padding-right:196px; }
@@ -30,7 +29,6 @@ body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 3
 }
 @media (min-width:901px) and (max-width:1440px) {
   body[data-theme] .content { padding:16px; }
-  body[data-theme] .member-layout { grid-template-columns:repeat(2,minmax(0,1fr)); }
   body[data-theme] .shift-layout { grid-template-columns:minmax(0,1fr) 250px; }
   body[data-theme] .forum-content-grid { grid-template-columns:minmax(0,1fr); }
   body[data-theme] .forum-sidebar { display:none; }
@@ -47,3 +45,21 @@ body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 3
   .meeting-batch-targets { grid-template-columns:minmax(0,1fr); }
   body[data-theme] .modal-card, body[data-theme] dialog { max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); }
 }
+
+/* Fill desktop space with readable profile cards rather than fixed column counts. */
+@media (min-width:901px) {
+  body[data-theme] #memberList.member-layout {
+    grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+    gap:12px;
+    align-items:start;
+  }
+  /* This theme uses a horizontal navigation bar, spanning the full viewport. */
+  body[data-theme="dingtalk"] .app-shell { grid-template-columns:minmax(0,1fr); }
+}
+
+body[data-theme] #memberList .member-card { min-width:0; }
+body[data-theme] #memberList .member-profile { min-width:0; padding:14px; }
+body[data-theme] #memberList .member-head > div { min-width:0; }
+body[data-theme] #memberList .member-profile h3,
+body[data-theme] #memberList .member-brief p { overflow-wrap:anywhere; }
+body[data-theme] #memberList .member-account { margin-left:0; max-width:100%; }
