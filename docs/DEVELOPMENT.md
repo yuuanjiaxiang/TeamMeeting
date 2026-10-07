@@ -9,7 +9,7 @@ Team Loop 是无构建步骤的模块化单体应用：
 - 后端：Python 标准库 `http.server`、`sqlite3`；
 - 前端：原生 ES Module、HTML、CSS；
 - 数据库：SQLite；
-- 部署：Windows PowerShell 与批处理脚本；
+- 部署：Linux Bash 后台管理与可选 systemd；Windows PowerShell/批处理为兼容方案；
 - 第三方前端资源：放在 `static/vendor/`，运行时不依赖外网。
 
 这种结构适合小团队低成本部署。二次开发应优先保持“无需 pip/npm 安装”和“单目录可发布”的特性。
@@ -329,3 +329,7 @@ Mock 账号仅用于灰度体验，禁止把灰度数据库、`mock_backups/` �
 桌面适配统一放在 `static/responsive-desktop.css`，在各模块样式之后加载。以 1920×1080、100% 浏览器缩放为基准，使用 CSS 视口宽度、`clamp()` 与 `minmax()` 调整内容区、侧栏、卡片和间距。不要设置全局 `zoom` 或通过 `transform: scale()` 缩放页面。浏览器缩放改变 CSS 视口后，应触发布局重排，并保留文字可读性。
 
 901–1180px 保留紧凑侧栏，统计卡片采用两列，复杂分栏改为单列；900px 及以下使用顶部导航，会议列表与详情上下排列；480px 及以下统计和筛选使用单列。钉钉仅在 1181px 以上保留横向导航。表格、日历和流程图允许在各自容器内滚动，弹窗高度不得超过可见视口。
+
+Linux 运行入口为 `deploy.sh` 和 `scripts/linux_service.py`，默认独立会话后台运行，所有运行状态、日志、源码发布快照与数据库备份放在数据目录。Linux 默认方案见 [LINUX_DEPLOYMENT.md](LINUX_DEPLOYMENT.md)；Windows 脚本保留兼容。验证运行 `python3 scripts/linux_service_smoke_test.py`，仅使用隔离临时目录。
+
+Thank You 内容分析独立在 `team_loop/thanks_insights.py` 与 `static/thanks-insights.js`，不改变榜单的直属接收者及祖先发送者口径。关键词仅从原文提取，不请求外部模型。周任务由 `run_thanks_analysis.sh` / systemd timer 调用 `scripts/thanks_analysis.py`，与 Web 服务共享数据目录；验证 `python3 scripts/thanks_insights_smoke_test.py`。小心心浮层必须关闭过期组织/身份/月份上下文，原文和关键词始终转义，手机浮层不能超出视口。

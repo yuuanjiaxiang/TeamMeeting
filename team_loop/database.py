@@ -1398,6 +1398,17 @@ def init_db():
                 used_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS thank_you_insights (
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                period_from TEXT NOT NULL,
+                period_to TEXT NOT NULL,
+                receiver_id INTEGER NOT NULL REFERENCES users(id),
+                fingerprint TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                PRIMARY KEY(org_unit_id, period_from, period_to, receiver_id)
+            );
+
             CREATE TABLE IF NOT EXISTS thank_you_votes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 voter_id INTEGER NOT NULL REFERENCES users(id),
@@ -1597,6 +1608,7 @@ def init_db():
         ensure_column(conn, "meeting_items", "materials", "TEXT")
         ensure_column(conn, "meeting_items", "carried_from_id", "INTEGER")
         ensure_column(conn, "meetings", "start_time", "TEXT")
+        ensure_column(conn, "meetings", "participant_user_ids", "TEXT")
         ensure_column(conn, "meetings", "org_unit_id", "INTEGER")
         ensure_column(conn, "meeting_attendance", "donation_amount", "REAL NOT NULL DEFAULT 0")
         ensure_column(conn, "meeting_topic_options", "owner_id", "INTEGER")

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Team Loop Thank You TOP3 word walls
+
+[Service]
+Type=oneshot
+User=teamloop
+Group=teamloop
+WorkingDirectory=/opt/teamloop
+EnvironmentFile=-/etc/teamloop.env
+ExecStart=/usr/bin/python3 /opt/teamloop/scripts/thanks_analysis.py --timezone Asia/Shanghai
+UMask=0077

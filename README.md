@@ -1,6 +1,6 @@
 # Team Loop
 
-Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端使用模块化 Python 标准库服务和 SQLite，前端使用原生 HTML/CSS/JavaScript，适合在 Windows 单机或局域网环境快速部署。
+Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端使用模块化 Python 标准库服务和 SQLite，前端使用原生 HTML/CSS/JavaScript，默认在 Linux 服务器后台运行，也兼容 Windows 单机或局域网部署。
 
 ## 主要能力
 
@@ -12,7 +12,7 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 - 会议沙盘、团队独立的两级预设议题、下级责任人协调、开始时间、弹窗签到、纪要与可选 Thank You 邮件模板
 - 团队独立机台档案、白夜班月历排班、批量排班和工时统计
 - 红黑榜细则、月度/年度积分看板、个人历史与黑榜可见性控制
-- Thank You 多人感谢与月度/年度排名，候选人支持可访问下级，排名按当前层级接收者统计
+- Thank You 感谢统计、TOP3 小心心关键词文字墙、每周定时内容分析，多人感谢与月度/年度排名，候选人支持可访问下级，排名按当前层级接收者统计
 - 工作台统计详情弹窗与[组织数据口径说明](docs/DASHBOARD_SCOPE.md)，区分本级、下级可见和上级继承
 - 常用链接归档、搜索、标签、质量和访问量管理
 - 论坛式团队讨论区：主题分类、搜索排序、楼中回复、快捷回应、本地完整 Emoji、作者编辑删除与回收恢复
@@ -23,12 +23,14 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 
 ## 五分钟启动
 
-1. 安装 Python 3.10 或更高版本。
-2. 双击 `start_hot_server.bat` 启动开发模式，或双击 `start_server.bat` 启动正式模式。
-3. 浏览器访问 `http://127.0.0.1:8000/`。
-4. 首次登录后，由管理员在“用户管理”和“系统管理”中完成账号、权限与系统名称配置。
+1. 安装 Python 3.10+，将仓库放在固定目录。
+2. 在 Linux 执行 `bash start_server.sh`，服务自动后台运行；关闭终端后仍继续运行。
+3. 执行 `bash deployment_status.sh` 查看状态，`bash stop_server.sh` 停止，`bash restart_server.sh` 重启。
+4. 正式服务默认监听 `127.0.0.1:8000`，通过 Nginx HTTPS 反向代理访问；启动后修改默认管理员密码。
 
-项目不依赖 pip 或 npm 安装。首次启动会自动创建并迁移 `data/weekly_team.db`。
+详见 [Linux 部署与后台运行](docs/LINUX_DEPLOYMENT.md)。开发测试可执行 `bash start_hot_server.sh`，同样后台运行；Windows 继续使用 `.bat` / `deploy.ps1`。
+
+项目不依赖 pip 或 npm 安装。首次启动自动创建并迁移 `data/weekly_team.db`，日志与 PID 元数据在 `data/deploy/runtime/`。可通过 `TEAM_LOOP_PYTHON=/path/to/python3` 指定解释器。
 
 后端默认启用 SQLite WAL、15 秒写锁等待和最多 64 个活动请求线程，按约 100 人同时在线的读多写少场景设计。数据库必须放在服务器本地磁盘，不能放在 SMB/NAS 共享目录。
 
@@ -36,7 +38,8 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 
 - [文档导航](docs/README.md)
 - [使用手册](docs/USER_GUIDE.md)
-- [Windows 部署与运维](docs/DEPLOYMENT.md)
+- [Linux 部署与后台运行（默认）](docs/LINUX_DEPLOYMENT.md)
+- [Windows 部署与运维（兼容）](docs/DEPLOYMENT.md)
 - [二次开发指南](docs/DEVELOPMENT.md)
 - [项目跟进功能与远端合并说明](docs/PROJECT_FOLLOWUP.md)
 - [HTTP API 参考](docs/API.md)
@@ -48,29 +51,27 @@ Team Loop 是面向技术项目团队的轻量协作与周例会系统。后端�
 
 ## 常用命令
 
-```powershell
-# 开发热更新
-python scripts\dev_server.py --host 0.0.0.0 --port 8000
+```bash
+# 默认 Linux 后台服务
+bash start_server.sh
+bash deployment_status.sh
+bash restart_server.sh
+bash stop_server.sh
 
-# 单次启动
-python server.py --host 0.0.0.0 --port 8000
+# 开发热更新后台服务（先停止占用同端口的正式服务）
+bash start_hot_server.sh
+bash deploy.sh stop --env dev
 
-# 只执行数据库迁移
-python server.py --migrate-only
-
-# 部署灰度环境
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gray
-
-# 灰度提升为正式版本
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Promote
-
-# 查看部署状态
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Status
+# 迁移 / 灰度 / 正式提升 / 回滚
+bash deploy.sh migrate
+bash deploy_gray.sh
+bash promote_production.sh
+bash rollback_production.sh
 ```
 
 正式环境默认使用 8000 端口，灰度环境默认使用 8001 端口。灰度数据库是正式数据库的一致性快照，灰度操作不会写回正式数据库。
 
-公共域名部署使用 `scripts\nginx_proxy.ps1` 生成并管理 Nginx 配置。正式服务应监听 `127.0.0.1:8000`，由 Nginx 对外开放 80/443；完整命令、证书和 SSO 回调设置见 [Windows 部署与运维](docs/DEPLOYMENT.md#10-公共域名与-nginx)。
+公共域名部署默认使用 Linux Nginx 配置和 `scripts/nginx_proxy.sh`。正式服务监听 `127.0.0.1:8000`，由 Nginx 对外开放 80/443；命令、证书和后台服务配置见 [Linux 部署与后台运行](docs/LINUX_DEPLOYMENT.md)。Windows 的 PowerShell 脚本继续保留。
 
 ## 数据安全
 

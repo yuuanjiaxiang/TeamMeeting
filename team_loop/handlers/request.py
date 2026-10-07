@@ -878,6 +878,9 @@ class RequestHandlerMixin:
         if path == "/api/dashboards/shifts" and method == "GET":
             return self.shift_dashboard(query)
 
+        if path == "/api/thank-you/insights" and method == "GET":
+            return self.thank_you_insights(query, user)
+
         if path == "/api/thank-you":
             if method == "GET":
                 return {

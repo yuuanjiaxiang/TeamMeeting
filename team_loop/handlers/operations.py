@@ -1,4 +1,5 @@
 from ..permissions import *
+from ..thanks_insights import reports as thank_insight_reports
 
 
 class OperationsHandlerMixin:
@@ -372,7 +373,10 @@ class OperationsHandlerMixin:
                     })
                     seen_topics.add(item["type_id"])
             meeting["items"] = meeting_items
+            meeting["participant_user_ids"] = json.loads(meeting["participant_user_ids"]) if meeting["participant_user_ids"] is not None else None
             meeting["attendance"] = attendance_map.get(meeting["id"], [])
+            if meeting["participant_user_ids"] is not None:
+                meeting["attendance"] = [record for record in meeting["attendance"] if record["user_id"] in meeting["participant_user_ids"]]
             meeting["topic_types"] = meeting_topics
             meeting["topic_type_ids"] = [topic["id"] for topic in meeting_topics]
         return meetings
@@ -386,14 +390,23 @@ class OperationsHandlerMixin:
             default_title = get_setting_value(conn, "meeting_default_title", "周例会")
             org_context = self.organization_context(conn, user)
             org_unit_id = org_context["selected"]["id"] if org_context["selected"] else user.get("org_unit_id")
+            participant_ids = data.get("participant_user_ids")
+            if "participant_user_ids" in data:
+                if not isinstance(participant_ids, list) or not participant_ids or any(type(value) is not int or value <= 0 for value in participant_ids):
+                    raise AppError(400, "请至少选择一位有效参会人")
+                participant_ids = list(dict.fromkeys(participant_ids))
+                org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+                valid_ids = {row["id"] for row in conn.execute(f"SELECT u.id FROM users u WHERE u.active=1 AND {org_where}", org_params)}
+                if not set(participant_ids).issubset(valid_ids):
+                    raise AppError(400, "参会人必须是当前团队的有效账号")
             cursor = conn.execute(
-                "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, org_unit_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (data.get("meeting_date") or today_iso(), start_time or None, data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], org_unit_id, now_iso()),
+                "INSERT INTO meetings(meeting_date, start_time, title, summary, status, created_by, org_unit_id, created_at, participant_user_ids) VALUES(?,?,?,?,?,?,?,?,?)",
+                (data.get("meeting_date") or today_iso(), start_time or None, data.get("title") or default_title, data.get("summary") or "", "draft", user["id"], org_unit_id, now_iso(), json.dumps(participant_ids) if participant_ids is not None else None),
             )
             meeting_id = cursor.lastrowid
             for topic_id in data.get("topic_type_ids") or []:
                 link_meeting_topic(conn, meeting_id, topic_id, user["id"])
-            write_audit(conn, user, "meeting.create", "meeting", meeting_id, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso()}, self.client_address[0])
+            write_audit(conn, user, "meeting.create", "meeting", meeting_id, "会议已创建", {"meeting_date": data.get("meeting_date") or today_iso(), "participant_user_ids": participant_ids}, self.client_address[0])
         return {"message": "会议已创建", "meeting_id": meeting_id, "meetings": self.list_meetings({})}
 
     def update_meeting(self, meeting_id):
@@ -1105,6 +1118,9 @@ class OperationsHandlerMixin:
             ).fetchone()
             if not attendee:
                 raise AppError(400, "签到成员不属于当前团队")
+            invited = conn.execute("SELECT participant_user_ids FROM meetings WHERE id=?", (meeting_id,)).fetchone()[0]
+            if invited is not None and attendee["id"] not in json.loads(invited):
+                raise AppError(400, "该成员不在本场会议参会名单中")
             conn.execute(
                 """
                 INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_amount, donation_done, note, updated_by, updated_at)
@@ -1661,6 +1677,25 @@ class OperationsHandlerMixin:
                 self.client_address[0],
             )
         return {"message": "感谢记录已删除"}
+
+    def thank_you_insights(self, query, viewer=None):
+        try:
+            start = dt.date.fromisoformat((query.get("from") or [today_iso()[:7] + "-01"])[0])
+            end = dt.date.fromisoformat((query.get("to") or [today_iso()])[0])
+            receiver_id = int((query.get("receiver_id") or [0])[0])
+        except (TypeError, ValueError):
+            raise AppError(400, "感谢分析日期或成员不正确")
+        if start > end or (end - start).days > 366:
+            raise AppError(400, "感谢分析请选择一年以内的有效日期范围")
+        with connect() as conn:
+            context = self.organization_context(conn, viewer)
+            org_id = (context.get("selected") or {}).get("id")
+            result = thank_insight_reports(conn, org_id, start.isoformat(), end.isoformat())
+        if receiver_id:
+            result = [report for report in result if report["receiver_id"] == receiver_id]
+            if not result:
+                raise AppError(404, "该成员不在当前团队所选时间的 Thank You TOP3 中")
+        return {"reports": result}
 
     def thank_you_dashboard(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")

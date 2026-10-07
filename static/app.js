@@ -1,6 +1,8 @@
+import { createThanksInsights } from "./thanks-insights.js";
 import "./vendor/emoji-picker-element/index.js";
 import zhCnEmojiI18n from "./vendor/emoji-picker-element/i18n/zh_CN.js";
 import { createMorningFollowup, matchesMorningFocus, newestMorningHistory } from "./morning-followup.js";
+import { meetingParticipants } from "./meeting-participants.js";
 import { createMeetingWorkspace } from "./meeting-workspace.js";
 import { buildMinutesDocument } from "./meeting-minutes.js";
 import { createDashboardDetails } from "./dashboard-details.js";
@@ -355,6 +357,7 @@ async function selectOrganizationPath(path) {
   state.thankUsers = [];
   state.morningItems = [];
   state.morningUsers = [];
+  thanksInsights.close();
   state.meetingUsers = [];
   state.coordinationUsers = [];
   state.shiftUsers = [];
@@ -692,6 +695,11 @@ function thankPeriodRange() {
   };
 }
 
+const thanksInsights = createThanksInsights({
+  api, escapeHtml, periodQuery: thankPeriodQuery,
+  contextKey: () => `${state.user?.id || "guest"}:${selectedOrganizationPath()}`,
+});
+
 function thankPeriodQuery() {
   const range = thankPeriodRange();
   return `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`;
@@ -782,6 +790,7 @@ async function transitionToLoggedOut(showLogin = true, refresh = true) {
   document.body.style.overflow = '';
   closeUserTypePermissionModal();
   closeUserAccountModal();
+  thanksInsights.close();
   state.user = null;
   state.permissions = {};
   state.permissionPreview = null;
@@ -867,6 +876,7 @@ function switchPage(id, updateRoute = true) {
     $("#appView")?.classList.remove("hidden");
     $("#loginEntryBtn")?.classList.remove("hidden");
   }
+  thanksInsights.close();
   state.currentPage = id;
   if (updateRoute) updatePageInLocation(id);
   $$(".page").forEach((page) => page.classList.toggle("active", page.id === id));
@@ -1005,13 +1015,13 @@ function renderRank(items, field, unit) {
   }).join("");
 }
 
-function renderThankRank(items = []) {
+function renderThankRank(items = [], interactive = false) {
   if (!items.length) return `<p>暂无数据</p>`;
   return items.map((item, index) => `
     <div class="rank-row thank-rank-row">
       <span class="rank-no">${index + 1}</span>
       <strong>${escapeHtml(item.display_name || "未命名")}</strong>
-      ${index < 3 ? '<span class="thank-rank-heart" aria-label="Thank You 之星">♥</span>' : ""}
+      ${index < 3 ? (interactive ? `<button type="button" class="thank-rank-heart" data-thank-insight-id="${Number(item.id)}" aria-label="查看${escapeHtml(item.display_name || "")}的感谢分析" aria-controls="thankInsightPopover" aria-expanded="false" title="点击查看感谢关键词文字墙">♥</button>` : '<span class="thank-rank-heart" aria-label="Thank You 之星">♥</span>') : ""}
       <span>${Number(item.thanks || 0)} 次</span>
     </div>`).join("");
 }
@@ -3908,14 +3918,30 @@ function openMeetingCreateModal() {
   if (!modal || !form) return;
   form.reset();
   form.elements.meeting_date.value = state.selectedMeetingDate || iso(new Date());
+  $("#meetingParticipantList").innerHTML = state.meetingUsers.filter((user) => user.active !== 0).map((user) => `<label data-participant-search="${escapeHtml(`${user.display_name} ${user.username || ''}`.toLowerCase())}"><input type="checkbox" name="participant_user_ids" value="${Number(user.id)}" checked /><span>${escapeHtml(user.display_name)}${user.username ? `<small>${escapeHtml(user.username)}</small>` : ''}</span></label>`).join("") || '<p>当前团队暂无可选参会人</p>';
+  updateMeetingParticipantCount();
   modal.classList.remove("hidden");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
   form.elements.title.focus();
 }
 
+function updateMeetingParticipantCount() {
+  const list = $("#meetingParticipantList");
+  if (!list) return;
+  const count = list.querySelectorAll('input:checked').length;
+  $("#meetingParticipantCount").textContent = `已选 ${count} 位参会人`;
+  const submit = $("#meetingCreateForm button[type='submit']");
+  if (submit) submit.disabled = !count;
+}
+
 async function createMeetingFromForm(form) {
-  const response = await api("/api/meetings", { method: "POST", body: JSON.stringify(formData(form)) });
+  const payload = formData(form);
+  if (form.id === "meetingCreateForm") {
+    payload.participant_user_ids = $$("#meetingParticipantList input:checked").map((input) => Number(input.value));
+    if (!payload.participant_user_ids.length) throw new Error("请至少选择一位参会人");
+  }
+  const response = await api("/api/meetings", { method: "POST", body: JSON.stringify(payload) });
   state.meetings = response.meetings || state.meetings;
   state.selectedMeetingId = response.meeting_id;
   const created = state.meetings.find((meeting) => Number(meeting.id) === Number(response.meeting_id));
@@ -3958,9 +3984,10 @@ function openMeetingEmailModal(meetingId) {
 }
 
 function attendanceSummary(meeting) {
-  const records = meeting.attendance || [];
+  const participants = new Set(meetingParticipants(meeting, state.meetingUsers).map((user) => Number(user.id)));
+  const records = (meeting.attendance || []).filter((record) => participants.has(Number(record.user_id)));
   const count = (status) => records.filter((item) => item.status === status).length;
-  const total = state.meetingUsers.filter((user) => user.active !== 0).length;
+  const total = meetingParticipants(meeting, state.meetingUsers).length;
   return { total, signed: records.length, present: count("present"), late: count("late"), leave: count("leave"), absent: count("absent") };
 }
 
@@ -3999,7 +4026,7 @@ function renderTopicBoard(meeting) {
 
 function renderAttendance(meeting) {
   const map = new Map((meeting.attendance || []).map((item) => [Number(item.user_id), item]));
-  const attendanceUsers = state.meetingUsers;
+  const attendanceUsers = meetingParticipants(meeting, state.meetingUsers);
   if (!attendanceUsers.length) return "<p>当前团队暂无成员账号</p>";
   const statuses = [
     ["present", "出席"],
@@ -4030,8 +4057,9 @@ function renderAttendance(meeting) {
 function buildAttendanceDashboard(meetings = []) {
   const attendanceUsers = state.meetingUsers;
   const activeUsers = attendanceUsers.filter((user) => user.active !== 0);
-  const totalMeetings = meetings.length;
   return activeUsers.map((user) => {
+    const invitedMeetings = meetings.filter((meeting) => meetingParticipants(meeting, [user]).length);
+    const totalMeetings = invitedMeetings.length;
     const stats = {
       user,
       total: totalMeetings,
@@ -4044,7 +4072,7 @@ function buildAttendanceDashboard(meetings = []) {
       donationReceived: 0,
       donationPending: 0,
     };
-    meetings.forEach((meeting) => {
+    invitedMeetings.forEach((meeting) => {
       const record = (meeting.attendance || []).find((item) => Number(item.user_id) === Number(user.id));
       if (!record) {
         stats.unsigned += 1;
@@ -5026,6 +5054,7 @@ function renderThankPeriodControls() {
 }
 
 async function loadThanks() {
+  thanksInsights.close();
   renderThankPeriodControls();
   const [votes, dashboard] = await Promise.all([
     api(`/api/thank-you?${thankPeriodQuery()}`),
@@ -5033,7 +5062,9 @@ async function loadThanks() {
   ]);
   state.thankUsers = votes.users || state.thankUsers;
   populateSelects();
-  $("#thankStars").innerHTML = renderThankRank(dashboard.stars || []);
+  const stars = dashboard.stars || [];
+  $("#thankStatistics").innerHTML = `<div><strong>${stars.reduce((total, person) => total + Number(person.thanks || 0), 0)}</strong><span>本级收到感谢</span></div><div><strong>${stars.length}</strong><span>获感谢人数</span></div><div><strong>${Math.min(3, stars.length)}</strong><span>TOP3 内容分析</span></div>`;
+  $("#thankStars").innerHTML = renderThankRank(stars, true);
   $("#thankList").innerHTML = votes.votes.length ? votes.votes.map((vote) => `
     <div class="item thank-item">
       <div class="thank-item-head">
@@ -6586,13 +6617,34 @@ function bindEvents() {
   });
   bindForm("#manualBackupForm", () => api("/api/backups", { method: "POST", body: "{}" }));
 
+  $("#meetingCreateForm")?.addEventListener("change", updateMeetingParticipantCount);
+  $("#meetingParticipantSearch")?.addEventListener("input", (event) => {
+    const keyword = event.target.value.trim().toLowerCase();
+    $$("#meetingParticipantList label").forEach((label) => { label.hidden = !label.dataset.participantSearch.includes(keyword); });
+  });
+  $("#meetingCreateForm")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-participant-select]");
+    if (!button) return;
+    $$("#meetingParticipantList input").forEach((input) => { input.checked = button.dataset.participantSelect === "all"; });
+    updateMeetingParticipantCount();
+  });
+
   [$("#meetingForm"), $("#meetingCreateForm")].filter(Boolean).forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      const form = event.currentTarget;
+      if (form.dataset.submitting) return;
+      form.dataset.submitting = "true";
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
       try {
-        await createMeetingFromForm(event.currentTarget);
+        await createMeetingFromForm(form);
       } catch (error) {
         toast(error.message);
+      } finally {
+        delete form.dataset.submitting;
+        if (form.id === "meetingCreateForm") updateMeetingParticipantCount();
+        else if (submit) submit.disabled = false;
       }
     });
   });
@@ -8048,6 +8100,7 @@ async function boot() {
   } catch (error) {
     if (error.name === "AbortError") return;
     if (state.user) { toast(error.message); return; }
+    thanksInsights.close();
     state.user = null;
     state.permissions = {};
     state.publicSettings = {};

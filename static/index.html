@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="/meeting-workspace.css?v=20260907" />
     <link rel="stylesheet" href="/links-workspace.css?v=20260908" />
     <link rel="stylesheet" href="/dashboard-details.css?v=20260915" />
-    <link rel="stylesheet" href="/responsive-desktop.css?v=20261007-all-pages-responsive" />
+    <link rel="stylesheet" href="/responsive-desktop.css?v=20261007-six-members-participants" />
   </head>
   <body>
     <div class="app-shell">
@@ -385,6 +385,13 @@
                 <label>开始时间<input name="start_time" type="time" /></label>
                 <label class="meeting-create-title-field">会议标题<input name="title" placeholder="默认使用系统会议标题" /></label>
                 <label class="meeting-create-summary-field">会议说明<textarea name="summary" placeholder="会议目标或需要提前准备的内容"></textarea></label>
+                <fieldset class="meeting-participant-picker">
+                  <legend>参会人</legend>
+                  <p>请选择当前团队的参会人，签到及出勤统计按本场名单计算。</p>
+                  <div class="meeting-participant-tools"><input id="meetingParticipantSearch" type="search" placeholder="搜索姓名或账号" aria-label="搜索参会人" /><button type="button" class="secondary" data-participant-select="all">全选</button><button type="button" class="secondary" data-participant-select="none">清空</button></div>
+                  <div id="meetingParticipantList" class="meeting-participant-list"></div>
+                  <small id="meetingParticipantCount" aria-live="polite"></small>
+                </fieldset>
                 <div class="modal-actions meeting-create-actions">
                   <button class="secondary" type="button" data-meeting-create-close>取消</button>
                   <button type="submit">创建并选择议题</button>
@@ -1212,6 +1219,11 @@
             </section>
           </section>
 
+          <div id="thankInsightPopover" class="thank-insight-popover" popover="auto" role="dialog" aria-labelledby="thankInsightTitle">
+            <header><h3 id="thankInsightTitle">Thank You 感谢分析</h3><button type="button" class="secondary" data-thank-insight-close aria-label="关闭感谢分析">×</button></header>
+            <div id="thankInsightContent"></div>
+          </div>
+
           <section id="thanks" class="page">
             <section class="panel">
               <h2>Thank You</h2>
@@ -1231,6 +1243,7 @@
                   </div>
                 </div>
                 <div id="thankPeriodControls" class="thank-period-controls"></div>
+                <div id="thankStatistics" class="thank-statistics" aria-label="感谢统计"></div>
                 <div id="thankStars" class="rank-list"></div>
               </section>
               <section class="panel">
@@ -1420,6 +1433,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260817-team-scope-v1"></script>
+    <script type="module" src="/app.js?v=20261007-participants-thanks-wall"></script>
   </body>
 </html>

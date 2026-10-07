@@ -1,0 +1,21 @@
+[Unit]
+Description=Team Loop collaboration service
+After=network.target
+
+[Service]
+Type=simple
+User=teamloop
+Group=teamloop
+WorkingDirectory=/opt/teamloop
+Environment=TEAM_LOOP_ENV=production
+Environment=TEAM_LOOP_TRUST_PROXY=1
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/teamloop.env
+ExecStart=/usr/bin/python3 /opt/teamloop/server.py --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

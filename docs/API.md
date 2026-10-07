@@ -251,3 +251,11 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 6. 错误是否为用户可理解的中文；
 7. 是否需要软删除、回收站和恢复能力；
 8. 是否需要更新本文件及冒烟测试。
+
+### 创建会议的参会人
+
+`POST /api/meetings` 可传 `participant_user_ids`（非空正整数数组）。服务端去重并校验所有账号处于启用状态且直属当前选中组织，拒绝空名单、无效 ID、其他团队或下级团队账号。响应中的每场会议包含 `participant_user_ids`；省略参数的历史/批量调用返回 `null`，沿用当前团队签到口径。`POST /api/meetings/{id}/attendance` 拒绝指定名单外的账号，创建操作仍受 `meetings.create` 控制，签到仍为管理员操作。
+
+### Thank You TOP3 内容分析
+
+`GET /api/thank-you/insights?from=YYYY-MM-DD&to=YYYY-MM-DD&receiver_id=ID` 遵循 `thanks.view` 和组织访问检查，只返回当前组织直属、参与感谢榜单的 TOP3 接收者。发送者范围为当前及祖先组织，和榜单口径一致；日期范围不超过一年。`receiver_id` 可省略以读取 TOP3，指定非 TOP3 或其他团队成员返回 404。报告包含 `words`（关键词及提及记录数）、`thanks`、`summary`、原文 `examples`、UTC `generated_at` 和分析方法。只复用与当前原始记录指纹一致的缓存，不返回过期文字墙。

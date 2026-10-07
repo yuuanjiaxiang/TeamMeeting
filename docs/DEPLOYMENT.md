@@ -1,4 +1,6 @@
-# Windows 部署与运维
+# Windows 部署与运维（兼容）
+
+默认部署平台为 Linux，见 [Linux 部署与后台运行](LINUX_DEPLOYMENT.md)。本文保留 Windows 脚本的兼容说明。
 
 发布快照必须同时包含 `server.py` 与 `team_loop/` 包。仓库自带的 `deploy.ps1` 已处理该目录；手工复制部署时不能只复制入口文件。
 

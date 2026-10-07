@@ -1,3 +1,4 @@
+import { meetingParticipants } from "./meeting-participants.js";
 import { buildMinutesDocument, meetingOverview, plannedAgendaTime, isSystemThanks } from "./meeting-minutes.js";
 
 export function createMeetingWorkspace({ state, api, escapeHtml: e, toast, organizationPath, canOperate, isAdminView,
@@ -123,7 +124,7 @@ export function createMeetingWorkspace({ state, api, escapeHtml: e, toast, organ
       <select id="mwDownloadFormat" aria-label="纪要下载格式"><option value="html">HTML 文档</option><option value="md">Markdown</option></select><button class="secondary" type="button" data-mw-export="download" disabled>下载</button>
       <button type="button" data-mw-export="email" disabled>生成邮件</button></div></div>
       <p id="mwDocumentState" role="status"></p><div id="mwDocumentPreview" class="mw-document-paper"></div>` : ""}
-    ${panel === "attendance" ? `<section class="mw-attendance">${renderAttendanceSummary(meeting)}<div class="mw-attendance-people">${state.meetingUsers.map((user) => {
+    ${panel === "attendance" ? `<section class="mw-attendance">${renderAttendanceSummary(meeting)}<div class="mw-attendance-people">${meetingParticipants(meeting, state.meetingUsers).map((user) => {
       const record = (meeting.attendance || []).find((row) => Number(row.user_id) === Number(user.id));
       return `<div><span>${e(user.display_name)}</span><span class="mw-attendance-state ${record?.status || ""}">${({ present: "出席", late: "迟到", leave: "请假", absent: "缺席" })[record?.status] || "未签到"}</span></div>`;
     }).join("") || '<p class="mw-empty">当前团队暂无参会成员</p>'}</div><details class="mw-month-attendance"><summary>本月参会统计</summary>${renderAttendanceDashboard(state.meetings)}</details></section>` : ""}

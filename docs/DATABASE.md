@@ -204,3 +204,11 @@ python scripts\db_snapshot.py `
 - 结束时执行外键检查和 `quick_check`。
 
 灰度发布会重建灰度数据库，因此正确顺序是“部署灰度 -> 生成 Mock -> 体验与压测”。不要把 Mock 灰度库作为生产备份或组织迁移数据源。
+
+## 单场会议参会人名单
+
+`meetings.participant_user_ids` 为可空 `TEXT`，保存经过当前团队账号验证的去重 ID JSON 数组。由 `ensure_column()` 幂等添加，现有会议为 `NULL`，继续按当前团队成员统计。新建会议提交指定名单时必须非空；名单随会议持久保存，不写入签到记录冒充出席。名单不会改变组织可见范围或议题负责人选择规则。
+
+## Thank You 内容分析缓存
+
+`thank_you_insights` 按 `(org_unit_id, period_from, period_to, receiver_id)` 保存 TOP3 月度/年度分析。`fingerprint` 基于经过组织/参与范围过滤的原始感谢内容和接收者名称；`report_json` 保存关键词、频次、摘要和原文示例，`generated_at` 为 UTC 时间。原始记录修改、删除、人员调组或参与范围改变后，只读取指纹一致的报告；不一致时即时重新分析。周任务在一个事务中刷新所有有效组织的月度和年度报告，数据库备份/回滚会一并包含缓存。

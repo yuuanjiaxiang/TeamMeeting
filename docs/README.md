@@ -1,5 +1,7 @@
 # Team Loop 文档导航
 
+默认采用 [Linux 部署与后台运行](LINUX_DEPLOYMENT.md)；[Windows 运维](DEPLOYMENT.md) 为兼容方案。
+
 按使用角色选择文档：
 
 | 读者 | 建议阅读顺序 |

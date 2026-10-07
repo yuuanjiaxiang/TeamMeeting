@@ -5,7 +5,7 @@ description: Maintain, extend, debug, test, document, and deploy the Team Loop P
 
 # Team Loop Maintainer
 
-Work from the repository root. Preserve the dependency-free Python standard-library backend, vanilla frontend, SQLite data model, Windows deployment flow, and existing Chinese product language unless the user explicitly approves an architectural change.
+Work from the repository root. Preserve the dependency-free Python standard-library backend, vanilla frontend, SQLite data model, Linux background deployment flow and Windows compatibility, and existing Chinese product language unless the user explicitly approves an architectural change.
 
 ## Start every task
 
@@ -28,6 +28,8 @@ Use these references conditionally:
 ## Implement changes
 
 ### Product and UI
+
+- Use 1920×1080 at 100% browser zoom as the desktop baseline. Member cards show six columns, with equal heights and aligned actions within each row; narrower CSS viewports reflow naturally. Do not use global zoom or clip long content.
 
 - Keep operational pages compact, scannable, and task-focused.
 - Prefer modal editing for long forms, details, and destructive confirmation.
@@ -90,7 +92,7 @@ Use these references conditionally:
 - Keep Team Moments isolated under the `moments` module and the exact selected organization. Store image bytes in `team_moment_images`, validate MIME signatures and limits, do not inherit ancestor moments, and expose every retained image through the four-tile gallery and keyboard/mobile lightbox. Include the server-validated selected organization in protected image URLs because native `<img>` requests do not send `X-Team-Org-Path`; revalidate that query value against the current session before serving bytes. Version those URLs and return no-store headers so database restore or gray/production switching cannot reuse stale image IDs. Cover six-image create/read/update/delete/restore, parent-admin child-team rendering, exact-team scope, and cache headers with `scripts/team_moments_smoke_test.py` plus `scripts/organization_scope_smoke_test.py`.
 - Keep local AI knowledge-base dependencies in a separate service boundary. Reuse Team Loop identity and organization claims, enforce vector-store payload filters before retrieval, require source citations, and follow `docs/KNOWLEDGE_BASE.md` before adding model or vector-database dependencies.
 - Keep the full discussion Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
-- Keep Thank You weekly limits and red/black independent scoring semantics.
+- Keep Thank You weekly limits and red/black independent scoring semantics. TOP3 word walls live in `team_loop/thanks_insights.py` / `static/thanks-insights.js`, use the ranking scope and source-grounded keywords, and refresh through the Linux weekly timer. Run `scripts/thanks_insights_smoke_test.py`; never reuse stale identity/organization/period popovers.
 - Enforce black-score summary/detail visibility in backend responses; frontend hiding alone is insufficient.
 - Keep guest access read-only and entirely driven by the reserved `guest` permission template.
 - Preserve persistent session revocation, login throttling, optimistic versions, and atomic shift-conflict checks when touching shared write paths.
@@ -148,6 +150,8 @@ Update documentation in the same change when behavior, commands, permissions, AP
 Keep `README.md` concise and use it as the entry point rather than duplicating all details.
 
 ## Release
+
+Linux is the default runtime. Use the `.sh` wrappers / `scripts/linux_service.py` for background lifecycle management and isolated gray releases; preserve Windows scripts as compatibility entry points. Read `docs/LINUX_DEPLOYMENT.md` and run `python3 scripts/linux_service_smoke_test.py` for runtime changes. Do not start test instances against production databases.
 
 Meeting workspace changes must follow `docs/MEETING_WORKSPACE.md`. Keep rendering and document export in the dedicated meeting modules, preserve organization and read-only guards, and run `node scripts/meeting_minutes_test.mjs`. Do not alter remote-customized SSO while changing meetings.
 

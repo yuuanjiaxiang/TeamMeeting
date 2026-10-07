@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Team Loop Thank You analysis (optional)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 Asia/Shanghai
+Persistent=true
+Unit=team-loop-thanks-analysis.service
+
+[Install]
+WantedBy=timers.target
